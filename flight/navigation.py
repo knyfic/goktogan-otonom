@@ -1,0 +1,345 @@
+import math
+import math
+import time
+
+from pymavlink import mavutil
+
+from models import VehiclePosition
+
+
+class Navigation:
+    """ArduPilot MAVLink adapter. DISARM operasyonu içermez."""
+
+    def __init__(self, connection_string: str):
+        self.master = mavutil.mavlink_connection(connection_string)
+        self.master.wait_heartbeat(timeout=30)
+        self.system_id = self.master.target_system
+        self.component_id = self.master.target_component
+        self._position = VehiclePosition()
+        self.home_lat = None
+        self.home_lon = None
+
+    # ------------------------------------------------------------------ #
+    #  Pozisyon
+    # ------------------------------------------------------------------ #
+
+    def wait_for_position(self, timeout: float = 15.0) -> VehiclePosition:
+        """Geçerli bir GPS konumu gelene kadar bekler."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            msg = self.master.recv_match(
+                type="GLOBAL_POSITION_INT",
+                blocking=True,
+                timeout=1,
+            )
+            if msg is None:
+                continue
+            self._update_position(msg)
+            if self._position.latitude != 0.0:
+                return self._position
+        raise TimeoutError("GLOBAL_POSITION_INT alınamadı.")
+
+    def _update_position(self, msg) -> None:
+        self._position.latitude = msg.lat / 1e7
+        self._position.longitude = msg.lon / 1e7
+        self._position.relative_altitude = msg.relative_alt / 1000.0
+        self._position.heading_deg = msg.hdg / 100.0
+
+        if self.home_lat is None and self._position.latitude != 0.0:
+            self.home_lat = self._position.latitude
+            self.home_lon = self._position.longitude
+
+    def position(self) -> VehiclePosition:
+        """
+        Son bilinen pozisyonu döndürür.
+        Yeni MAVLink mesajı varsa önce onu işler (non-blocking).
+        """
+        msg = self.master.recv_match(
+            type="GLOBAL_POSITION_INT",
+            blocking=False,
+        )
+        if msg is not None:
+            self._update_position(msg)
+        return self._position
+
+    def fresh_position(self, timeout: float = 1.0) -> VehiclePosition:
+        """
+        Yeni bir GLOBAL_POSITION_INT mesajını bekler.
+        Kritik komutlardan önce (goto_global, set_relative_altitude) çağrılır.
+        timeout içinde gelmezse son bilinen pozisyonu döndürür.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            msg = self.master.recv_match(
+                type="GLOBAL_POSITION_INT",
+                blocking=True,
+                timeout=0.1,
+            )
+            if msg is not None:
+                self._update_position(msg)
+                return self._position
+        return self._position
+
+    # ------------------------------------------------------------------ #
+    #  Mod & Arm
+    # ------------------------------------------------------------------ #
+
+    def set_mode(self, mode: str) -> None:
+        mapping = self.master.mode_mapping()
+        if mode not in mapping:
+            raise RuntimeError(f"ArduPilot mode desteklenmiyor: {mode}")
+        self.master.set_mode(mapping[mode])
+
+    def arm(self) -> None:
+        self.master.arducopter_arm()
+        self.master.motors_armed_wait()
+
+    # ------------------------------------------------------------------ #
+    #  Uçuş komutları
+    # ------------------------------------------------------------------ #
+
+    def takeoff(self, altitude_m: float) -> None:
+        self.set_mode("GUIDED")
+        if not self.master.motors_armed():
+            self.arm()
+
+        self.master.mav.command_long_send(
+            self.system_id,
+            self.component_id,
+            mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+            0,
+            0, 0, 0, 0, 0, 0,
+            altitude_m,
+        )
+
+    def set_max_speed(self, horizontal_mps: float, vertical_mps: float | None = None) -> None:
+        """
+        ArduPilot GUIDED mod hız parametrelerini günder.
+        MAV_CMD_DO_CHANGE_SPEED ile yatay hız sınırı belirlenir.
+        speed_type=1 = ground speed.
+        """
+        self.master.mav.command_long_send(
+            self.system_id,
+            self.component_id,
+            mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+            0,
+            1,               # speed_type: 1=ground speed
+            horizontal_mps,  # hedef hız
+            -1,              # throttle: -1=değiştirme
+            0, 0, 0, 0,
+        )
+        if vertical_mps is not None:
+            # WPNAV_SPEED_UP / DOWN parametreleri üzerinden ayarlamak için
+            # param set kullanırız
+            self.master.mav.param_set_send(
+                self.system_id,
+                self.component_id,
+                b"WPNAV_SPEED_UP",
+                vertical_mps * 100,  # cm/s
+                mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+            )
+            self.master.mav.param_set_send(
+                self.system_id,
+                self.component_id,
+                b"WPNAV_SPEED_DN",
+                vertical_mps * 100,
+                mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+            )
+
+    def _ensure_guided(self) -> None:
+        """Zaten GUIDED modundaysa tekrar komut gönderme."""
+        try:
+            mode_id = self.master.mode_mapping().get("GUIDED")
+            if mode_id is not None:
+                # Mevcut modu kontrol et
+                hb = self.master.recv_match(type="HEARTBEAT", blocking=False)
+                if hb is not None and hb.custom_mode == mode_id:
+                    return
+        except Exception:
+            pass
+        self.set_mode("GUIDED")
+
+    def goto_global(self, latitude: float, longitude: float, altitude_m: float) -> None:
+        """
+        Belirtilen GPS konumuna ve irtifaya git.
+        MAVLink SET_POSITION_TARGET_GLOBAL_INT — yalnızca pozisyon aktif.
+        type_mask 0b0000111111111000 = sadece lat/lon/alt geçerli,
+        hız/ivme/yaw yoksayılır.
+        """
+        self._ensure_guided()
+        type_mask = 0b0000111111111000
+
+        self.master.mav.set_position_target_global_int_send(
+            int(time.time() * 1000) & 0xFFFFFFFF,
+            self.system_id,
+            self.component_id,
+            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+            type_mask,
+            int(latitude * 1e7),
+            int(longitude * 1e7),
+            altitude_m,
+            0, 0, 0,
+            0, 0, 0,
+            0, 0,
+        )
+
+    def goto_body_offset(self, forward_m: float, right_m: float) -> None:
+        """
+        Aracın gövde ekseninde ileri/sağ yönünde pozisyon offseti gönderir.
+        MAVLink SET_POSITION_TARGET_LOCAL_NED, BODY_OFFSET_NED frame.
+
+        type_mask açıklaması (bitleri 1 yapmak = o alanı yoksay):
+          bit 0: vx yoksay
+          bit 1: vy yoksay
+          bit 2: vz yoksay
+          bit 3: ax yoksay
+          bit 4: ay yoksay
+          bit 5: az yoksay
+          bit 6: force yoksay
+          bit 7: yaw yoksay
+          bit 8: yaw_rate yoksay
+          bit 9: z yoksay  ← z=0 ile irtifayı korumak için 1 yapıyoruz
+          bit 10: x aktif (0)
+          bit 11: y aktif (0)
+        Sadece x ve y pozisyonu aktif; z yoksayılır (mevcut irtifada kal).
+        """
+        self._ensure_guided()
+        type_mask = (
+            (1 << 0)   # vx yoksay
+            | (1 << 1) # vy yoksay
+            | (1 << 2) # vz yoksay
+            | (1 << 3) # ax yoksay
+            | (1 << 4) # ay yoksay
+            | (1 << 5) # az yoksay
+            | (1 << 6) # force yoksay
+            | (1 << 7) # yaw yoksay
+            | (1 << 8) # yaw_rate yoksay
+            | (1 << 9) # z yoksay — irtifayı mevcut seviyede tut
+            # bit 10 (x) = 0 → aktif
+            # bit 11 (y) = 0 → aktif
+        )
+
+        self.master.mav.set_position_target_local_ned_send(
+            int(time.time() * 1000) & 0xFFFFFFFF,
+            self.system_id,
+            self.component_id,
+            mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
+            type_mask,
+            forward_m,  # x = ileri
+            right_m,    # y = sağ
+            0.0,        # z = yoksayılır
+            0, 0, 0,    # vx, vy, vz
+            0, 0, 0,    # ax, ay, az
+            0, 0,       # yaw, yaw_rate
+        )
+
+    def set_relative_altitude(self, altitude_m: float) -> None:
+        """
+        Mevcut yatay konum ve yaw'ı koruyarak yeni irtifaya git.
+        Güncel GPS konumunu alır; geçersizse komutu atlar.
+
+        Yaw sabitlenir: iniş sırasında drone burnunu döndürmez.
+        type_mask'te yaw alanı aktif bırakılır ve mevcut heading verilir.
+        """
+        pos = self.position()   # non-blocking — fresh_position gibi blocking değil
+        if pos.latitude == 0.0 and pos.longitude == 0.0:
+            return
+
+        self._ensure_guided()
+
+        # type_mask: sadece lat/lon/alt + yaw aktif; hız/ivme yoksayılır
+        # bit 10 (yaw) = 0 → aktif (mevcut heading'i koru)
+        type_mask = (
+            (1 << 3)   # vx yoksay
+            | (1 << 4) # vy yoksay
+            | (1 << 5) # vz yoksay
+            | (1 << 6) # ax yoksay
+            | (1 << 7) # ay yoksay
+            | (1 << 8) # az yoksay
+            # bit 0,1,2 (x,y,z pos) = 0 → aktif
+            # bit 10 (yaw) = 0 → aktif, mevcut değer verilecek
+            # bit 11 (yaw_rate) = 1 → yoksay
+            | (1 << 11)
+        )
+
+        yaw_rad = math.radians(pos.heading_deg)
+
+        self.master.mav.set_position_target_global_int_send(
+            int(time.time() * 1000) & 0xFFFFFFFF,
+            self.system_id,
+            self.component_id,
+            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+            type_mask,
+            int(pos.latitude * 1e7),
+            int(pos.longitude * 1e7),
+            altitude_m,
+            0, 0, 0,    # vx, vy, vz
+            0, 0, 0,    # ax, ay, az
+            yaw_rad,    # yaw — mevcut heading'i koru
+            0,          # yaw_rate
+        )
+
+    def rtl(self) -> None:
+        """Return To Launch. DISARM komutu içermez."""
+        self.master.mav.command_long_send(
+            self.system_id,
+            self.component_id,
+            mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH,
+            0,
+            0, 0, 0, 0, 0, 0, 0,
+        )
+
+    # ------------------------------------------------------------------ #
+    #  Bekleme yardımcıları
+    # ------------------------------------------------------------------ #
+
+    def wait_until_altitude(
+        self, target: float, tolerance: float, timeout: float
+    ) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if abs(self.position().relative_altitude - target) <= tolerance:
+                return True
+            time.sleep(0.1)
+        return False
+
+    def wait_until_near_global(
+        self, lat: float, lon: float, tolerance_m: float, timeout: float
+    ) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            pos = self.position()
+            if haversine_m(pos.latitude, pos.longitude, lat, lon) <= tolerance_m:
+                return True
+            time.sleep(0.2)
+        return False
+
+    def wait_for_rtl_completion(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            pos = self.position()
+            if self.home_lat is not None and self.home_lon is not None:
+                d = haversine_m(
+                    pos.latitude, pos.longitude,
+                    self.home_lat, self.home_lon,
+                )
+                if d < 2.0 and pos.relative_altitude < 1.5:
+                    return True
+            time.sleep(0.5)
+        return False
+
+
+# ------------------------------------------------------------------ #
+
+def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """İki GPS noktası arasındaki mesafeyi metre cinsinden hesaplar."""
+    radius = 6378137.0
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dp / 2) ** 2
+        + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    )
+    return 2 * radius * math.asin(math.sqrt(a))

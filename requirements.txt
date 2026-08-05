@@ -1,0 +1,4 @@
+numpy>=1.26
+opencv-python>=4.9
+pymavlink>=2.4.41
+pytest>=8.0

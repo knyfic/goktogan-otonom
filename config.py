@@ -1,0 +1,120 @@
+from dataclasses import dataclass
+
+MAVLINK_CONNECTION = "udp:127.0.0.1:14550"
+
+CAMERA_TOPIC = "/world/iris_runway/model/iris_with_gimbal/model/gimbal/link/pitch_link/sensor/camera/image"
+
+GAZEBO_MSGS_MODULE = "gz.msgs"
+GAZEBO_TRANSPORT_MODULE = "gz.transport"
+
+TAKEOFF_ALTITUDE = 8.0
+TARGET_APPROACH_ALTITUDE = 4.0
+
+# Yük bırakma: kademeli iniş sonrası son hizalama + bırakma irtifası
+PAYLOAD_RELEASE_ALTITUDE = 2.0
+# Görev 2: küçük yükler yüksekten görülmez — arama bu irtifada başlar
+PAYLOAD_SEARCH_ALTITUDE = 2.0
+# Her kademede: yatay ortala → bu kadar metre in → tekrar ortala ...
+ALIGNMENT_DESCENT_STEP_M = 2.0
+
+# Geriye dönük uyumluluk
+FINAL_TARGET_ALTITUDE = PAYLOAD_RELEASE_ALTITUDE
+
+# Yük alımı: İHA tam yere (0 m) inmeli çünkü mekanizma kısa
+PAYLOAD_CONTACT_ALTITUDE = 0.0
+
+# Yük doğrulama için yükselme irtifası
+PAYLOAD_VERIFY_ALTITUDE = 2.0
+
+# Yük alımı hassas kademeli iniş adım büyüklüğü (metre)
+# 10cm'lik yük için kamera çok yakından bakmalı — küçük adımlarla in
+PAYLOAD_DESCENT_STEP_M = 0.4
+
+# Hizalama döngüsü: pickup esnasında piksel tolerans eşiği
+# Normal hizalamadan daha sıkı — yük çok küçük
+PAYLOAD_PIXEL_TOLERANCE_PX = 15.0
+
+# Her hizalama basamağında maksimum bekleme süresi (saniye).
+# Bu süre dolunca zorla bir basamak aşağı inilir — daha yakında daha iyi görülür.
+PAYLOAD_ALIGN_TIMEOUT_S = 4.0
+
+# Görev 2 navigasyon sonrası hedef merkezleme zaman aşımı (sn)
+ALIGN_ON_TARGET_TIMEOUT_S = 20.0
+
+# Servo/mekanik mekanizmanın çalışması için bekleme süresi (saniye)
+# Gerçek donanımda servo hareketi bu kadar sürer; simülasyonda da beklenir
+PAYLOAD_SERVO_WAIT_S = 3.0
+
+FIELD_WIDTH = 30.0
+FIELD_LENGTH = 100.0
+
+HEXAGON_SIDE_LENGTH = 2.0
+TRIANGLE_SIDE_LENGTH = 1.0
+
+PAYLOAD_WIDTH = 0.20
+PAYLOAD_HEIGHT = 0.10
+
+MAX_PICKUP_ATTEMPTS = 5
+
+# Payload arama: beklenen boyutun bu katını aşan tespitler payload değil hedeftir
+# Payload=10cm, Hedef=1m → 10x fark; 3x tolerans marjı güvenli bir eşik
+MAX_PAYLOAD_SIZE_FACTOR = 3.0
+
+SEARCH_TIMEOUT = 12.0
+TARGET_LOST_TIMEOUT = 2.0
+PAYLOAD_SEARCH_TIMEOUT = 20.0
+
+CAMERA_WIDTH_PX = 1280
+CAMERA_HEIGHT_PX = 720
+CAMERA_HORIZONTAL_FOV_DEG = 78.0
+CAMERA_VERTICAL_FOV_DEG = 60.0
+
+MIN_TARGET_AREA_PX = 250.0
+MIN_PAYLOAD_AREA_PX = 20.0
+DETECTION_HISTORY_SIZE = 5
+MIN_STABLE_DETECTIONS = 3
+MIN_DETECTION_CONFIDENCE = 0.55
+
+SCAN_LINE_SPACING = 8.0
+SEARCH_MARGIN = 2.0
+
+# Arama sırası yatay hız
+SEARCH_SPEED_MPS = 3.0
+# Hedefe yaklaşma hızı (kaba)
+APPROACH_SPEED_MPS = 2.0
+# Hizalama sırası yatay hız (ince)
+ALIGN_SPEED_MPS = 0.8
+# İrtifa değişim hızı
+VERTICAL_SPEED_MPS = 1.0
+
+# Eski isimler — geriye dönük uyumluluk
+MAX_HORIZONTAL_SPEED_MPS = 4.0
+COARSE_APPROACH_SPEED_MPS = 3.0
+FINE_APPROACH_SPEED_MPS = 1.0
+POSITION_TOLERANCE_M = 0.35
+ALTITUDE_TOLERANCE_M = 0.20
+PIXEL_ALIGNMENT_TOLERANCE_PX = 30.0
+
+# Hizalama komutu gönderme aralığı (saniye)
+# Her step'te değil, bu aralıkta bir goto_body_offset gönderilir.
+ALIGN_CMD_INTERVAL_S = 0.4
+
+# Kademeli iniş adım büyüklüğü (hedef bırakma hizalaması)
+ALIGNMENT_DESCENT_STEP_M = 2.0
+
+# GPS kalite biriktirme: hizalama döngüsünde "hizalı" anında GPS + confidence
+# kaydedilir; en az bu kadar örnek birikmeden GPS kesinleşmez.
+GPS_CANDIDATE_MIN_COUNT = 3
+
+# Zaman bazlı hedef kilidi: ilk görülen hedef bu süre boyunca görüntede kalırsa
+# 1. hedef olarak kilitlenir (saniye).
+TARGET_LOCK_DURATION_S = 1.0
+
+ENABLE_LIVE_PREVIEW = True
+PREVIEW_WINDOW_NAME = "İHA Kamera"
+
+CONTROL_RATE_HZ = 10.0
+CAMERA_TIMEOUT = 3.0
+STATE_TIMEOUT = 120.0
+TAKEOFF_TIMEOUT = 45.0
+RTL_TIMEOUT = 120.0

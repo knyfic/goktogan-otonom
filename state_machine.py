@@ -1,0 +1,1645 @@
+"""
+Görev State Machine
+
+Görev 1: İki hedefi (mavi altıgen + kırmızı üçgen) bul, GPS kaydet, yük bırak.
+Görev 2: İlk hedefin GPS'ine dön, bırakılan yükü bul, hizala, al, doğrula.
+Görev 3: RTL.
+
+Tasarım kuralları:
+- run() döngüsü sadece _tick() çağırır ve GUI'yi besler.
+- _pump_preview() YALNIZCA run() içinden, _tick() SONRASINDA çağrılır.
+- Hiçbir state handler kendi içinde camera.show() çağırmaz;
+  bunun yerine self._display_frame / self._display_overlay set eder.
+  _pump_preview() bu frame'i gösterir.
+- Non-blocking: hiçbir state handler uzun süre bloklamaz.
+  Kalkış ve RTL gibi zorunlu bekleme gerektiren durumlar
+  kendi mini döngüsünde _pump_preview() çağırır.
+"""
+
+import logging
+import time
+
+import cv2
+import numpy as np
+
+from config import (
+    ALIGN_CMD_INTERVAL_S,
+    ALIGN_SPEED_MPS,
+    ALIGN_ON_TARGET_TIMEOUT_S,
+    ALTITUDE_TOLERANCE_M,
+    APPROACH_SPEED_MPS,
+    CAMERA_HEIGHT_PX,
+    CAMERA_HORIZONTAL_FOV_DEG,
+    CAMERA_WIDTH_PX,
+    CAMERA_VERTICAL_FOV_DEG,
+    FIELD_LENGTH,
+    FIELD_WIDTH,
+    ALIGNMENT_DESCENT_STEP_M,
+    FINAL_TARGET_ALTITUDE,
+    GPS_CANDIDATE_MIN_COUNT,
+    MAX_PICKUP_ATTEMPTS,
+    MAX_PAYLOAD_SIZE_FACTOR,
+    PAYLOAD_ALIGN_TIMEOUT_S,
+    PAYLOAD_CONTACT_ALTITUDE,
+    PAYLOAD_DESCENT_STEP_M,
+    PAYLOAD_HEIGHT,
+    PAYLOAD_PIXEL_TOLERANCE_PX,
+    PIXEL_ALIGNMENT_TOLERANCE_PX,
+    PAYLOAD_RELEASE_ALTITUDE,
+    PAYLOAD_SEARCH_ALTITUDE,
+    PAYLOAD_SERVO_WAIT_S,
+    PAYLOAD_VERIFY_ALTITUDE,
+    PAYLOAD_WIDTH,
+    SCAN_LINE_SPACING,
+    SEARCH_MARGIN,
+    SEARCH_SPEED_MPS,
+    TARGET_APPROACH_ALTITUDE,
+    TAKEOFF_ALTITUDE,
+    VERTICAL_SPEED_MPS,
+)
+from flight.altitude_controller import AltitudeController
+from flight.navigation import Navigation, haversine_m
+from flight.position_controller import PositionController
+from flight.rtl import RTLController
+from models import (
+    Detection,
+    MissionData,
+    MissionState,
+    Target,
+    TargetColor,
+    TargetType,
+)
+from payload.payload_controller import PayloadController
+from search.coverage_planner import LawnmowerPlanner, local_to_gps
+from vision.camera import GazeboCamera
+from vision.geometry import CameraModel, expected_payload_pixels
+from vision.payload_detector import PayloadDetector
+from vision.target_detector import TargetDetector
+
+
+class MissionStateMachine:
+    def __init__(
+        self,
+        navigation: Navigation,
+        camera: GazeboCamera,
+        payload: PayloadController,
+        logger: logging.Logger,
+    ):
+        self.log = logger
+        self.nav = navigation
+        self.camera = camera
+        self.payload = payload
+
+        self.camera_model = CameraModel(
+            CAMERA_WIDTH_PX,
+            CAMERA_HEIGHT_PX,
+            CAMERA_HORIZONTAL_FOV_DEG,
+            CAMERA_VERTICAL_FOV_DEG,
+        )
+        self.target_detector = TargetDetector()
+        self.payload_detector = PayloadDetector(self.camera_model)
+        self.position_controller = PositionController(navigation, self.camera_model)
+        self.altitude_controller = AltitudeController(navigation)
+        self.rtl_controller = RTLController(navigation)
+
+        self.data = MissionData()
+
+        # ---- Lawnmower tarama ----
+        self._search_points: list = []
+        self._search_idx: int = 0
+        self._search_origin_lat: float | None = None
+        self._search_origin_lon: float | None = None
+
+        # ---- Non-blocking irtifa bekleme ----
+        self._alt_target: float | None = None
+        self._alt_deadline: float | None = None
+        self._alt_waiting: bool = False
+
+        # ---- Hedef hizalama fazı ----
+        self._align_phase: str = "HORIZONTAL"  # "HORIZONTAL" | "DESCENDING"
+        self._last_align_status_log_t: float = 0.0  # periyodik durum logu
+
+        # ---- Hedef ilk görüldüğünde kaydedilen kaba GPS ----
+        # Hedef kadrajdan çıksa bile bu konuma dönebiliriz.
+        self._target_rough_lat: float | None = None
+        self._target_rough_lon: float | None = None
+
+        # ---- Align hız sınırlayıcı ----
+        # Her step'te goto_body_offset göndermemek için son komut zamanı.
+        self._last_align_cmd_t: float = 0.0
+
+        # ---- Recover throttle: aynı konuma sürekli goto gönderme ----
+        self._last_recover_t: float = 0.0
+        self._RECOVER_INTERVAL: float = 1.5  # saniye
+
+        # ---- Tespit kayıp sayacı: kaç tick üst üste tespit yok ----
+        self._no_detection_count: int = 0
+        self._NO_DETECTION_LIMIT: int = 25  # ~0.5s @ 50Hz — komut işleme süresi için tolerans
+
+        # ---- Hedef kilidi: ilk kararlı tespitte belirlenir ----
+        # Görev boyunca aynı türe odaklanmak için kullanılır.
+        # İki hedef aynı anda görünürse ilk kararlı tespit kazanır.
+        self._locked_color: TargetColor | None = None
+        self._locked_shape: str | None = None
+
+        # ---- GPS kalite biriktirici ----
+        # Hizalama döngüsünde "aligned=True" her anında GPS + confidence kaydedilir.
+        # TARGET_ALIGNED → _do_save_gps en yüksek confidence'lı koordinatı alır.
+        # (lat, lon, confidence) tuple listesi
+        self._gps_candidates: list[tuple[float, float, float]] = []
+
+        # ---- Payload pickup servo bekleme ----
+        # _do_pickup servo komutunu gönderince bu zaman damgası set edilir.
+        # _do_wait_servo_then_ascend bu zamanı kontrol eder.
+        self._pickup_servo_start: float | None = None
+
+        # ---- Payload hassas iniş state'i ----
+        # _payload_descent_alt: bir sonraki iniş hedefi; None = henüz başlamadı
+        self._payload_descent_alt: float | None = None
+        # Her HORIZONTAL fazının başlangıç zamanı — timeout için
+        self._align_phase_start_t: float | None = None
+
+        # ---- Hedef üzerinde hizalama (pickup öncesi) ----
+        # ALIGNING_ON_TARGET_FOR_PICKUP state'inde kullanılır
+        self._align_for_pickup_deadline: float | None = None
+
+        # ---- Gösterilecek frame (sadece _pump_preview yazar ekrana) ----
+        # State handler'lar _pending_display'e atar; _pump_preview gösterir.
+        self._pending_display: np.ndarray | None = None
+
+    # ==================================================================== #
+    #  Ana döngü
+    # ==================================================================== #
+
+    def run(self) -> None:
+        while self.data.state != MissionState.COMPLETE:
+            self._pending_display = None          # her tick öncesi temizle
+            self._tick()
+            self._pump_preview()                  # tek nokta: ekranı güncelle
+            time.sleep(0.02)                      # ~50 Hz
+
+    def _tick(self) -> None:
+        s = self.data.state
+        if s == MissionState.INIT:
+            self._do_init()
+        elif s == MissionState.TAKEOFF:
+            self._do_takeoff()
+        elif s in (MissionState.SEARCHING_FIRST_TARGET,
+                   MissionState.SEARCHING_SECOND_TARGET):
+            self._do_search_target()
+        elif s == MissionState.TARGET_DETECTED:
+            self._do_classify()
+        elif s == MissionState.TARGET_CLASSIFIED:
+            self._goto(MissionState.APPROACHING_TARGET)
+        elif s == MissionState.APPROACHING_TARGET:
+            self._do_approach()
+        elif s == MissionState.ALIGNING_TARGET:
+            self._do_align_target()
+        elif s == MissionState.TARGET_ALIGNED:
+            self._do_save_gps()
+        elif s == MissionState.RELEASING_PAYLOAD:
+            self._do_release()
+        elif s == MissionState.ASCENDING_AFTER_FIRST_RELEASE:
+            self._do_ascend_after_first_release()
+        elif s == MissionState.TASK_1_COMPLETE:
+            self._goto(MissionState.NAVIGATING_TO_FIRST_TARGET)
+        elif s == MissionState.NAVIGATING_TO_FIRST_TARGET:
+            self._do_navigate_to_first()
+        elif s == MissionState.ALIGNING_ON_TARGET_FOR_PICKUP:
+            self._do_align_on_target_for_pickup()
+        elif s == MissionState.SEARCHING_PAYLOAD:
+            self._do_search_payload()
+        elif s == MissionState.ALIGNING_PAYLOAD:
+            self._do_align_payload()
+        elif s == MissionState.DESCENDING_TO_PAYLOAD:
+            self._do_descend_to_payload()
+        elif s == MissionState.PICKING_UP_PAYLOAD:
+            self._do_pickup()
+        elif s == MissionState.ASCENDING_FOR_VERIFICATION:
+            self._do_ascend_for_verification()
+        elif s == MissionState.VERIFYING_PAYLOAD:
+            self._do_verify()
+        elif s == MissionState.TASK_2_COMPLETE:
+            self._do_after_task2()
+        elif s == MissionState.RETURNING_PAYLOAD:
+            self._do_return_payload()
+        elif s == MissionState.RELEASING_RETURNED_PAYLOAD:
+            self._do_release_returned_payload()
+        elif s == MissionState.TASK_2_FAILED:
+            self._do_start_rtl()
+        elif s == MissionState.RTL:
+            self._do_wait_rtl()
+        else:
+            raise RuntimeError(f"Unhandled state: {s}")
+
+    # ==================================================================== #
+    #  Görüntü gösterme — TEK NOKTA
+    # ==================================================================== #
+
+    def _pump_preview(self) -> None:
+        """
+        run() döngüsünde _tick() SONRASI bir kez çağrılır.
+        _pending_display set edildiyse onu gösterir.
+        Set edilmediyse son kamera frame'ini ham gösterir.
+        Hiçbir state handler doğrudan camera.show() çağırmaz.
+        """
+        if self._pending_display is not None:
+            self.camera.show(self._pending_display)
+        else:
+            frame = self.camera.latest()
+            if frame is None:
+                self.camera.pump()
+                return
+            # Ham frame + durum yazısı
+            disp = self._base_overlay(frame)
+            self.camera.show(disp)
+
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _draw_hud(
+        frame: np.ndarray,
+        line1: str,
+        line2: str = "",
+        line1_color: tuple = (0, 230, 0),
+        line2_color: tuple = (0, 210, 255),
+    ) -> np.ndarray:
+        """
+        Şeffaf HUD bandı çiz.
+        Üst banda iki satır bilgi yaz — bant %55 opak, görüntü arkadan okunuyor.
+        """
+        out = frame.copy()
+        h, w = out.shape[:2]
+        band_h = 56
+
+        # Yarı saydam bant: frame kopyası üzerine dikdörtgen, sonra blend
+        overlay = out.copy()
+        cv2.rectangle(overlay, (0, 0), (w, band_h), (10, 10, 10), -1)
+        cv2.addWeighted(overlay, 0.55, out, 0.45, 0, out)
+
+        # İnce ayırıcı çizgi
+        cv2.line(out, (0, band_h), (w, band_h), (60, 60, 60), 1)
+
+        # Satır 1
+        cv2.putText(out, line1,
+                    (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.65, line1_color, 2,
+                    cv2.LINE_AA)
+        # Satır 2
+        if line2:
+            cv2.putText(out, line2,
+                        (10, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.58, line2_color, 1,
+                        cv2.LINE_AA)
+        # Merkez artı işareti
+        cx, cy = w // 2, h // 2
+        cv2.drawMarker(out, (cx, cy), (255, 255, 255),
+                       cv2.MARKER_CROSS, 24, 1, cv2.LINE_AA)
+        return out
+
+    def _hud_lines(self, extra: str = "") -> tuple[str, str]:
+        """Standart HUD satırları: STATE + irtifa / heading + GPS."""
+        pos = self.nav.position()
+        line1 = (
+            f"{self.data.state.value}"
+            + (f"  |  {extra}" if extra else "")
+        )
+        line2 = (
+            f"Alt {pos.relative_altitude:.1f}m  "
+            f"Hdg {pos.heading_deg:.0f}°  "
+            f"({pos.latitude:.5f}, {pos.longitude:.5f})"
+        )
+        return line1, line2
+
+    def _base_overlay(self, frame: np.ndarray) -> np.ndarray:
+        l1, l2 = self._hud_lines()
+        return self._draw_hud(frame, l1, l2)
+
+    def _set_display_detections(self, frame: np.ndarray, detections: list) -> None:
+        """Tespit overlay hazırla ve _pending_display'e koy."""
+        disp = TargetDetector.draw_detections(frame, detections)
+        det_str = "  ".join(
+            f"{d.color.value[0]}{d.shape[0]} {d.confidence:.2f}"
+            for d in detections[:3]
+        ) if detections else "tespit yok"
+        l1, l2 = self._hud_lines(extra=det_str)
+        self._pending_display = self._draw_hud(disp, l1, l2)
+
+    def _set_display_payload(self, frame: np.ndarray, results: list, label: str) -> None:
+        """Payload overlay hazırla."""
+        disp = frame.copy()
+        h, w = disp.shape[:2]
+        for r in results:
+            tx, ty = int(r.center_x), int(r.center_y)
+            # Payload çemberi + hedef çizgisi
+            cv2.circle(disp, (tx, ty), 10, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.line(disp, (w // 2, h // 2), (tx, ty), (0, 200, 200), 1, cv2.LINE_AA)
+            # Boyut kutusu
+            bw = int(r.width_px)
+            bh = int(r.height_px)
+            cv2.rectangle(disp, (tx - bw // 2, ty - bh // 2),
+                          (tx + bw // 2, ty + bh // 2), (0, 255, 255), 1)
+            cv2.putText(disp, f"PL {r.confidence:.2f} {bw}x{bh}px",
+                        (tx + 12, ty - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.50,
+                        (0, 255, 200), 1, cv2.LINE_AA)
+
+        pl_str = f"{len(results)} pl" if results else "pl yok"
+        l1, l2 = self._hud_lines(extra=f"{label}  {pl_str}")
+        self._pending_display = self._draw_hud(disp, l1, l2)
+
+    # ==================================================================== #
+    #  Non-blocking irtifa yardımcıları
+    # ==================================================================== #
+
+    def _send_altitude(self, target: float, timeout: float = 35.0) -> None:
+        self.nav.set_relative_altitude(target)
+        self._alt_target = target
+        self._alt_deadline = time.monotonic() + timeout
+        self._alt_waiting = True
+
+    def _altitude_ok(self) -> bool | None:
+        """True=ulaşıldı  False=bekleniyor  None=timeout"""
+        if not self._alt_waiting:
+            return True
+        pos = self.nav.position()
+        if (self._alt_target is not None
+                and abs(pos.relative_altitude - self._alt_target) <= ALTITUDE_TOLERANCE_M):
+            self._alt_waiting = False
+            return True
+        if self._alt_deadline is not None and time.monotonic() > self._alt_deadline:
+            self._alt_waiting = False
+            self.log.warning("İrtifa timeout! Hedef=%.1fm Mevcut=%.1fm",
+                             self._alt_target, pos.relative_altitude)
+            return None
+        return False
+
+    def _reset_altitude_state(self) -> None:
+        self._alt_waiting = False
+        self._alt_target = None
+        self._alt_deadline = None
+
+    # ==================================================================== #
+    #  Lawnmower tarama
+    # ==================================================================== #
+
+    def _init_search(self) -> None:
+        pos = self.nav.fresh_position(timeout=1.0)
+        self._search_origin_lat = pos.latitude
+        self._search_origin_lon = pos.longitude
+        planner = LawnmowerPlanner(
+            FIELD_WIDTH, FIELD_LENGTH, SCAN_LINE_SPACING, SEARCH_MARGIN
+        )
+        self._search_points = planner.generate()
+        self._search_idx = 0
+        self.nav.set_max_speed(SEARCH_SPEED_MPS, VERTICAL_SPEED_MPS)
+        self.log.info(
+            "Lawnmower başlatıldı: %d nokta, origin=(%.6f, %.6f)",
+            len(self._search_points), self._search_origin_lat, self._search_origin_lon,
+        )
+
+    def _advance_search(self) -> None:
+        if not self._search_points or self._search_origin_lat is None:
+            return
+        if self._search_idx >= len(self._search_points):
+            self._search_idx = 0
+            self.log.warning("Lawnmower tamamlandı, başa dönüyor.")
+        sp = self._search_points[self._search_idx]
+        if self._search_origin_lon is None:
+            return
+        lat, lon = local_to_gps(
+            self._search_origin_lat, self._search_origin_lon,
+            north_m=sp.y_m, east_m=sp.x_m,
+        )
+        self.nav.goto_global(lat, lon, TAKEOFF_ALTITUDE)
+        pos = self.nav.position()
+        if haversine_m(pos.latitude, pos.longitude, lat, lon) < 3.0:
+            self._search_idx += 1
+            self.log.debug("Tarama noktası %d/%d geçildi.",
+                           self._search_idx, len(self._search_points))
+
+    # ==================================================================== #
+    #  State handler'lar
+    # ==================================================================== #
+
+    # ------------------------------------------------------------------ #
+    def _do_init(self) -> None:
+        self.nav.wait_for_position()
+        self.data.home_latitude = self.nav.home_lat
+        self.data.home_longitude = self.nav.home_lon
+        self._goto(MissionState.TAKEOFF)
+
+    # ------------------------------------------------------------------ #
+    def _do_takeoff(self) -> None:
+        self.nav.takeoff(TAKEOFF_ALTITUDE)
+        deadline = time.monotonic() + 45.0
+        while time.monotonic() < deadline:
+            pos = self.nav.position()
+            if abs(pos.relative_altitude - TAKEOFF_ALTITUDE) <= 0.4:
+                break
+            self._pending_display = None
+            frame = self.camera.latest()
+            if frame is not None:
+                self._pending_display = self._base_overlay(frame)
+            self._pump_preview()
+            time.sleep(0.1)
+        else:
+            self.log.error("Kalkış timeout!")
+            self.data.mission_failed = True
+            self._goto(MissionState.RTL)
+            return
+
+        self.log.info("Kalkış tamamlandı. İrtifa=%.1fm",
+                      self.nav.position().relative_altitude)
+        self._init_search()
+        self._goto(MissionState.SEARCHING_FIRST_TARGET)
+
+    # ------------------------------------------------------------------ #
+    def _do_search_target(self) -> None:
+        frame = self.camera.latest()
+        if frame is None:
+            self._advance_search()
+            return
+
+        detections = self.target_detector.detect(frame)
+
+        # İkinci hedef ararken birincisini filtrele
+        if (self.data.state == MissionState.SEARCHING_SECOND_TARGET
+                and self.data.first_target is not None):
+            known = self.data.first_target
+            detections = [
+                d for d in detections
+                if not (d.color.value == known.color.value
+                        and d.shape == known.shape.value)
+            ]
+            # İkinci hedef için kilidi sıfırla (birinciye ait kilit kalmış olabilir)
+            if self._locked_shape == known.shape.value and self._locked_color == known.color:
+                self._locked_color = None
+                self._locked_shape = None
+                self.target_detector.history.clear()
+                self.target_detector.reset_time_lock()
+
+        self._set_display_detections(frame, detections)
+
+        # Zaman bazlı kilit güncelle (1 sn görünürlük → kilit)
+        self.target_detector.update_time_lock(detections)
+        if (self._locked_color is None
+                and self.target_detector.time_locked_color is not None):
+            self._locked_color = self.target_detector.time_locked_color
+            self._locked_shape = self.target_detector.time_locked_shape
+            self.log.info(
+                "Zaman kilidi aktif: renk=%s şekil=%s (%.1fs görüntede kaldı)",
+                self._locked_color.value, self._locked_shape,
+                1.0,  # TARGET_LOCK_DURATION_S
+            )
+
+        # Kararlı tespit — kilitli türe göre (kilit yoksa ilk kararlı seçimi al)
+        stable = self.target_detector.stable_detection(
+            detections,
+            locked_color=self._locked_color,
+            locked_shape=self._locked_shape,
+            search_mode=True,
+        )
+
+        if stable is not None:
+            # İlk kez kilitleniyorsa kaydet
+            if self._locked_color is None:
+                self._locked_color = stable.color
+                self._locked_shape = stable.shape
+                self.log.info(
+                    "Hedef kilitleniyor: renk=%s şekil=%s",
+                    stable.color.value, stable.shape,
+                )
+
+            self.log.info(
+                "Hedef kararlı tespit: renk=%s şekil=%s güven=%.2f merkez=(%.0f,%.0f)",
+                stable.color.value, stable.shape, stable.confidence,
+                stable.center_x, stable.center_y,
+            )
+            # *** Kritik: hedef görüldüğünde anında GPS konumu kaydet ***
+            rough = self.nav.position()
+            self._target_rough_lat = rough.latitude
+            self._target_rough_lon = rough.longitude
+            self.data.pending_detection = stable
+            self._goto(MissionState.TARGET_DETECTED)
+            return
+
+        # Tespit var ama henüz kararlı değil — dur, taramayı ilerletme
+        if detections:
+            return
+
+        self._advance_search()
+
+    # ------------------------------------------------------------------ #
+    def _do_classify(self) -> None:
+        d = self.data.pending_detection
+        if d is None:
+            self._return_search()
+            return
+        valid = (
+            (d.color == TargetColor.BLUE and d.shape == "HEXAGON")
+            or (d.color == TargetColor.RED and d.shape == "TRIANGLE")
+        )
+        if valid:
+            self.log.info("Hedef geçerli: %s %s", d.color.value, d.shape)
+            self._goto(MissionState.TARGET_CLASSIFIED)
+        else:
+            self.log.warning("Geçersiz kombinasyon %s+%s, yoksayıldı.",
+                             d.color.value, d.shape)
+            self.data.pending_detection = None
+            self._locked_color = None
+            self._locked_shape = None
+            self.target_detector.history.clear()
+            self.target_detector.reset_time_lock()
+            self._return_search()
+
+    # ------------------------------------------------------------------ #
+    def _do_approach(self) -> None:
+        """
+        Kaba yatay yaklaşma — irtifa değiştirilmez.
+        Önce yatay hizalama (ALIGNING), ardından kademeli iniş yapılır.
+        """
+        pos = self.nav.position()
+        self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
+        if self._target_rough_lat is not None and self._target_rough_lon is not None:
+            self.nav.goto_global(
+                self._target_rough_lat,
+                self._target_rough_lon,
+                pos.relative_altitude,
+            )
+        self._reset_altitude_state()
+        self._align_phase = "HORIZONTAL"
+        self._last_align_cmd_t = 0.0
+        self._no_detection_count = 0
+        self.nav.set_max_speed(ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS)
+        self._goto(MissionState.ALIGNING_TARGET)
+
+    # ------------------------------------------------------------------ #
+    def _do_align_target(self) -> None:
+        """
+        Kademeli yük bırakma yaklaşımı:
+          yatay ortala → 2m in → yatay ortala → 2m in → ... → 2m'de son ortalama
+          → GPS kaydı → yük bırakma.
+        """
+        frame = self.camera.latest()
+        if frame is None:
+            return
+
+        pos = self.nav.position()
+
+        if pos.relative_altitude < 0.5:
+            self.log.warning("İrtifa tehlikeli düşük %.1fm, geri çekiliyor.", pos.relative_altitude)
+            self._reset_altitude_state()
+            self._safe_reacquire()
+            return
+
+        now_status = time.monotonic()
+        if now_status - self._last_align_status_log_t > 2.0:
+            self._last_align_status_log_t = now_status
+            self.log.info(
+                "ALIGN aktif: faz=%s irtifa=%.1fm kayıp_sayac=%d kilit=%s/%s",
+                self._align_phase, pos.relative_altitude, self._no_detection_count,
+                self._locked_color.value if self._locked_color else "-",
+                self._locked_shape or "-",
+            )
+
+        detections = self._filter_active_detections(self.target_detector.detect(frame))
+        self._set_display_detections(frame, detections)
+
+        if detections:
+            picked = self._pick_locked_detection(detections)
+            self.data.pending_detection = picked
+            self._no_detection_count = 0
+            p = self.nav.position()
+            self._target_rough_lat = p.latitude
+            self._target_rough_lon = p.longitude
+        else:
+            self._no_detection_count += 1
+
+        # ---------- DESCENDING fazı ----------
+        if self._align_phase == "DESCENDING":
+            result = self._altitude_ok()
+            if result is False:
+                return
+            reached = self._alt_target
+            self._reset_altitude_state()
+            self._align_phase = "HORIZONTAL"
+            self._no_detection_count = 0
+            self.log.info("İrtifa %.1fm'ye ulaşıldı → yatay hizalamaya devam.", reached or 0)
+            return
+
+        # ---------- HORIZONTAL fazı ----------
+        detection = self.data.pending_detection
+
+        if detection is None:
+            if self._no_detection_count > self._NO_DETECTION_LIMIT:
+                self.log.warning(
+                    "ALIGN: %d tick üst üste tespit yok, kaba GPS'e dönülüyor.",
+                    self._no_detection_count,
+                )
+                self._no_detection_count = 0
+                self._recover_to_rough_position()
+            return
+
+        if self._no_detection_count > self._NO_DETECTION_LIMIT:
+            self.log.warning(
+                "ALIGN: %d tick üst üste tespit yok, kaba GPS'e dönülüyor.",
+                self._no_detection_count,
+            )
+            self._no_detection_count = 0
+            self._recover_to_rough_position()
+            return
+
+        now = time.monotonic()
+        if now - self._last_align_cmd_t < ALIGN_CMD_INTERVAL_S:
+            return
+
+        aligned = self.position_controller.align_detection(
+            detection.center_x,
+            detection.center_y,
+            frame.shape[1],
+            frame.shape[0],
+            pos.relative_altitude,
+        )
+        self._last_align_cmd_t = now
+
+        dx = detection.center_x - frame.shape[1] / 2
+        dy = detection.center_y - frame.shape[0] / 2
+        heading = self.nav.position().heading_deg
+        self.log.info(
+            "ALIGN HORIZONTAL: merkez=(%.0f,%.0f) dx=%.0f dy=%.0f heading=%.0f° → hizalı=%s",
+            detection.center_x, detection.center_y, dx, dy, heading, aligned,
+        )
+
+        if not aligned:
+            return
+
+        # aligned=True: bu an GPS'i biriktir (en iyi hizalama anı)
+        # non-blocking: position() kullan, blocking bekleme yok
+        pos_now = self.nav.position()
+        self._gps_candidates.append(
+            (pos_now.latitude, pos_now.longitude, detection.confidence)
+        )
+        self.log.debug(
+            "GPS aday kaydedildi: lat=%.7f lon=%.7f güven=%.2f (toplam=%d)",
+            pos_now.latitude, pos_now.longitude, detection.confidence,
+            len(self._gps_candidates),
+        )
+
+        next_alt = self._next_step_down_altitude(
+            pos.relative_altitude, PAYLOAD_RELEASE_ALTITUDE,
+        )
+        if next_alt is not None:
+            self.log.info(
+                "Yatay hizalama tamam (%.1fm). Kademeli iniş: %.1fm",
+                pos.relative_altitude, next_alt,
+            )
+            self.nav.set_max_speed(ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS)
+            self._align_phase = "DESCENDING"
+            self._no_detection_count = 0
+            self._send_altitude(next_alt, timeout=30.0)
+        else:
+            # Son irtifada (PAYLOAD_RELEASE_ALTITUDE) ve tam merkezde.
+            # GPS'i ŞIMDI kaydet — yük bırakmadan hemen önceki en hassas konum.
+            pos_now = self.nav.position()  # non-blocking: donma yok
+            self._gps_candidates.append(
+                (pos_now.latitude, pos_now.longitude, detection.confidence)
+            )
+            self.log.info(
+                "Son hizalama tamamlandı (%.1fm). GPS kaydedildi: lat=%.7f lon=%.7f "
+                "güven=%.2f (toplam aday=%d)",
+                pos.relative_altitude,
+                pos_now.latitude, pos_now.longitude, detection.confidence,
+                len(self._gps_candidates),
+            )
+            self._goto(MissionState.TARGET_ALIGNED)
+
+    # ------------------------------------------------------------------ #
+    def _recover_to_rough_position(self) -> None:
+        """
+        Hizalama sırasında hedef kadrajdan çıktı.
+        Kaba GPS konumuna dön (mevcut irtifayı koru).
+        Komut throttle'lı — aynı konuma sürekli goto gönderme.
+        """
+        if self._target_rough_lat is None or self._target_rough_lon is None:
+            self._safe_reacquire()
+            return
+        now = time.monotonic()
+        if now - self._last_recover_t < self._RECOVER_INTERVAL:
+            return  # henüz erken
+        self._last_recover_t = now
+        pos = self.nav.position()
+        self.log.info("Hedef kadrajdan çıktı, kaba GPS'e dönülüyor (%.6f, %.6f).",
+                      self._target_rough_lat, self._target_rough_lon)
+        self.nav.goto_global(
+            self._target_rough_lat,
+            self._target_rough_lon,
+            pos.relative_altitude,
+        )
+
+    # ------------------------------------------------------------------ #
+    def _do_save_gps(self) -> None:
+        """
+        GPS en iyi hizalama anında kaydedilir (non-blocking).
+        Biriktirilen adaylar arasından en yüksek confidence'lıyı seç.
+        Aday yoksa son bilinen pozisyonu kullan.
+        """
+        detection = self.data.pending_detection
+        if detection is None:
+            self._gps_candidates.clear()
+            self._return_search()
+            return
+
+        # En iyi GPS adayını seç
+        if self._gps_candidates:
+            best_lat, best_lon, best_conf = max(
+                self._gps_candidates, key=lambda c: c[2]
+            )
+            self.log.info(
+                "GPS seçildi: %d aday arasından en iyi → lat=%.7f lon=%.7f güven=%.2f",
+                len(self._gps_candidates), best_lat, best_lon, best_conf,
+            )
+        else:
+            # Fallback: son bilinen pozisyon (non-blocking)
+            pos = self.nav.position()
+            best_lat, best_lon, best_conf = pos.latitude, pos.longitude, detection.confidence
+            self.log.warning(
+                "GPS adayı bulunamadı, son bilinen pozisyon kullanılıyor: lat=%.7f lon=%.7f",
+                best_lat, best_lon,
+            )
+        self._gps_candidates.clear()
+
+        shape = TargetType.HEXAGON if detection.shape == "HEXAGON" else TargetType.TRIANGLE
+        target = Target(
+            target_id=1 if self.data.first_target is None else 2,
+            shape=shape,
+            color=detection.color,
+            latitude=best_lat,
+            longitude=best_lon,
+            confidence=best_conf,
+        )
+
+        if target.target_id == 1:
+            self.data.first_target = target
+        else:
+            self.data.second_target = target
+
+        self.log.info(
+            "TARGET %d kaydedildi: %s %s  lat=%.7f lon=%.7f güven=%.2f",
+            target.target_id, target.shape.value, target.color.value,
+            target.latitude, target.longitude, target.confidence,
+        )
+        self._goto(MissionState.RELEASING_PAYLOAD)
+
+    # ------------------------------------------------------------------ #
+    def _do_release(self) -> None:
+        # Hangi hedef henüz yük bırakmadı?
+        if (self.data.second_target is not None
+                and not self.data.second_target.payload_released):
+            target = self.data.second_target
+        elif (self.data.first_target is not None
+              and not self.data.first_target.payload_released):
+            target = self.data.first_target
+        else:
+            self.log.error("Yük bırakılacak hedef bulunamadı!")
+            self.data.mission_failed = True
+            self._goto(MissionState.TASK_2_FAILED)
+            return
+
+        result = self.payload.release_payload(self.payload_for_target(target))
+        target.payload_released = result.success
+        self.data.release_count += 1
+        if not result.success:
+            self.log.error("Payload bırakma başarısız: %s", result.message)
+
+        self.log.info(
+            "Payload bırakıldı: %s → hedef %d",
+            self.payload_for_target(target).value, target.target_id,
+        )
+
+        self.data.pending_detection = None
+        self.target_detector.history.clear()
+        self._reset_altitude_state()
+        self._target_rough_lat = None
+        self._target_rough_lon = None
+        self._gps_candidates.clear()
+        # Kilidi sıfırla — bir sonraki hedef için temiz başla
+        self._locked_color = None
+        self._locked_shape = None
+        self.target_detector.reset_time_lock()
+
+        if self.data.second_target is None:
+            # Birinci hedef tamamlandı → önce TAKEOFF_ALTITUDE'a çık,
+            # irtifaya ulaşınca ikinci hedefi ara.
+            # Doğrudan aramaya girmek yük bırakma irtifasında (düşük) arama yapar.
+            self.log.info(
+                "Birinci yük bırakıldı. %.1fm'ye çıkılıyor, ardından ikinci hedef aranacak.",
+                TAKEOFF_ALTITUDE,
+            )
+            self._goto(MissionState.ASCENDING_AFTER_FIRST_RELEASE)
+        else:
+            # Her iki hedef de tamamlandı → Görev 2
+            self._goto(MissionState.TASK_1_COMPLETE)
+
+    # ------------------------------------------------------------------ #
+    def _do_ascend_after_first_release(self) -> None:
+        """
+        Hata 1: Birinci yükü bıraktıktan sonra arama başlamadan önce
+        TAKEOFF_ALTITUDE'a çık. Non-blocking: irtifaya ulaşınca ikinci
+        hedef aramasına geç.
+        """
+        if not self._alt_waiting:
+            pos = self.nav.position()
+            self.log.info(
+                "Yük sonrası yükselme: %.1fm → %.1fm",
+                pos.relative_altitude, TAKEOFF_ALTITUDE,
+            )
+            self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
+            self._send_altitude(TAKEOFF_ALTITUDE, timeout=30.0)
+            return
+
+        result = self._altitude_ok()
+        if result is False:
+            return  # hâlâ çıkıyor
+
+        self._reset_altitude_state()
+        self.log.info(
+            "%.1fm irtifaya ulaşıldı. İkinci hedef aranıyor.",
+            self.nav.position().relative_altitude,
+        )
+        self._init_search()
+        self._goto(MissionState.SEARCHING_SECOND_TARGET)
+
+    # ------------------------------------------------------------------ #
+    def _do_navigate_to_first(self) -> None:
+        """
+        İlk hedefin GPS konumuna git.
+        Mevcut irtifada GPS konumuna uç, varınca o irtifada görüntü işlemeyi başlat.
+        İrtifayı düşürme — geniş görüş açısı korumak için mevcut irtifa kullanılır.
+        """
+        target = self.data.first_target
+        if target is None:
+            self.data.mission_failed = True
+            self._goto(MissionState.TASK_2_FAILED)
+            return
+
+        # --- Faz 1: GPS'e git (mevcut irtifada) ---
+        self.log.info(
+            "Görev 2: İlk hedef GPS'e gidiliyor (mevcut irtifa): lat=%.7f lon=%.7f",
+            target.latitude, target.longitude,
+        )
+        self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
+        pos_now = self.nav.position()
+        self.nav.goto_global(target.latitude, target.longitude, pos_now.relative_altitude)
+
+        nav_deadline = time.monotonic() + 90.0
+        while time.monotonic() < nav_deadline:
+            pos = self.nav.position()
+            dist = haversine_m(pos.latitude, pos.longitude,
+                               target.latitude, target.longitude)
+            self._pending_display = None
+            frame = self.camera.latest()
+            if frame is not None:
+                self._pending_display = self._base_overlay(frame)
+            self._pump_preview()
+            if dist < 3.0:
+                break
+            time.sleep(0.1)
+        else:
+            self.log.error("İlk hedef konumuna ulaşılamadı (timeout).")
+            self.data.mission_failed = True
+            self._goto(MissionState.TASK_2_FAILED)
+            return
+
+        # GPS konumuna varıldı — irtifayı DÜŞÜRME, mevcut irtifada görüntü işlemeyi başlat.
+        # Yüksek irtifada geniş görüş açısı var; hedef üzerinde hizalanınca
+        # kademeli iniş zaten gerçekleşecek.
+        self._reset_altitude_state()
+        self.log.info(
+            "GPS konumuna ulaşıldı (irtifa=%.1fm). "
+            "Mevcut irtifada hedef merkezleme başlıyor.",
+            self.nav.position().relative_altitude,
+        )
+        self._align_for_pickup_deadline = time.monotonic() + ALIGN_ON_TARGET_TIMEOUT_S
+        self._last_align_cmd_t = 0.0
+        self._payload_descent_alt = None
+        self._goto(MissionState.ALIGNING_ON_TARGET_FOR_PICKUP)
+
+    # ------------------------------------------------------------------ #
+    def _do_align_on_target_for_pickup(self) -> None:
+        """
+        Hata 9b: SEARCHING_PAYLOAD'dan önce İHA kendini hedef şeklinin
+        tam merkezine hizalar. Bu sayede yük araması hedefin tam ortasından
+        (aşağıya bakarak) yapılır.
+
+        Zaman aşımı dolunca veya hizalama başarılıysa SEARCHING_PAYLOAD'a geç.
+        Hedef görüntüde yoksa GPS'te beklemeye devam et.
+        """
+        frame = self.camera.latest()
+        pos = self.nav.position()
+
+        # Zaman aşımı kontrolü — her halükarda payload aramaya geç
+        if (self._align_for_pickup_deadline is not None
+                and time.monotonic() > self._align_for_pickup_deadline):
+            self.log.info(
+                "Hedef merkezleme zaman aşımı (%.0fs). Payload aramaya geçiliyor.",
+                ALIGN_ON_TARGET_TIMEOUT_S,
+            )
+            self._align_for_pickup_deadline = None
+            self._last_align_cmd_t = 0.0
+            self._payload_descent_alt = None
+            self._goto(MissionState.SEARCHING_PAYLOAD)
+            return
+
+        if frame is None:
+            return
+
+        target = self.data.first_target
+        if target is None:
+            self._goto(MissionState.TASK_2_FAILED)
+            return
+
+        # Hedef şeklini kamerada ara (hedefin rengi + şekli)
+        detections = self.target_detector.detect(frame)
+        target_detections = [
+            d for d in detections
+            if d.color == target.color and d.shape == target.shape.value
+        ]
+        self._set_display_detections(frame, target_detections)
+
+        if not target_detections:
+            # Hedef görünmüyor — GPS'te bekle, taşınma
+            return
+
+        best = target_detections[0]
+        now = time.monotonic()
+        if now - self._last_align_cmd_t < ALIGN_CMD_INTERVAL_S:
+            return
+
+        aligned = self.position_controller.align_detection(
+            best.center_x, best.center_y,
+            frame.shape[1], frame.shape[0],
+            pos.relative_altitude,
+        )
+        self._last_align_cmd_t = now
+
+        self.log.info(
+            "Hedef merkezleme: renk=%s şekil=%s merkez=(%.0f,%.0f) hizalı=%s",
+            best.color.value, best.shape,
+            best.center_x, best.center_y, aligned,
+        )
+
+        if aligned:
+            self.log.info(
+                "Hedef merkezleme tamamlandı (%.1fm). "
+                "İHA hedefin tam üzerinde → payload aranıyor.",
+                pos.relative_altitude,
+            )
+            self._align_for_pickup_deadline = None
+            self._last_align_cmd_t = 0.0
+            self._payload_descent_alt = None
+            self._goto(MissionState.SEARCHING_PAYLOAD)
+
+    # ------------------------------------------------------------------ #
+    def _do_search_payload(self) -> None:
+        target = self.data.first_target
+        if target is None:
+            self._goto(MissionState.TASK_2_FAILED)
+            return
+
+        frame = self.camera.latest()
+        if frame is None:
+            return
+
+        color = self.payload_for_target(target)
+        pos = self.nav.position()
+        results = self.payload_detector.detect(frame, pos.relative_altitude, color)
+        self._set_display_payload(frame, results, f"PAYLOAD ARA ({color.value})")
+
+        if not results:
+            return
+
+        # Boyut filtresi: hedef (1m kenar) ile payload (10cm kare) birbirine yakınsa
+        # kamerada çok farklı büyüklükte görünürler.
+        # expected_payload_pixels ile hesaplanan boyutun MAX_PAYLOAD_SIZE_FACTOR katını
+        # aşan tespitler PAYLOAD değil hedeftir → yoksay.
+        exp_w, exp_h = expected_payload_pixels(
+            PAYLOAD_WIDTH, PAYLOAD_HEIGHT, pos.relative_altitude, self.position_controller.camera
+        )
+        # Payload max boyutu: beklenenin 3 katı (tolerans marjı)
+        max_w = exp_w * MAX_PAYLOAD_SIZE_FACTOR
+        max_h = exp_h * MAX_PAYLOAD_SIZE_FACTOR
+
+        filtered = [
+            r for r in results
+            if r.width_px <= max_w and r.height_px <= max_h
+        ]
+
+        if not filtered:
+            self.log.debug(
+                "Payload araması: %d tespit boyut filtresinde reddedildi "
+                "(exp=%.0fx%.0fpx max=%.0fx%.0fpx)",
+                len(results), exp_w, exp_h, max_w, max_h,
+            )
+            return
+
+        best = filtered[0]
+        self.log.info(
+            "Payload bulundu: renk=%s merkez=(%.0f,%.0f) güven=%.2f "
+            "boyut=%.0fx%.0fpx (exp=%.0fx%.0fpx)",
+            color.value, best.center_x, best.center_y, best.confidence,
+            best.width_px, best.height_px, exp_w, exp_h,
+        )
+        self.data.pending_detection = Detection(
+            color=best.color, shape="PAYLOAD",
+            center_x=best.center_x, center_y=best.center_y,
+            area_px=best.area_px,
+            bbox_width_px=best.width_px, bbox_height_px=best.height_px,
+            confidence=best.confidence,
+        )
+        self._last_align_cmd_t = 0.0
+        self._goto(MissionState.ALIGNING_PAYLOAD)
+
+    # ------------------------------------------------------------------ #
+    def _do_align_payload(self) -> None:
+        """
+        10cm'lik yük için hassas kademeli iniş + hizalama.
+
+        Mimari (hepsi non-blocking, tek state içinde yönetilir):
+          _align_phase == "HORIZONTAL"  → yatay hizalama; hizalınca DESCENDING'e geç
+          _align_phase == "DESCENDING"  → basamak inişi bekle; inince HORIZONTAL'a dön
+          Basamak hedefi PAYLOAD_CONTACT_ALTITUDE'a ulaşınca → PICKING_UP_PAYLOAD
+
+        Böylece:
+          PAYLOAD_SEARCH_ALTITUDE (2m)
+            → hizala → 2-0.4=1.6m in
+            → hizala → 1.6-0.4=1.2m in
+            → ...
+            → hizala → 0.4m in
+            → hizala → 0m in  → pickup
+        Donma yok: blocking bekleme ÇAĞRILMIYOR, sadece position() kullanılıyor.
+        """
+        frame = self.camera.latest()
+        pos = self.nav.position()
+
+        # ---------- DESCENDING fazı: basamak inişini non-blocking bekle ----------
+        if self._align_phase == "DESCENDING":
+            if frame is not None:
+                target_obj = self.data.first_target
+                if target_obj is not None:
+                    color = self.payload_for_target(target_obj)
+                    results = self.payload_detector.detect(
+                        frame, pos.relative_altitude, color
+                    )
+                    self._set_display_payload(
+                        frame, results,
+                        f"İNİŞ {pos.relative_altitude:.2f}m→{self._payload_descent_alt:.2f}m"
+                        if self._payload_descent_alt is not None else "İNİŞ"
+                    )
+            result = self._altitude_ok()
+            if result is False:
+                return  # hâlâ iniyor — döngü bloklama yok
+            # İrtifaya ulaşıldı veya timeout
+            reached = pos.relative_altitude
+            self._reset_altitude_state()
+
+            if reached <= PAYLOAD_CONTACT_ALTITUDE + ALTITUDE_TOLERANCE_M:
+                # Yere ulaştık → pickup
+                self.log.info(
+                    "Temas irtifasına ulaşıldı (%.2fm). Pickup başlıyor.", reached
+                )
+                self._align_phase = "HORIZONTAL"
+                self._payload_descent_alt = None
+                self._goto(MissionState.PICKING_UP_PAYLOAD)
+                return
+
+            # Bir sonraki basamak için yatay hizalamaya dön
+            self._align_phase = "HORIZONTAL"
+            self._align_phase_start_t = None   # yeni faz sayacını sıfırla
+            self._no_detection_count = 0
+            self.log.info(
+                "Basamak inişi tamamlandı (%.2fm). Yatay hizalamaya devam.", reached
+            )
+            return
+
+        # ---------- HORIZONTAL fazı: yatay hizalama ----------
+        if frame is None:
+            return
+
+        target = self.data.first_target
+        if target is None:
+            self._goto(MissionState.TASK_2_FAILED)
+            return
+
+        color = self.payload_for_target(target)
+        results = self.payload_detector.detect(frame, pos.relative_altitude, color)
+
+        # Güncellenen etiket: irtifa ve sonraki hedef
+        next_step = max(
+            PAYLOAD_CONTACT_ALTITUDE,
+            pos.relative_altitude - PAYLOAD_DESCENT_STEP_M,
+        )
+        self._set_display_payload(
+            frame, results,
+            f"HİZALA {pos.relative_altitude:.2f}m → sonraki:{next_step:.2f}m"
+        )
+
+        if results:
+            best = results[0]
+            self.data.pending_detection = Detection(
+                color=best.color, shape="PAYLOAD",
+                center_x=best.center_x, center_y=best.center_y,
+                area_px=best.area_px,
+                bbox_width_px=best.width_px, bbox_height_px=best.height_px,
+                confidence=best.confidence,
+            )
+        else:
+            # Yük bu irtifada görünmüyor — hafif kayma olabilir, GPS'te bekle
+            self._no_detection_count += 1
+            if self._no_detection_count > self._NO_DETECTION_LIMIT:
+                self.log.warning(
+                    "Payload görünmüyor (%d tick). Yük arama adımına dönülüyor.",
+                    self._no_detection_count,
+                )
+                self._no_detection_count = 0
+                self._payload_descent_alt = None
+                self._reset_altitude_state()
+                self._goto(MissionState.SEARCHING_PAYLOAD)
+            return
+
+        detection = self.data.pending_detection
+        if detection is None:
+            return
+
+        now = time.monotonic()
+        if now - self._last_align_cmd_t < ALIGN_CMD_INTERVAL_S:
+            return
+
+        cx, cy = detection.center_x, detection.center_y
+        fw, fh = frame.shape[1], frame.shape[0]
+        dx = abs(cx - fw / 2)
+        dy = abs(cy - fh / 2)
+
+        # Dinamik tolerans: 1m üstünde GPS bu hassasiyete ulaşamaz → gevşek eşik
+        # 1m altında: yakın mesafe, sıkı eşik mantıklı
+        effective_tol = (
+            PAYLOAD_PIXEL_TOLERANCE_PX
+            if pos.relative_altitude <= 1.0
+            else PIXEL_ALIGNMENT_TOLERANCE_PX
+        )
+        aligned_tight = dx <= effective_tol and dy <= effective_tol
+
+        # Her durumda pozisyon komutu gönder — stuck önleme
+        self.position_controller.align_detection(cx, cy, fw, fh, pos.relative_altitude)
+        self._last_align_cmd_t = now
+
+        self.log.info(
+            "PAYLOAD HİZALA: merkez=(%.0f,%.0f) dx=%.0f dy=%.0f "
+            "irtifa=%.2fm tol=%.0fpx hizalı=%s",
+            cx, cy, dx, dy, pos.relative_altitude, effective_tol, aligned_tight,
+        )
+
+        # Hizalama timeout: belirli süre hizalanamıyorsa zorla bir basamak in.
+        # Daha aşağıda payload daha büyük görünür ve hizalama kolaylaşır.
+        if self._align_phase_start_t is None:
+            self._align_phase_start_t = now
+
+        align_elapsed = now - self._align_phase_start_t
+
+        if not aligned_tight and align_elapsed < PAYLOAD_ALIGN_TIMEOUT_S:
+            return   # Henüz timeout dolmadı, pozisyon komutları çalışıyor olabilir
+
+        if not aligned_tight:
+            self.log.warning(
+                "Hizalama timeout (%.1fs) irtifa=%.2fm dx=%.0f dy=%.0f → "
+                "zorla basamak inişi, daha yakında daha iyi görülür.",
+                align_elapsed, pos.relative_altitude, dx, dy,
+            )
+
+        # Hizalandı VEYA timeout → bir sonraki basamağa in
+        next_alt = max(PAYLOAD_CONTACT_ALTITUDE,
+                       pos.relative_altitude - PAYLOAD_DESCENT_STEP_M)
+        self._payload_descent_alt = next_alt
+        self._align_phase = "DESCENDING"
+        self._align_phase_start_t = None   # bir sonraki HORIZONTAL fazı için sıfırla
+        self._no_detection_count = 0
+        self.log.info(
+            "Payload hizalama → basamak inişi: %.2fm → %.2fm",
+            pos.relative_altitude, next_alt,
+        )
+        self.nav.set_max_speed(ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS)
+        self._send_altitude(next_alt, timeout=20.0)
+
+    # ------------------------------------------------------------------ #
+    def _do_descend_to_payload(self) -> None:
+        """
+        Bu state artık sadece ALIGNING_PAYLOAD tarafından tetiklenir.
+        Tüm kademeli iniş + hizalama mantığı _do_align_payload içindedir.
+        Bu handler backward-compat için korunuyor; direkt PICKING_UP_PAYLOAD'a yönlendir.
+        """
+        self.log.warning(
+            "_do_descend_to_payload çağrıldı — bu state artık kullanılmıyor. "
+            "PICKING_UP_PAYLOAD'a yönlendiriliyor."
+        )
+        self._reset_altitude_state()
+        self._goto(MissionState.PICKING_UP_PAYLOAD)
+
+    # ------------------------------------------------------------------ #
+    def _do_pickup(self) -> None:
+        """
+        Hata 7: Non-blocking servo bekleme.
+
+        İlk çağrıda servo komutunu gönder ve _pickup_servo_start'ı set et.
+        Sonraki tick'lerde PAYLOAD_SERVO_WAIT_S geçti mi diye kontrol et.
+        Bu süre zarfında kamera preview çalışmaya devam eder — donma yok.
+        """
+        target = self.data.first_target
+        if target is None:
+            self._goto(MissionState.TASK_2_FAILED)
+            return
+
+        # İlk çağrı: servo komutunu gönder
+        if self._pickup_servo_start is None:
+            payload_type = self.payload_for_target(target)
+            # Servo komutunu gönder (artık sleep YOK — payload_controller'dan sleep kaldırılacak)
+            self.payload.send_pickup_command(payload_type)
+            self._pickup_servo_start = time.monotonic()
+            self.log.info(
+                "Pickup servo komutu gönderildi (%s). %.1fs bekleniyor...",
+                payload_type.value, PAYLOAD_SERVO_WAIT_S,
+            )
+            return
+
+        # Servo bekleme süresi doldu mu?
+        elapsed = time.monotonic() - self._pickup_servo_start
+        if elapsed < PAYLOAD_SERVO_WAIT_S:
+            # Preview güncelle — donma yok
+            frame = self.camera.latest()
+            if frame is not None:
+                pos = self.nav.position()
+                disp = frame.copy()
+                cv2.putText(
+                    disp,
+                    f"SERVO BEKLE {elapsed:.1f}/{PAYLOAD_SERVO_WAIT_S:.0f}s",
+                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 200, 255), 2,
+                )
+                cv2.putText(
+                    disp,
+                    f"Alt: {pos.relative_altitude:.2f}m",
+                    (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 0), 2,
+                )
+                self._pending_display = disp
+            return
+
+        # Bekleme tamamlandı — pickup işlemini tamamla
+        self._pickup_servo_start = None
+        result = self.payload.finish_pickup(self.payload_for_target(target))
+        if result.success:
+            self.log.info("Pickup tamamlandı. Doğrulama irtifasına çıkılıyor.")
+            self._reset_altitude_state()
+            self._goto(MissionState.ASCENDING_FOR_VERIFICATION)
+        else:
+            self.data.pickup_attempts += 1
+            self._retry_or_fail()
+
+    # ------------------------------------------------------------------ #
+    def _do_ascend_for_verification(self) -> None:
+        if not self._alt_waiting:
+            self.log.info("Doğrulama irtifasına çıkılıyor: %.1fm", PAYLOAD_VERIFY_ALTITUDE)
+            self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
+            self._send_altitude(PAYLOAD_VERIFY_ALTITUDE, timeout=30.0)
+            return
+        result = self._altitude_ok()
+        if result is True:
+            self._reset_altitude_state()
+            self._goto(MissionState.VERIFYING_PAYLOAD)
+        elif result is None:
+            self.data.pickup_attempts += 1
+            self._retry_or_fail()
+
+    # ------------------------------------------------------------------ #
+    def _do_verify(self) -> None:
+        target = self.data.first_target
+        if target is None:
+            self._goto(MissionState.TASK_2_FAILED)
+            return
+
+        frame = self.camera.latest()
+        if frame is None:
+            self.data.pickup_attempts += 1
+            self._retry_or_fail()
+            return
+
+        color = self.payload_for_target(target)
+        pos = self.nav.position()
+        results = self.payload_detector.detect(frame, pos.relative_altitude, color)
+        self._set_display_payload(frame, results, "PAYLOAD DOĞRULA")
+
+        if not results or results[0].confidence < 0.30:
+            self.log.info("Payload doğrulandı → alındı. Görev 2 tamamlandı.")
+            self._goto(MissionState.TASK_2_COMPLETE)
+            return
+
+        self.data.pickup_attempts += 1
+        self.log.warning("Pickup doğrulama başarısız (güven=%.2f). Deneme %d/%d",
+                         results[0].confidence, self.data.pickup_attempts, MAX_PICKUP_ATTEMPTS)
+        self._retry_or_fail()
+
+    # ------------------------------------------------------------------ #
+    def _do_after_task2(self) -> None:
+        """
+        Görev 2 başarıyla tamamlandı.
+        Alınan yük 2. hedefin (Görev 1'de 2. yükün bırakıldığı) GPS konumuna götürülüp
+        orada bırakılır. Ardından RTL başlar.
+
+        Görev tanımı:
+          first_target  → 1. hedefin üzerinden yük alındı
+          second_target → alınan yük buraya bırakılacak
+        """
+        target = self.data.second_target
+        if target is None:
+            self.log.error("2. hedef GPS bilgisi yok, RTL'ye geçiliyor.")
+            self._do_start_rtl()
+            return
+        self.log.info(
+            "Görev 2 tamamlandı. Alınan yük 2. hedefe götürülüyor: "
+            "%s %s  lat=%.7f lon=%.7f",
+            target.shape.value, target.color.value,
+            target.latitude, target.longitude,
+        )
+        self._reset_altitude_state()
+        self._goto(MissionState.RETURNING_PAYLOAD)
+
+    # ------------------------------------------------------------------ #
+    def _do_return_payload(self) -> None:
+        """
+        Alınan yükü 2. hedefin GPS konumuna götür.
+        Adım 1: TAKEOFF_ALTITUDE'da GPS'e uç.
+        Adım 2: Hedefe varınca TARGET_APPROACH_ALTITUDE'a in.
+        Adım 3: RELEASING_RETURNED_PAYLOAD'a geç.
+        """
+        target = self.data.second_target
+        if target is None:
+            self.log.error("_do_return_payload: second_target yok, RTL.")
+            self._do_start_rtl()
+            return
+
+        # Faz 1: GPS'e yüksekte git
+        if not self._alt_waiting:
+            pos = self.nav.position()
+            if pos.relative_altitude < TARGET_APPROACH_ALTITUDE - ALTITUDE_TOLERANCE_M:
+                self.log.info(
+                    "Dönüş öncesi irtifa artırılıyor → %.1fm", TARGET_APPROACH_ALTITUDE
+                )
+                self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
+                self._send_altitude(TARGET_APPROACH_ALTITUDE, timeout=30.0)
+                return
+
+        if self._alt_waiting:
+            result = self._altitude_ok()
+            if result is False:
+                return
+            self._reset_altitude_state()
+
+        # İrtifaya ulaşıldı — 2. hedefe git
+        pos = self.nav.position()
+        dist = haversine_m(
+            pos.latitude, pos.longitude,
+            target.latitude, target.longitude,
+        )
+        self.nav.goto_global(target.latitude, target.longitude, TARGET_APPROACH_ALTITUDE)
+
+        if dist < 3.0:
+            self.log.info(
+                "2. hedef konumuna ulaşıldı (lat=%.7f lon=%.7f). Yük bırakılacak.",
+                target.latitude, target.longitude,
+            )
+            self._reset_altitude_state()
+            self._align_phase = "HORIZONTAL"
+            self._last_align_cmd_t = 0.0
+            self._target_rough_lat = target.latitude
+            self._target_rough_lon = target.longitude
+            self.nav.set_max_speed(ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS)
+            self._goto(MissionState.RELEASING_RETURNED_PAYLOAD)
+
+    # ------------------------------------------------------------------ #
+    def _do_release_returned_payload(self) -> None:
+        """
+        Alınan yükü 2. hedefin merkezine kademeli iniş + yatay hizalama ile bırak.
+        Görüntü işleme: second_target'ın renk + şeklini ara.
+        _align_phase: HORIZONTAL | DESCENDING | RELEASING
+        """
+        frame = self.camera.latest()
+        pos = self.nav.position()
+
+        # --- RELEASING ---
+        if self._align_phase == "RELEASING":
+            target = self.data.second_target
+            if target is not None:
+                # Alınan yükün rengi: first_target'ın payload'ı (tersine)
+                payload_type = self.payload_for_target(self.data.first_target) \
+                    if self.data.first_target is not None \
+                    else self.payload_for_target(target)
+                result = self.payload.release_payload(payload_type)
+                self.log.info(
+                    "Geri getirilen yük 2. hedefte bırakıldı: %s (hedef=%s %s) — başarı=%s",
+                    payload_type.value,
+                    target.shape.value, target.color.value,
+                    result.success,
+                )
+            self._align_phase = "HORIZONTAL"
+            self._reset_altitude_state()
+            self.log.info("Görev 2 yük bırakma tamamlandı → RTL başlatılıyor.")
+            self._do_start_rtl()
+            return
+
+        # --- DESCENDING ---
+        if self._align_phase == "DESCENDING":
+            if frame is not None:
+                self._pending_display = self._base_overlay(frame)
+            result = self._altitude_ok()
+            if result is False:
+                return
+            reached = self._alt_target
+            self._reset_altitude_state()
+            self._align_phase = "HORIZONTAL"
+            self.log.info(
+                "Geri yük bırakma: %.1fm'ye ulaşıldı → yatay hizalamaya devam.",
+                reached or 0,
+            )
+            return
+
+        # --- HORIZONTAL: 2. hedefe göre görüntü işleme ---
+        if frame is None:
+            return
+
+        target_obj = self.data.second_target
+        detections = self.target_detector.detect(frame)
+        if target_obj is not None:
+            # Yalnızca 2. hedefe ait renk + şekli ara
+            detections = [
+                d for d in detections
+                if d.color == target_obj.color
+                and d.shape == target_obj.shape.value
+            ]
+        self._set_display_detections(frame, detections)
+
+        if not detections:
+            # Hedef görüntüden çıkmış — kaba GPS'e dön
+            now = time.monotonic()
+            if now - self._last_recover_t >= self._RECOVER_INTERVAL:
+                self._last_recover_t = now
+                if self._target_rough_lat is not None:
+                    self.nav.goto_global(
+                        self._target_rough_lat,
+                        self._target_rough_lon,
+                        pos.relative_altitude,
+                    )
+            return
+
+        best = detections[0]
+        now = time.monotonic()
+        if now - self._last_align_cmd_t < ALIGN_CMD_INTERVAL_S:
+            return
+
+        aligned = self.position_controller.align_detection(
+            best.center_x, best.center_y,
+            frame.shape[1], frame.shape[0],
+            pos.relative_altitude,
+        )
+        self._last_align_cmd_t = now
+        if not aligned:
+            return
+
+        next_alt = self._next_step_down_altitude(
+            pos.relative_altitude, PAYLOAD_RELEASE_ALTITUDE,
+        )
+        if next_alt is not None:
+            self.log.info(
+                "Geri yük bırakma: yatay hizalama tamam (%.1fm). Kademeli iniş: %.1fm",
+                pos.relative_altitude, next_alt,
+            )
+            self._align_phase = "DESCENDING"
+            self.nav.set_max_speed(ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS)
+            self._send_altitude(next_alt, timeout=25.0)
+        else:
+            self.log.info(
+                "Geri yük bırakma: %.1fm'de 2. hedef merkezinde → yük bırakılıyor.",
+                pos.relative_altitude,
+            )
+            self._align_phase = "RELEASING"
+
+    # ------------------------------------------------------------------ #
+    def _do_start_rtl(self) -> None:
+        self.log.info("Görev 3: RTL başlatılıyor. Başarısız=%s", self.data.mission_failed)
+        self.rtl_controller.start()
+        self._goto(MissionState.RTL)
+
+    def _do_wait_rtl(self) -> None:
+        deadline = time.monotonic() + 120.0
+        while time.monotonic() < deadline:
+            self._pending_display = None
+            frame = self.camera.latest()
+            if frame is not None:
+                self._pending_display = self._base_overlay(frame)
+            self._pump_preview()
+            pos = self.nav.position()
+            if (self.nav.home_lat is not None
+                    and self.nav.home_lon is not None
+                    and haversine_m(pos.latitude, pos.longitude,
+                                    self.nav.home_lat, self.nav.home_lon) < 2.0
+                    and pos.relative_altitude < 1.5):
+                self.log.info("RTL tamamlandı.")
+                self._goto(MissionState.COMPLETE)
+                return
+            time.sleep(0.1)
+        self.log.error("RTL timeout.")
+        self._goto(MissionState.COMPLETE)
+
+    # ==================================================================== #
+    #  Yardımcı metodlar
+    # ==================================================================== #
+
+    def _goto(self, new_state: MissionState) -> None:
+        self.log.info("STATE: %s → %s", self.data.state.value, new_state.value)
+        self.data.state = new_state
+
+    @staticmethod
+    def payload_for_target(target) -> TargetColor:
+        return TargetColor.RED if target.color == TargetColor.BLUE else TargetColor.BLUE
+
+    def _retry_or_fail(self) -> None:
+        self._pickup_servo_start = None  # servo bekleme sayacını sıfırla
+        if self.data.pickup_attempts < MAX_PICKUP_ATTEMPTS:
+            self.payload.clear_attached()
+            self.data.pending_detection = None
+            self._reset_altitude_state()
+            self.log.info("Pickup yeniden denenecek (%d/%d).",
+                          self.data.pickup_attempts, MAX_PICKUP_ATTEMPTS)
+            self._goto(MissionState.SEARCHING_PAYLOAD)
+        else:
+            self.log.error("Maksimum pickup denemesi aşıldı. Görev 2 başarısız.")
+            self.data.mission_failed = True
+            self._goto(MissionState.TASK_2_FAILED)
+
+    def _safe_reacquire(self) -> None:
+        """Hedef tamamen kayboldu — güvenli irtifaya çık ve aramaya dön."""
+        self.log.warning("Hedef tamamen kaybedildi. Güvenli irtifaya çıkılıyor.")
+        self._reset_altitude_state()
+        self.target_detector.history.clear()
+        self.target_detector.reset_time_lock()
+        self.data.pending_detection = None
+        self._gps_candidates.clear()
+        self._locked_color = None
+        self._locked_shape = None
+        self._align_phase = "HORIZONTAL"
+        self._last_align_cmd_t = 0.0
+        self._no_detection_count = 0
+        self._last_recover_t = 0.0
+        self._last_align_status_log_t = 0.0
+        self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
+        self._send_altitude(TARGET_APPROACH_ALTITUDE, timeout=20.0)
+        self._return_search()
+
+    def _next_step_down_altitude(self, current_alt: float, floor_alt: float) -> float | None:
+        """Kademeli iniş: yatay hizalamadan sonra bir sonraki basamak irtifası."""
+        if current_alt <= floor_alt + ALTITUDE_TOLERANCE_M:
+            return None
+        step_target = current_alt - ALIGNMENT_DESCENT_STEP_M
+        return max(floor_alt, step_target)
+
+    def _filter_active_detections(self, detections: list) -> list:
+        """İşlenmiş hedefleri çıkar; kilit varsa yalnızca kilitli türe odaklan."""
+        processed: set[tuple] = set()
+        if self.data.first_target is not None and self.data.first_target.payload_released:
+            processed.add((self.data.first_target.color, self.data.first_target.shape.value))
+        if self.data.second_target is not None and self.data.second_target.payload_released:
+            processed.add((self.data.second_target.color, self.data.second_target.shape.value))
+
+        filtered = [
+            d for d in detections
+            if (d.color, d.shape) not in processed
+        ]
+
+        if self._locked_color is not None and self._locked_shape is not None:
+            locked = [
+                d for d in filtered
+                if d.color == self._locked_color and d.shape == self._locked_shape
+            ]
+            if locked:
+                return locked
+        return filtered
+
+    def _pick_locked_detection(self, detections: list) -> Detection:
+        """Kilitli hedef türüne uygun tespiti seç."""
+        if self._locked_color is not None and self._locked_shape is not None:
+            for d in detections:
+                if d.color == self._locked_color and d.shape == self._locked_shape:
+                    return d
+        return detections[0]
+
+    def _return_search(self) -> None:
+        self.target_detector.history.clear()
+        self.data.pending_detection = None
+        if self.data.first_target is None:
+            self._goto(MissionState.SEARCHING_FIRST_TARGET)
+        elif self.data.second_target is None:
+            self._goto(MissionState.SEARCHING_SECOND_TARGET)
+        else:
+            self._goto(MissionState.SEARCHING_PAYLOAD)

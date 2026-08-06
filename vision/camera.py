@@ -1,5 +1,4 @@
 import importlib
-import queue
 import threading
 from typing import Optional
 

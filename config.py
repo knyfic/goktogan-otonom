@@ -87,10 +87,6 @@ ALIGN_SPEED_MPS = 0.8
 # İrtifa değişim hızı
 VERTICAL_SPEED_MPS = 1.0
 
-# Eski isimler — geriye dönük uyumluluk
-MAX_HORIZONTAL_SPEED_MPS = 4.0
-COARSE_APPROACH_SPEED_MPS = 3.0
-FINE_APPROACH_SPEED_MPS = 1.0
 POSITION_TOLERANCE_M = 0.35
 ALTITUDE_TOLERANCE_M = 0.20
 PIXEL_ALIGNMENT_TOLERANCE_PX = 30.0
@@ -98,9 +94,6 @@ PIXEL_ALIGNMENT_TOLERANCE_PX = 30.0
 # Hizalama komutu gönderme aralığı (saniye)
 # Her step'te değil, bu aralıkta bir goto_body_offset gönderilir.
 ALIGN_CMD_INTERVAL_S = 0.4
-
-# Kademeli iniş adım büyüklüğü (hedef bırakma hizalaması)
-ALIGNMENT_DESCENT_STEP_M = 2.0
 
 # GPS kalite biriktirme: hizalama döngüsünde "hizalı" anında GPS + confidence
 # kaydedilir; en az bu kadar örnek birikmeden GPS kesinleşmez.

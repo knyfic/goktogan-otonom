@@ -57,7 +57,6 @@ from config import (
     TAKEOFF_ALTITUDE,
     VERTICAL_SPEED_MPS,
 )
-from flight.altitude_controller import AltitudeController
 from flight.navigation import Navigation, haversine_m
 from flight.position_controller import PositionController
 from flight.rtl import RTLController
@@ -99,7 +98,6 @@ class MissionStateMachine:
         self.target_detector = TargetDetector()
         self.payload_detector = PayloadDetector(self.camera_model)
         self.position_controller = PositionController(navigation, self.camera_model)
-        self.altitude_controller = AltitudeController(navigation)
         self.rtl_controller = RTLController(navigation)
 
         self.data = MissionData()
@@ -201,8 +199,6 @@ class MissionStateMachine:
             self._do_release()
         elif s == MissionState.ASCENDING_AFTER_FIRST_RELEASE:
             self._do_ascend_after_first_release()
-        elif s == MissionState.TASK_1_COMPLETE:
-            self._goto(MissionState.NAVIGATING_TO_FIRST_TARGET)
         elif s == MissionState.NAVIGATING_TO_FIRST_TARGET:
             self._do_navigate_to_first()
         elif s == MissionState.ALIGNING_ON_TARGET_FOR_PICKUP:
@@ -211,8 +207,6 @@ class MissionStateMachine:
             self._do_search_payload()
         elif s == MissionState.ALIGNING_PAYLOAD:
             self._do_align_payload()
-        elif s == MissionState.DESCENDING_TO_PAYLOAD:
-            self._do_descend_to_payload()
         elif s == MissionState.PICKING_UP_PAYLOAD:
             self._do_pickup()
         elif s == MissionState.ASCENDING_FOR_VERIFICATION:
@@ -421,8 +415,6 @@ class MissionStateMachine:
     # ------------------------------------------------------------------ #
     def _do_init(self) -> None:
         self.nav.wait_for_position()
-        self.data.home_latitude = self.nav.home_lat
-        self.data.home_longitude = self.nav.home_lon
         self._goto(MissionState.TAKEOFF)
 
     # ------------------------------------------------------------------ #
@@ -627,16 +619,7 @@ class MissionStateMachine:
         # ---------- HORIZONTAL fazı ----------
         detection = self.data.pending_detection
 
-        if detection is None:
-            if self._no_detection_count > self._NO_DETECTION_LIMIT:
-                self.log.warning(
-                    "ALIGN: %d tick üst üste tespit yok, kaba GPS'e dönülüyor.",
-                    self._no_detection_count,
-                )
-                self._no_detection_count = 0
-                self._recover_to_rough_position()
-            return
-
+        # Tespit kayıp sayacı: hem tespit yok hem de limit dolmuşsa recover et
         if self._no_detection_count > self._NO_DETECTION_LIMIT:
             self.log.warning(
                 "ALIGN: %d tick üst üste tespit yok, kaba GPS'e dönülüyor.",
@@ -644,6 +627,9 @@ class MissionStateMachine:
             )
             self._no_detection_count = 0
             self._recover_to_rough_position()
+            return
+
+        if detection is None:
             return
 
         now = time.monotonic()
@@ -835,7 +821,7 @@ class MissionStateMachine:
             self._goto(MissionState.ASCENDING_AFTER_FIRST_RELEASE)
         else:
             # Her iki hedef de tamamlandı → Görev 2
-            self._goto(MissionState.TASK_1_COMPLETE)
+            self._goto(MissionState.NAVIGATING_TO_FIRST_TARGET)
 
     # ------------------------------------------------------------------ #
     def _do_ascend_after_first_release(self) -> None:
@@ -1227,20 +1213,6 @@ class MissionStateMachine:
         self._send_altitude(next_alt, timeout=20.0)
 
     # ------------------------------------------------------------------ #
-    def _do_descend_to_payload(self) -> None:
-        """
-        Bu state artık sadece ALIGNING_PAYLOAD tarafından tetiklenir.
-        Tüm kademeli iniş + hizalama mantığı _do_align_payload içindedir.
-        Bu handler backward-compat için korunuyor; direkt PICKING_UP_PAYLOAD'a yönlendir.
-        """
-        self.log.warning(
-            "_do_descend_to_payload çağrıldı — bu state artık kullanılmıyor. "
-            "PICKING_UP_PAYLOAD'a yönlendiriliyor."
-        )
-        self._reset_altitude_state()
-        self._goto(MissionState.PICKING_UP_PAYLOAD)
-
-    # ------------------------------------------------------------------ #
     def _do_pickup(self) -> None:
         """
         Hata 7: Non-blocking servo bekleme.
@@ -1272,19 +1244,13 @@ class MissionStateMachine:
             # Preview güncelle — donma yok
             frame = self.camera.latest()
             if frame is not None:
-                pos = self.nav.position()
-                disp = frame.copy()
-                cv2.putText(
-                    disp,
-                    f"SERVO BEKLE {elapsed:.1f}/{PAYLOAD_SERVO_WAIT_S:.0f}s",
-                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 200, 255), 2,
+                servo_str = f"SERVO BEKLE {elapsed:.1f}/{PAYLOAD_SERVO_WAIT_S:.0f}s"
+                l1, l2 = self._hud_lines(extra=servo_str)
+                self._pending_display = self._draw_hud(
+                    frame, l1, l2,
+                    line1_color=(0, 200, 255),
+                    target_panel=self._target_panel_lines(),
                 )
-                cv2.putText(
-                    disp,
-                    f"Alt: {pos.relative_altitude:.2f}m",
-                    (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 0), 2,
-                )
-                self._pending_display = disp
             return
 
         # Bekleme tamamlandı — pickup işlemini tamamla

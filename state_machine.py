@@ -1249,7 +1249,6 @@ class MissionStateMachine:
                 self._pending_display = self._draw_hud(
                     frame, l1, l2,
                     line1_color=(0, 200, 255),
-                    target_panel=self._target_panel_lines(),
                 )
             return
 

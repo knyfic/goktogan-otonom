@@ -24,7 +24,7 @@ FINAL_TARGET_ALTITUDE = PAYLOAD_RELEASE_ALTITUDE
 PAYLOAD_CONTACT_ALTITUDE = 0.0
 
 # Yük doğrulama için yükselme irtifası
-PAYLOAD_VERIFY_ALTITUDE = 0.5
+PAYLOAD_VERIFY_ALTITUDE = 1
 
 # Yük alımı hassas kademeli iniş adım büyüklüğü (metre)
 # 10cm'lik yük için kamera çok yakından bakmalı — küçük adımlarla in

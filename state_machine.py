@@ -47,6 +47,7 @@ from config import (
     PIXEL_ALIGNMENT_TOLERANCE_PX,
     PAYLOAD_RELEASE_ALTITUDE,
     PAYLOAD_SEARCH_ALTITUDE,
+    PAYLOAD_SEARCH_TIMEOUT,
     PAYLOAD_SERVO_WAIT_S,
     PAYLOAD_VERIFY_ALTITUDE,
     PAYLOAD_WIDTH,
@@ -157,6 +158,11 @@ class MissionStateMachine:
         # Her HORIZONTAL fazının başlangıç zamanı — timeout için
         self._align_phase_start_t: float | None = None
 
+        # ---- SEARCHING_PAYLOAD timeout ----
+        # Payload bulunamazsa bu süre sonunda yukarı çıkıp yeniden merkezle.
+        # Geçici frame kayıplarında (1-2 tick) tetiklenmez; sadece timeout dolunca.
+        self._payload_search_start: float | None = None
+
         # ---- Hedef üzerinde hizalama (pickup öncesi) ----
         # ALIGNING_ON_TARGET_FOR_PICKUP state'inde kullanılır
         self._align_for_pickup_deadline: float | None = None
@@ -205,6 +211,8 @@ class MissionStateMachine:
             self._do_align_on_target_for_pickup()
         elif s == MissionState.SEARCHING_PAYLOAD:
             self._do_search_payload()
+        elif s == MissionState.ASCENDING_FOR_PAYLOAD_RETRY:
+            self._do_ascend_for_payload_retry()
         elif s == MissionState.ALIGNING_PAYLOAD:
             self._do_align_payload()
         elif s == MissionState.PICKING_UP_PAYLOAD:
@@ -990,25 +998,54 @@ class MissionStateMachine:
             return
 
         frame = self.camera.latest()
+        pos = self.nav.position()
+
+        # ── Timeout sayacını başlat (ilk girişte) ─────────────────────
+        if self._payload_search_start is None:
+            self._payload_search_start = time.monotonic()
+
+        elapsed = time.monotonic() - self._payload_search_start
+
+        # ── Timeout: PAYLOAD_SEARCH_TIMEOUT kadar bulunamadıysa recovery ─
+        if elapsed >= PAYLOAD_SEARCH_TIMEOUT:
+            self.log.warning(
+                "Payload %.0fs içinde bulunamadı. "
+                "%.1fm'ye çıkılıp hedef yeniden ortalanacak.",
+                PAYLOAD_SEARCH_TIMEOUT,
+                PAYLOAD_SEARCH_ALTITUDE,
+            )
+            self._payload_search_start = None   # sayacı sıfırla
+            self._reset_altitude_state()
+            self._align_for_pickup_deadline = time.monotonic() + ALIGN_ON_TARGET_TIMEOUT_S
+            self._last_align_cmd_t = 0.0
+            self._payload_descent_alt = None
+
+            # Önce arama irtifasına çık, sonra ALIGNING_ON_TARGET_FOR_PICKUP
+            # Non-blocking: yükselme state'ini kullan
+            self._send_altitude(PAYLOAD_SEARCH_ALTITUDE, timeout=20.0)
+            self._goto(MissionState.ASCENDING_FOR_PAYLOAD_RETRY)
+            return
+
         if frame is None:
             return
 
         color = self.payload_for_target(target)
-        pos = self.nav.position()
         results = self.payload_detector.detect(frame, pos.relative_altitude, color)
-        self._set_display_payload(frame, results, f"PAYLOAD ARA ({color.value})")
+
+        # Ekrana kalan süreyi de göster
+        remaining = max(0.0, PAYLOAD_SEARCH_TIMEOUT - elapsed)
+        self._set_display_payload(
+            frame, results,
+            f"PAYLOAD ARA ({color.value}) timeout:{remaining:.0f}s"
+        )
 
         if not results:
             return
 
-        # Boyut filtresi: hedef (1m kenar) ile payload (10cm kare) birbirine yakınsa
-        # kamerada çok farklı büyüklükte görünürler.
-        # expected_payload_pixels ile hesaplanan boyutun MAX_PAYLOAD_SIZE_FACTOR katını
-        # aşan tespitler PAYLOAD değil hedeftir → yoksay.
+        # Boyut filtresi — büyük tespitler payload değil hedeftir
         exp_w, exp_h = expected_payload_pixels(
             PAYLOAD_WIDTH, PAYLOAD_HEIGHT, pos.relative_altitude, self.position_controller.camera
         )
-        # Payload max boyutu: beklenenin 3 katı (tolerans marjı)
         max_w = exp_w * MAX_PAYLOAD_SIZE_FACTOR
         max_h = exp_h * MAX_PAYLOAD_SIZE_FACTOR
 
@@ -1032,6 +1069,8 @@ class MissionStateMachine:
             color.value, best.center_x, best.center_y, best.confidence,
             best.width_px, best.height_px, exp_w, exp_h,
         )
+        # Başarılı tespit — sayacı sıfırla (bir sonraki arama için temiz başla)
+        self._payload_search_start = None
         self.data.pending_detection = Detection(
             color=best.color, shape="PAYLOAD",
             center_x=best.center_x, center_y=best.center_y,
@@ -1041,6 +1080,45 @@ class MissionStateMachine:
         )
         self._last_align_cmd_t = 0.0
         self._goto(MissionState.ALIGNING_PAYLOAD)
+
+    # ------------------------------------------------------------------ #
+    def _do_ascend_for_payload_retry(self) -> None:
+        """
+        SEARCHING_PAYLOAD timeout sonrası recovery:
+          1. PAYLOAD_SEARCH_ALTITUDE'a yükselt (non-blocking)
+          2. İrtifaya varınca ALIGNING_ON_TARGET_FOR_PICKUP'a geç
+             → hedef yeniden ortalanır → payload araması yeniden başlar
+        """
+        if not self._alt_waiting:
+            # Henüz irtifa komutu verilmedi — ver
+            pos = self.nav.position()
+            if pos.relative_altitude >= PAYLOAD_SEARCH_ALTITUDE - ALTITUDE_TOLERANCE_M:
+                # Zaten yeterli irtifadayız, direkt merkezlemeye geç
+                self.log.info(
+                    "Payload retry: irtifa zaten %.1fm ≥ %.1fm. "
+                    "Hedef merkezlemeye geçiliyor.",
+                    pos.relative_altitude, PAYLOAD_SEARCH_ALTITUDE,
+                )
+                self._goto(MissionState.ALIGNING_ON_TARGET_FOR_PICKUP)
+                return
+            self.log.info(
+                "Payload retry: %.1fm → %.1fm yükseltiliyor.",
+                pos.relative_altitude, PAYLOAD_SEARCH_ALTITUDE,
+            )
+            self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
+            self._send_altitude(PAYLOAD_SEARCH_ALTITUDE, timeout=25.0)
+            return
+
+        result = self._altitude_ok()
+        if result is False:
+            return  # hâlâ çıkıyor
+
+        self._reset_altitude_state()
+        self.log.info(
+            "Payload retry: %.1fm'ye ulaşıldı. Hedef merkezleme başlıyor.",
+            self.nav.position().relative_altitude,
+        )
+        self._goto(MissionState.ALIGNING_ON_TARGET_FOR_PICKUP)
 
     # ------------------------------------------------------------------ #
     def _do_align_payload(self) -> None:
@@ -1530,7 +1608,8 @@ class MissionStateMachine:
         return TargetColor.RED if target.color == TargetColor.BLUE else TargetColor.BLUE
 
     def _retry_or_fail(self) -> None:
-        self._pickup_servo_start = None  # servo bekleme sayacını sıfırla
+        self._pickup_servo_start = None   # servo bekleme sayacını sıfırla
+        self._payload_search_start = None  # payload arama sayacını sıfırla
         if self.data.pickup_attempts < MAX_PICKUP_ATTEMPTS:
             self.payload.clear_attached()
             self.data.pending_detection = None

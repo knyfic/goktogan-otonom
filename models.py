@@ -74,6 +74,21 @@ class VehiclePosition:
 
 
 @dataclass
+class PrePickupSignature:
+    """
+    Pickup başlamadan hemen önce kaydedilen payload'ın görsel referansı.
+    Birkaç stabil frame'den elde edilen medyan değerler kullanılır.
+    """
+    area_px:      float   # medyan piksel alanı
+    width_px:     float   # medyan bbox genişliği
+    height_px:    float   # medyan bbox yüksekliği
+    aspect_ratio: float   # medyan en-boy oranı (max/min)
+    confidence:   float   # medyan detector confidence
+    # Kaç frame'den oluşturuldu (güvenilirlik göstergesi)
+    sample_count: int = 0
+
+
+@dataclass
 class MissionData:
     state: MissionState = MissionState.INIT
     first_target: Optional[Target] = None

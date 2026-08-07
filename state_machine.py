@@ -17,6 +17,7 @@ Tasarım kuralları:
 """
 
 import logging
+import statistics
 import time
 
 import cv2
@@ -57,6 +58,9 @@ from config import (
     SEARCH_SPEED_MPS,
     TARGET_APPROACH_ALTITUDE,
     TAKEOFF_ALTITUDE,
+    VERIFY_ABSENT_FRAMES_REQUIRED,
+    VERIFY_FALLBACK_CONFIDENCE,
+    VERIFY_SIMILARITY_THRESHOLD,
     VERTICAL_SPEED_MPS,
 )
 from flight.navigation import Navigation, haversine_m
@@ -66,6 +70,7 @@ from models import (
     Detection,
     MissionData,
     MissionState,
+    PrePickupSignature,
     Target,
     TargetColor,
     TargetType,
@@ -173,6 +178,19 @@ class MissionStateMachine:
         # ---- Gösterilecek frame (sadece _pump_preview yazar ekrana) ----
         # State handler'lar _pending_display'e atar; _pump_preview gösterir.
         self._pending_display: np.ndarray | None = None
+
+        # ---- Pre-pickup signature ----
+        # Pickup servo komutu verilmeden önce birkaç frame'den oluşturulan
+        # payload görsel referansı. Verification sırasında karşılaştırma için kullanılır.
+        # Yeni arama başladığında veya retry'da temizlenir.
+        self._pre_pickup_sig: PrePickupSignature | None = None
+        # Servo bekleme süresinde biriktirilen ham frame değerleri
+        self._sig_area_samples:  list[float] = []
+        self._sig_width_samples: list[float] = []
+        self._sig_height_samples: list[float] = []
+        self._sig_conf_samples:  list[float] = []
+        # Verification temporal window: kaç ardışık frame'de "target kayboldu"
+        self._verify_absent_count: int = 0
 
     # ==================================================================== #
     #  Ana döngü
@@ -1321,19 +1339,30 @@ class MissionStateMachine:
 
         İlk çağrıda servo komutunu gönder ve _pickup_servo_start'ı set et.
         Sonraki tick'lerde PAYLOAD_SERVO_WAIT_S geçti mi diye kontrol et.
-        Bu süre zarfında kamera preview çalışmaya devam eder — donma yok.
+        Bu süre zarfında:
+          - Kamera preview çalışmaya devam eder (donma yok).
+          - Her frame'de payload detect edilip signature sample'ları biriktirilir.
+        Servo bittiğinde sample'lardan median alınarak PrePickupSignature oluşturulur.
         """
+        import statistics
+
         target = self.data.first_target
         if target is None:
             self._goto(MissionState.TASK_2_FAILED)
             return
 
-        # İlk çağrı: servo komutunu gönder
+        # İlk çağrı: sample listelerini sıfırla, servo komutunu gönder
         if self._pickup_servo_start is None:
             payload_type = self.payload_for_target(target)
-            # Servo komutunu gönder (artık sleep YOK — payload_controller'dan sleep kaldırılacak)
             self.payload.send_pickup_command(payload_type)
             self._pickup_servo_start = time.monotonic()
+            # Eski signature ve sample'ları temizle (yeni pickup denemesi)
+            self._pre_pickup_sig = None
+            self._sig_area_samples.clear()
+            self._sig_width_samples.clear()
+            self._sig_height_samples.clear()
+            self._sig_conf_samples.clear()
+            self._verify_absent_count = 0
             self.log.info(
                 "Pickup servo komutu gönderildi (%s). %.1fs bekleniyor...",
                 payload_type.value, PAYLOAD_SERVO_WAIT_S,
@@ -1343,10 +1372,26 @@ class MissionStateMachine:
         # Servo bekleme süresi doldu mu?
         elapsed = time.monotonic() - self._pickup_servo_start
         if elapsed < PAYLOAD_SERVO_WAIT_S:
-            # Preview güncelle — donma yok
             frame = self.camera.latest()
             if frame is not None:
-                servo_str = f"SERVO BEKLE {elapsed:.1f}/{PAYLOAD_SERVO_WAIT_S:.0f}s"
+                # Signature için sample biriktir: mevcut irtifada payload'ı detect et
+                color = self.payload_for_target(target)
+                pos = self.nav.position()
+                raw = self.payload_detector.detect(frame, pos.relative_altitude, color)
+                filtered = self._filter_payload_results(raw, pos.relative_altitude)
+                # Tracker'dan kilitli track ID'yi de göz önünde bulundur:
+                # tracker'ın en son seçtiği candidate'ı sample olarak al
+                best = self.payload_tracker.update(filtered, frame.shape)
+                if best is not None:
+                    self._sig_area_samples.append(best.area_px)
+                    self._sig_width_samples.append(best.width_px)
+                    self._sig_height_samples.append(best.height_px)
+                    self._sig_conf_samples.append(best.confidence)
+
+                servo_str = (
+                    f"SERVO BEKLE {elapsed:.1f}/{PAYLOAD_SERVO_WAIT_S:.0f}s  "
+                    f"sig_n={len(self._sig_area_samples)}"
+                )
                 l1, l2 = self._hud_lines(extra=servo_str)
                 self._pending_display = self._draw_hud(
                     frame, l1, l2,
@@ -1354,8 +1399,53 @@ class MissionStateMachine:
                 )
             return
 
-        # Bekleme tamamlandı — pickup işlemini tamamla
+        # Bekleme tamamlandı — signature'ı finalleştir
         self._pickup_servo_start = None
+        if self._sig_area_samples:
+            med_area   = statistics.median(self._sig_area_samples)
+            med_w      = statistics.median(self._sig_width_samples)
+            med_h      = statistics.median(self._sig_height_samples)
+            med_conf   = statistics.median(self._sig_conf_samples)
+            med_aspect = max(med_w, med_h) / max(min(med_w, med_h), 1.0)
+            self._pre_pickup_sig = PrePickupSignature(
+                area_px=med_area,
+                width_px=med_w,
+                height_px=med_h,
+                aspect_ratio=med_aspect,
+                confidence=med_conf,
+                sample_count=len(self._sig_area_samples),
+            )
+            self.log.info(
+                "Pre-pickup signature oluşturuldu: "
+                "area=%.0fpx² w=%.0f h=%.0f aspect=%.2f conf=%.2f n=%d",
+                med_area, med_w, med_h, med_aspect, med_conf,
+                len(self._sig_area_samples),
+            )
+        else:
+            # Servo sırasında hiç tespit yapılamadı — pending_detection'dan al
+            if self.data.pending_detection is not None:
+                d = self.data.pending_detection
+                asp = max(d.bbox_width_px, d.bbox_height_px) / max(
+                    min(d.bbox_width_px, d.bbox_height_px), 1.0
+                )
+                self._pre_pickup_sig = PrePickupSignature(
+                    area_px=d.area_px,
+                    width_px=d.bbox_width_px,
+                    height_px=d.bbox_height_px,
+                    aspect_ratio=asp,
+                    confidence=d.confidence,
+                    sample_count=1,
+                )
+                self.log.warning(
+                    "Servo sırasında sample toplanamadı; "
+                    "pending_detection'dan signature: area=%.0fpx² conf=%.2f",
+                    d.area_px, d.confidence,
+                )
+            else:
+                self.log.warning(
+                    "Pre-pickup signature oluşturulamadı (ne sample ne pending_detection var)."
+                )
+
         result = self.payload.finish_pickup(self.payload_for_target(target))
         if result.success:
             self.log.info("Pickup tamamlandı. Doğrulama irtifasına çıkılıyor.")
@@ -1382,6 +1472,21 @@ class MissionStateMachine:
 
     # ------------------------------------------------------------------ #
     def _do_verify(self) -> None:
+        """
+        Pickup doğrulaması — signature tabanlı + temporal confirmation.
+
+        Mantık:
+          1. Pre-pickup signature varsa: kameradaki candidate'ları signature ile
+             karşılaştır (area, boyut, aspect ratio normalize farkı).
+             - Hiçbir candidate benzer değilse → "target kayboldu" frame sayacını artır.
+             - Benzer candidate varsa → payload hâlâ yerde olabilir → sayacı sıfırla.
+          2. VERIFY_ABSENT_FRAMES_REQUIRED ardışık frame boyunca target görülmezse
+             pickup başarılı.
+          3. Signature yoksa (fallback): eski confidence eşiği mantığı.
+
+        Büyük decoy/hedef nesnesinin görülmesi, pre-pickup signature ile benzer
+        olmadığı sürece retry tetiklemez.
+        """
         target = self.data.first_target
         if target is None:
             self._goto(MissionState.TASK_2_FAILED)
@@ -1389,24 +1494,129 @@ class MissionStateMachine:
 
         frame = self.camera.latest()
         if frame is None:
-            self.data.pickup_attempts += 1
-            self._retry_or_fail()
-            return
+            return  # Frame geç geldi — sayacı artırma, bekle
 
         color = self.payload_for_target(target)
-        pos = self.nav.position()
-        results = self.payload_detector.detect(frame, pos.relative_altitude, color)
-        self._set_display_payload(frame, results, "PAYLOAD DOĞRULA")
+        pos   = self.nav.position()
+        raw   = self.payload_detector.detect(frame, pos.relative_altitude, color)
+        # Boyut filtresi uygula — hedef büyüklüğündeki nesneleri çıkar
+        candidates = self._filter_payload_results(raw, pos.relative_altitude)
 
-        if not results or results[0].confidence < 0.30:
-            self.log.info("Payload doğrulandı → alındı. Görev 2 tamamlandı.")
-            self._goto(MissionState.TASK_2_COMPLETE)
+        sig = self._pre_pickup_sig
+
+        # --- Signature yoksa: fallback confidence eşiği ---
+        if sig is None:
+            self._set_display_payload(frame, candidates, "DOĞRULA (sig yok)")
+            if not candidates or candidates[0].confidence < VERIFY_FALLBACK_CONFIDENCE:
+                self.log.info(
+                    "Doğrulama (fallback): tespit yok veya güven düşük → payload alındı."
+                )
+                self._goto(MissionState.TASK_2_COMPLETE)
+            else:
+                self.data.pickup_attempts += 1
+                self.log.warning(
+                    "Doğrulama (fallback) başarısız: güven=%.2f. Deneme %d/%d",
+                    candidates[0].confidence,
+                    self.data.pickup_attempts, MAX_PICKUP_ATTEMPTS,
+                )
+                self._retry_or_fail()
             return
 
-        self.data.pickup_attempts += 1
-        self.log.warning("Pickup doğrulama başarısız (güven=%.2f). Deneme %d/%d",
-                         results[0].confidence, self.data.pickup_attempts, MAX_PICKUP_ATTEMPTS)
-        self._retry_or_fail()
+        # --- Signature var: benzerlik karşılaştırması ---
+        matched, best_sim = self._find_signature_match(candidates, sig)
+
+        # Log: her frame'in durumunu görsel olarak takip edebilmek için
+        label = (
+            f"DOĞRULA  absent={self._verify_absent_count}/{VERIFY_ABSENT_FRAMES_REQUIRED}"
+            f"  n={len(candidates)}"
+            + (f"  sim={best_sim:.2f}" if best_sim is not None else "  sim=—")
+        )
+        self._set_display_payload(frame, candidates, label)
+
+        if matched is not None:
+            # Pre-pickup target hâlâ kamerada görünüyor → payload alınamamış olabilir
+            self._verify_absent_count = 0
+            self.log.info(
+                "Doğrulama: signature eşleşti (sim=%.2f) "
+                "area=%.0f/%.0fpx² w=%.0f/%.0f h=%.0f/%.0f → target görünüyor, absent=0",
+                best_sim,
+                matched.area_px, sig.area_px,
+                matched.width_px, sig.width_px,
+                matched.height_px, sig.height_px,
+            )
+            # Birkaç frame beklemeden hemen retry yapmıyoruz;
+            # target sürekli görünüyorsa sonunda payload alınmadı kararı verilecek.
+            # Ancak çok fazla frame beklememeye de gerek yok — 1 eşleşen frame yeterli.
+            self.data.pickup_attempts += 1
+            self.log.warning(
+                "Pickup doğrulama başarısız: pre-pickup target hâlâ görünüyor. "
+                "Deneme %d/%d", self.data.pickup_attempts, MAX_PICKUP_ATTEMPTS,
+            )
+            self._retry_or_fail()
+        else:
+            # Hiçbir candidate signature ile eşleşmedi → target kayboldu bu frame'de
+            self._verify_absent_count += 1
+            self.log.info(
+                "Doğrulama: frame %d/%d — signature eşleşmesi yok "
+                "(n_candidate=%d en_iyi_sim=%s)",
+                self._verify_absent_count, VERIFY_ABSENT_FRAMES_REQUIRED,
+                len(candidates),
+                f"{best_sim:.2f}" if best_sim is not None else "—",
+            )
+            if self._verify_absent_count >= VERIFY_ABSENT_FRAMES_REQUIRED:
+                self.log.info(
+                    "Doğrulama başarılı: %d ardışık frame'de pre-pickup target "
+                    "görünmedi → payload alındı. Görev 2 tamamlandı.",
+                    self._verify_absent_count,
+                )
+                self._pre_pickup_sig = None
+                self._verify_absent_count = 0
+                self._goto(MissionState.TASK_2_COMPLETE)
+
+    # ------------------------------------------------------------------ #
+    def _find_signature_match(
+        self,
+        candidates: list,
+        sig: "PrePickupSignature",
+    ) -> "tuple[object | None, float | None]":
+        """
+        Candidate listesinden pre-pickup signature ile en benzer olanı bul.
+
+        Benzerlik skoru: area, width, height ve aspect ratio'nun normalize
+        ortalama farkı. Fark VERIFY_SIMILARITY_THRESHOLD'dan küçükse eşleşme var.
+
+        Döner: (en_benzer_candidate | None, en_iyi_normalize_fark | None)
+        None döndüyse hiçbir eşleşme yok.
+        """
+        if not candidates:
+            return None, None
+
+        best_candidate = None
+        best_diff = float("inf")
+
+        for c in candidates:
+            c_aspect = max(c.width_px, c.height_px) / max(min(c.width_px, c.height_px), 1.0)
+
+            area_diff   = abs(c.area_px   - sig.area_px)   / max(sig.area_px,   1.0)
+            width_diff  = abs(c.width_px  - sig.width_px)  / max(sig.width_px,  1.0)
+            height_diff = abs(c.height_px - sig.height_px) / max(sig.height_px, 1.0)
+            aspect_diff = abs(c_aspect    - sig.aspect_ratio) / max(sig.aspect_ratio, 1.0)
+
+            # Ağırlıklı ortalama: area en önemli, aspect ratio ikinci
+            avg_diff = (
+                0.40 * area_diff
+                + 0.25 * width_diff
+                + 0.25 * height_diff
+                + 0.10 * aspect_diff
+            )
+
+            if avg_diff < best_diff:
+                best_diff      = avg_diff
+                best_candidate = c
+
+        if best_diff <= VERIFY_SIMILARITY_THRESHOLD:
+            return best_candidate, best_diff
+        return None, best_diff
 
     # ------------------------------------------------------------------ #
     def _do_after_task2(self) -> None:
@@ -1649,9 +1859,17 @@ class MissionStateMachine:
         return TargetColor.RED if target.color == TargetColor.BLUE else TargetColor.BLUE
 
     def _retry_or_fail(self) -> None:
-        self._pickup_servo_start = None   # servo bekleme sayacını sıfırla
+        self._pickup_servo_start = None    # servo bekleme sayacını sıfırla
         self._payload_search_start = None  # payload arama sayacını sıfırla
         self.payload_tracker.reset()       # tracking geçmişini temizle
+        # Pre-pickup signature ve verification sayacını temizle —
+        # yeni arama denemesi için eski referans geçersiz
+        self._pre_pickup_sig = None
+        self._sig_area_samples.clear()
+        self._sig_width_samples.clear()
+        self._sig_height_samples.clear()
+        self._sig_conf_samples.clear()
+        self._verify_absent_count = 0
         if self.data.pickup_attempts < MAX_PICKUP_ATTEMPTS:
             self.payload.clear_attached()
             self.data.pending_detection = None

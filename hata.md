@@ -44,3 +44,5 @@ payload search basladıktan sonra eger gorntu isleme birden fazla payload tespit
 **oneri18**: 1m metre yukselip payload ı alıp almadıgnı kontrol ettigi kısımda hata yapıyor payload yerde olmasına ragmen kendisnin payload ı almıs oldugunu sanıyor kodun bu kısmında bir hata var. 
 
 **oneri19**: payload ı validaet etmesi icinde bir timeout olabilir diretk bulamazsa evet aldım dememeemli belki goruntu isleme anlık olarak bir aksaklıga ugramıs olabilir
+
+**oneri20**: bir kod daha olmalı ve bu kodun tek amacı ana gorevde bir sekilde cokme yasanırsa rtl yi tetiklemek olmalı oldugu yerde bosuna ugrasmasın veya kodu tekrar bir sekilde basltabilir. gorevin kaldıgı yer ve sekil payload gibi bilgeleri formatta saklanarak tekrar ana pyhton dosyası baslatıglıdıgn kullanabilir

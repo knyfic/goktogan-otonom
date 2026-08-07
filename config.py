@@ -28,6 +28,17 @@ PAYLOAD_CONTACT_ALTITUDE = 0.0
 # Yük doğrulama için yükselme irtifası
 PAYLOAD_VERIFY_ALTITUDE = 1
 
+# Verification temporal window: kaç ardışık frame'de "target kayboldu" görülmeli
+# ki pickup başarılı sayılsın. False-positive'e karşı koruma.
+VERIFY_ABSENT_FRAMES_REQUIRED = 4
+
+# Signature benzerlik eşiği: area, width, height normalize farkı bu değerin
+# altındaysa candidate "pre-pickup target ile aynı nesne" sayılır → payload hâlâ yerde.
+VERIFY_SIMILARITY_THRESHOLD = 0.50  # %50 normalize fark toleransı
+
+# Signature olmadan (fallback) verification'da kullanılacak confidence eşiği
+VERIFY_FALLBACK_CONFIDENCE = 0.50
+
 # Yük alımı hassas kademeli iniş adım büyüklüğü (metre)
 # 10cm'lik yük için kamera çok yakından bakmalı — küçük adımlarla in
 PAYLOAD_DESCENT_STEP_M = 0.4

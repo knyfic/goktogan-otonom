@@ -10,8 +10,10 @@ GAZEBO_TRANSPORT_MODULE = "gz.transport"
 TAKEOFF_ALTITUDE = 8.0
 TARGET_APPROACH_ALTITUDE = 4.0
 
-# Yük bırakma: kademeli iniş sonrası son hizalama + bırakma irtifası
+# Yük bırakma: görüntü işleme ile hizalanılan irtifa
 PAYLOAD_RELEASE_ALTITUDE = 2.0
+# Hizalama tamamlandıktan sonra sabit iniş ile yükün bırakılacağı irtifa
+PAYLOAD_DROP_ALTITUDE = 1.0
 # Görev 2: küçük yükler yüksekten görülmez — arama bu irtifada başlar
 PAYLOAD_SEARCH_ALTITUDE = 2.0
 # Her kademede: yatay ortala → bu kadar metre in → tekrar ortala ...
@@ -39,7 +41,7 @@ PAYLOAD_PIXEL_TOLERANCE_PX = 15.0
 PAYLOAD_ALIGN_TIMEOUT_S = 4.0
 
 # Görev 2 navigasyon sonrası hedef merkezleme zaman aşımı (sn)
-ALIGN_ON_TARGET_TIMEOUT_S = 20.0
+ALIGN_ON_TARGET_TIMEOUT_S = 5
 
 # Servo/mekanik mekanizmanın çalışması için bekleme süresi (saniye)
 # Gerçek donanımda servo hareketi bu kadar sürer; simülasyonda da beklenir

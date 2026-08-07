@@ -45,6 +45,7 @@ from config import (
     PAYLOAD_HEIGHT,
     PAYLOAD_PIXEL_TOLERANCE_PX,
     PIXEL_ALIGNMENT_TOLERANCE_PX,
+    PAYLOAD_DROP_ALTITUDE,
     PAYLOAD_RELEASE_ALTITUDE,
     PAYLOAD_SEARCH_ALTITUDE,
     PAYLOAD_SEARCH_TIMEOUT,
@@ -612,6 +613,21 @@ class MissionStateMachine:
         else:
             self._no_detection_count += 1
 
+        # ---------- DROPPING fazı: hizalama sonrası görüntü işleme olmadan sabit iniş ----------
+        if self._align_phase == "DROPPING":
+            result = self._altitude_ok()
+            if result is False:
+                return  # hâlâ iniyor
+            # İrtifaya ulaşıldı veya timeout — yükü bırak
+            self._reset_altitude_state()
+            self.log.info(
+                "Sabit iniş tamamlandı (%.1fm). Yük bırakılıyor.",
+                self.nav.position().relative_altitude,
+            )
+            self._align_phase = "HORIZONTAL"
+            self._goto(MissionState.TARGET_ALIGNED)
+            return
+
         # ---------- DESCENDING fazı ----------
         if self._align_phase == "DESCENDING":
             result = self._altitude_ok()
@@ -690,19 +706,23 @@ class MissionStateMachine:
             self._send_altitude(next_alt, timeout=30.0)
         else:
             # Son irtifada (PAYLOAD_RELEASE_ALTITUDE) ve tam merkezde.
-            # GPS'i ŞIMDI kaydet — yük bırakmadan hemen önceki en hassas konum.
-            pos_now = self.nav.position()  # non-blocking: donma yok
+            # GPS'i kaydet, ardından görüntü işleme olmadan PAYLOAD_DROP_ALTITUDE'a in.
+            pos_now = self.nav.position()
             self._gps_candidates.append(
                 (pos_now.latitude, pos_now.longitude, detection.confidence)
             )
             self.log.info(
                 "Son hizalama tamamlandı (%.1fm). GPS kaydedildi: lat=%.7f lon=%.7f "
-                "güven=%.2f (toplam aday=%d)",
+                "güven=%.2f (toplam aday=%d). Sabit iniş başlıyor: %.1fm",
                 pos.relative_altitude,
                 pos_now.latitude, pos_now.longitude, detection.confidence,
                 len(self._gps_candidates),
+                PAYLOAD_DROP_ALTITUDE,
             )
-            self._goto(MissionState.TARGET_ALIGNED)
+            self.nav.set_max_speed(ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS)
+            self._align_phase = "DROPPING"
+            self._no_detection_count = 0
+            self._send_altitude(PAYLOAD_DROP_ALTITUDE, timeout=20.0)
 
     # ------------------------------------------------------------------ #
     def _recover_to_rough_position(self) -> None:
@@ -1492,6 +1512,21 @@ class MissionStateMachine:
             self._do_start_rtl()
             return
 
+        # --- DROPPING: hizalama sonrası görüntü işleme olmadan sabit iniş ---
+        if self._align_phase == "DROPPING":
+            if frame is not None:
+                self._pending_display = self._base_overlay(frame)
+            result = self._altitude_ok()
+            if result is False:
+                return
+            self._reset_altitude_state()
+            self.log.info(
+                "Geri yük bırakma: sabit iniş tamamlandı (%.1fm) → yük bırakılıyor.",
+                self.nav.position().relative_altitude,
+            )
+            self._align_phase = "RELEASING"
+            return
+
         # --- DESCENDING ---
         if self._align_phase == "DESCENDING":
             if frame is not None:
@@ -1563,10 +1598,12 @@ class MissionStateMachine:
             self._send_altitude(next_alt, timeout=25.0)
         else:
             self.log.info(
-                "Geri yük bırakma: %.1fm'de 2. hedef merkezinde → yük bırakılıyor.",
-                pos.relative_altitude,
+                "Geri yük bırakma: %.1fm'de 2. hedef merkezinde → %.1fm'ye sabit iniş başlıyor.",
+                pos.relative_altitude, PAYLOAD_DROP_ALTITUDE,
             )
-            self._align_phase = "RELEASING"
+            self._align_phase = "DROPPING"
+            self.nav.set_max_speed(ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS)
+            self._send_altitude(PAYLOAD_DROP_ALTITUDE, timeout=20.0)
 
     # ------------------------------------------------------------------ #
     def _do_start_rtl(self) -> None:

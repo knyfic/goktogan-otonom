@@ -75,6 +75,7 @@ from search.coverage_planner import LawnmowerPlanner, local_to_gps
 from vision.camera import GazeboCamera
 from vision.geometry import CameraModel, expected_payload_pixels
 from vision.payload_detector import PayloadDetector
+from vision.payload_tracker import PayloadTracker
 from vision.target_detector import TargetDetector
 
 
@@ -99,6 +100,7 @@ class MissionStateMachine:
         )
         self.target_detector = TargetDetector()
         self.payload_detector = PayloadDetector(self.camera_model)
+        self.payload_tracker  = PayloadTracker()
         self.position_controller = PositionController(navigation, self.camera_model)
         self.rtl_controller = RTLController(navigation)
 
@@ -1060,21 +1062,28 @@ class MissionStateMachine:
         )
 
         if not results:
+            self.payload_tracker.update([], frame.shape)
             return
 
-        # Boyut filtresi + alan sıralaması: en küçük alan = gerçek 10cm payload
+        # Boyut filtresi: hedef boyutundaki renk tespitlerini at
         filtered = self._filter_payload_results(results, pos.relative_altitude)
 
         if not filtered:
             self.log.debug("Payload araması: tüm tespitler boyut filtresinde reddedildi.")
+            self.payload_tracker.update([], frame.shape)
             return
 
-        best = filtered[0]
+        # Tracker ile en güvenilir candidate'ı seç
+        best = self.payload_tracker.update(filtered, frame.shape)
+        if best is None:
+            return
+
         self.log.info(
             "Payload bulundu: renk=%s merkez=(%.0f,%.0f) güven=%.2f "
-            "boyut=%.0fx%.0fpx alan=%.0fpx²",
+            "boyut=%.0fx%.0fpx alan=%.0fpx² track_id=%s",
             color.value, best.center_x, best.center_y, best.confidence,
             best.width_px, best.height_px, best.area_px,
+            self.payload_tracker.locked_track_id,
         )
         # Başarılı tespit — sayacı sıfırla (bir sonraki arama için temiz başla)
         self._payload_search_start = None
@@ -1201,8 +1210,11 @@ class MissionStateMachine:
 
         color = self.payload_for_target(target)
         results = self.payload_detector.detect(frame, pos.relative_altitude, color)
-        # Boyut filtresi + alan sıralaması: en küçük alan = gerçek 10cm payload
-        results = self._filter_payload_results(results, pos.relative_altitude)
+        # Boyut filtresi: hedef boyutundaki tespitleri at
+        filtered = self._filter_payload_results(results, pos.relative_altitude)
+
+        # Tracker: frame'ler arası tutarlı candidate seç
+        best = self.payload_tracker.update(filtered, frame.shape)
 
         # Güncellenen etiket: irtifa ve sonraki hedef
         next_step = max(
@@ -1210,12 +1222,12 @@ class MissionStateMachine:
             pos.relative_altitude - PAYLOAD_DESCENT_STEP_M,
         )
         self._set_display_payload(
-            frame, results,
+            frame, filtered,
             f"HİZALA {pos.relative_altitude:.2f}m → sonraki:{next_step:.2f}m"
         )
 
-        if results:
-            best = results[0]
+        if best is not None:
+            self._no_detection_count = 0
             self.data.pending_detection = Detection(
                 color=best.color, shape="PAYLOAD",
                 center_x=best.center_x, center_y=best.center_y,
@@ -1233,6 +1245,8 @@ class MissionStateMachine:
                 )
                 self._no_detection_count = 0
                 self._payload_descent_alt = None
+                self._payload_search_start = None
+                self.payload_tracker.reset()
                 self._reset_altitude_state()
                 self._goto(MissionState.SEARCHING_PAYLOAD)
             return
@@ -1637,6 +1651,7 @@ class MissionStateMachine:
     def _retry_or_fail(self) -> None:
         self._pickup_servo_start = None   # servo bekleme sayacını sıfırla
         self._payload_search_start = None  # payload arama sayacını sıfırla
+        self.payload_tracker.reset()       # tracking geçmişini temizle
         if self.data.pickup_attempts < MAX_PICKUP_ATTEMPTS:
             self.payload.clear_attached()
             self.data.pending_detection = None
@@ -1700,8 +1715,8 @@ class MissionStateMachine:
                 len(filtered), len(results), exp_w, exp_h, max_w, max_h,
             )
 
-        # En küçük alanlıyı öne al — gerçek 10cm payload, hedeften çok daha küçük
-        return sorted(filtered, key=lambda r: r.area_px)
+        # Tracker'a verilecek liste — sıralama tracker tarafından yapılır
+        return filtered
 
     def _filter_active_detections(self, detections: list) -> list:
         """İşlenmiş hedefleri çıkar; kilit varsa yalnızca kilitli türe odaklan."""

@@ -1062,32 +1062,19 @@ class MissionStateMachine:
         if not results:
             return
 
-        # Boyut filtresi — büyük tespitler payload değil hedeftir
-        exp_w, exp_h = expected_payload_pixels(
-            PAYLOAD_WIDTH, PAYLOAD_HEIGHT, pos.relative_altitude, self.position_controller.camera
-        )
-        max_w = exp_w * MAX_PAYLOAD_SIZE_FACTOR
-        max_h = exp_h * MAX_PAYLOAD_SIZE_FACTOR
-
-        filtered = [
-            r for r in results
-            if r.width_px <= max_w and r.height_px <= max_h
-        ]
+        # Boyut filtresi + alan sıralaması: en küçük alan = gerçek 10cm payload
+        filtered = self._filter_payload_results(results, pos.relative_altitude)
 
         if not filtered:
-            self.log.debug(
-                "Payload araması: %d tespit boyut filtresinde reddedildi "
-                "(exp=%.0fx%.0fpx max=%.0fx%.0fpx)",
-                len(results), exp_w, exp_h, max_w, max_h,
-            )
+            self.log.debug("Payload araması: tüm tespitler boyut filtresinde reddedildi.")
             return
 
         best = filtered[0]
         self.log.info(
             "Payload bulundu: renk=%s merkez=(%.0f,%.0f) güven=%.2f "
-            "boyut=%.0fx%.0fpx (exp=%.0fx%.0fpx)",
+            "boyut=%.0fx%.0fpx alan=%.0fpx²",
             color.value, best.center_x, best.center_y, best.confidence,
-            best.width_px, best.height_px, exp_w, exp_h,
+            best.width_px, best.height_px, best.area_px,
         )
         # Başarılı tespit — sayacı sıfırla (bir sonraki arama için temiz başla)
         self._payload_search_start = None
@@ -1171,6 +1158,7 @@ class MissionStateMachine:
                     results = self.payload_detector.detect(
                         frame, pos.relative_altitude, color
                     )
+                    results = self._filter_payload_results(results, pos.relative_altitude)
                     self._set_display_payload(
                         frame, results,
                         f"İNİŞ {pos.relative_altitude:.2f}m→{self._payload_descent_alt:.2f}m"
@@ -1213,6 +1201,8 @@ class MissionStateMachine:
 
         color = self.payload_for_target(target)
         results = self.payload_detector.detect(frame, pos.relative_altitude, color)
+        # Boyut filtresi + alan sıralaması: en küçük alan = gerçek 10cm payload
+        results = self._filter_payload_results(results, pos.relative_altitude)
 
         # Güncellenen etiket: irtifa ve sonraki hedef
         next_step = max(
@@ -1684,6 +1674,34 @@ class MissionStateMachine:
             return None
         step_target = current_alt - ALIGNMENT_DESCENT_STEP_M
         return max(floor_alt, step_target)
+
+    def _filter_payload_results(self, results: list, altitude_m: float) -> list:
+        """
+        Payload tespitlerini filtrele ve gerçek payload'a yönlen:
+          1. Beklenen boyutun MAX_PAYLOAD_SIZE_FACTOR katından büyükleri at (bunlar hedef).
+          2. Kalanları ALANA GÖRE KÜÇÜKTEN BÜYÜĞE sırala.
+             10cm payload << 1-2m hedef → en küçük alan = gerçek payload.
+        """
+        exp_w, exp_h = expected_payload_pixels(
+            PAYLOAD_WIDTH, PAYLOAD_HEIGHT, altitude_m, self.position_controller.camera
+        )
+        max_w = exp_w * MAX_PAYLOAD_SIZE_FACTOR
+        max_h = exp_h * MAX_PAYLOAD_SIZE_FACTOR
+
+        filtered = [
+            r for r in results
+            if r.width_px <= max_w and r.height_px <= max_h
+        ]
+
+        if len(filtered) < len(results):
+            self.log.debug(
+                "Payload filtresi: %d/%d tespit boyut eşiğini geçti "
+                "(exp=%.0fx%.0fpx max=%.0fx%.0fpx)",
+                len(filtered), len(results), exp_w, exp_h, max_w, max_h,
+            )
+
+        # En küçük alanlıyı öne al — gerçek 10cm payload, hedeften çok daha küçük
+        return sorted(filtered, key=lambda r: r.area_px)
 
     def _filter_active_detections(self, detections: list) -> list:
         """İşlenmiş hedefleri çıkar; kilit varsa yalnızca kilitli türe odaklan."""

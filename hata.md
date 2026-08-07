@@ -42,3 +42,5 @@ payload search basladıktan sonra eger gorntu isleme birden fazla payload tespit
 
 
 **oneri18**: 1m metre yukselip payload ı alıp almadıgnı kontrol ettigi kısımda hata yapıyor payload yerde olmasına ragmen kendisnin payload ı almıs oldugunu sanıyor kodun bu kısmında bir hata var. 
+
+**oneri19**: payload ı validaet etmesi icinde bir timeout olabilir diretk bulamazsa evet aldım dememeemli belki goruntu isleme anlık olarak bir aksaklıga ugramıs olabilir

@@ -10,8 +10,10 @@ GAZEBO_TRANSPORT_MODULE = "gz.transport"
 TAKEOFF_ALTITUDE = 8.0
 TARGET_APPROACH_ALTITUDE = 4.0
 
-# Yük bırakma: kademeli iniş sonrası son hizalama + bırakma irtifası
+# Yük bırakma: görüntü işleme ile hizalanılan irtifa
 PAYLOAD_RELEASE_ALTITUDE = 2.0
+# Hizalama tamamlandıktan sonra sabit iniş ile yükün bırakılacağı irtifa
+PAYLOAD_DROP_ALTITUDE = 1.0
 # Görev 2: küçük yükler yüksekten görülmez — arama bu irtifada başlar
 PAYLOAD_SEARCH_ALTITUDE = 2.0
 # Her kademede: yatay ortala → bu kadar metre in → tekrar ortala ...
@@ -24,7 +26,23 @@ FINAL_TARGET_ALTITUDE = PAYLOAD_RELEASE_ALTITUDE
 PAYLOAD_CONTACT_ALTITUDE = 0.0
 
 # Yük doğrulama için yükselme irtifası
-PAYLOAD_VERIFY_ALTITUDE = 0.5
+PAYLOAD_VERIFY_ALTITUDE = 1
+
+# Referans area ile karşılaştırma toleransı (normalize fark).
+# abs(current - ref) / ref < bu eşik → aynı nesne → payload hâlâ yerde
+# Kamera noise, küçük konumsal kayma için ~%30 tolerans mantıklı.
+VERIFY_AREA_TOLERANCE = 0.30
+
+# Verification temporal window: kaç ardışık frame'de "target kayboldu" görülmeli
+# ki pickup başarılı sayılsın. False-positive'e karşı koruma.
+VERIFY_ABSENT_FRAMES_REQUIRED = 4
+
+# Signature benzerlik eşiği: area, width, height normalize farkı bu değerin
+# altındaysa candidate "pre-pickup target ile aynı nesne" sayılır → payload hâlâ yerde.
+VERIFY_SIMILARITY_THRESHOLD = 0.50  # %50 normalize fark toleransı
+
+# Signature olmadan (fallback) verification'da kullanılacak confidence eşiği
+VERIFY_FALLBACK_CONFIDENCE = 0.50
 
 # Yük alımı hassas kademeli iniş adım büyüklüğü (metre)
 # 10cm'lik yük için kamera çok yakından bakmalı — küçük adımlarla in
@@ -39,7 +57,7 @@ PAYLOAD_PIXEL_TOLERANCE_PX = 15.0
 PAYLOAD_ALIGN_TIMEOUT_S = 4.0
 
 # Görev 2 navigasyon sonrası hedef merkezleme zaman aşımı (sn)
-ALIGN_ON_TARGET_TIMEOUT_S = 20.0
+ALIGN_ON_TARGET_TIMEOUT_S = 5
 
 # Servo/mekanik mekanizmanın çalışması için bekleme süresi (saniye)
 # Gerçek donanımda servo hareketi bu kadar sürer; simülasyonda da beklenir
@@ -87,10 +105,6 @@ ALIGN_SPEED_MPS = 0.8
 # İrtifa değişim hızı
 VERTICAL_SPEED_MPS = 1.0
 
-# Eski isimler — geriye dönük uyumluluk
-MAX_HORIZONTAL_SPEED_MPS = 4.0
-COARSE_APPROACH_SPEED_MPS = 3.0
-FINE_APPROACH_SPEED_MPS = 1.0
 POSITION_TOLERANCE_M = 0.35
 ALTITUDE_TOLERANCE_M = 0.20
 PIXEL_ALIGNMENT_TOLERANCE_PX = 30.0
@@ -98,9 +112,6 @@ PIXEL_ALIGNMENT_TOLERANCE_PX = 30.0
 # Hizalama komutu gönderme aralığı (saniye)
 # Her step'te değil, bu aralıkta bir goto_body_offset gönderilir.
 ALIGN_CMD_INTERVAL_S = 0.4
-
-# Kademeli iniş adım büyüklüğü (hedef bırakma hizalaması)
-ALIGNMENT_DESCENT_STEP_M = 2.0
 
 # GPS kalite biriktirme: hizalama döngüsünde "hizalı" anında GPS + confidence
 # kaydedilir; en az bu kadar örnek birikmeden GPS kesinleşmez.

@@ -15,11 +15,10 @@ class MissionState(str, Enum):
     RELEASING_PAYLOAD = "RELEASING_PAYLOAD"
     ASCENDING_AFTER_FIRST_RELEASE = "ASCENDING_AFTER_FIRST_RELEASE"
     SEARCHING_SECOND_TARGET = "SEARCHING_SECOND_TARGET"
-    TASK_1_COMPLETE = "TASK_1_COMPLETE"
     NAVIGATING_TO_FIRST_TARGET = "NAVIGATING_TO_FIRST_TARGET"
     SEARCHING_PAYLOAD = "SEARCHING_PAYLOAD"
     ALIGNING_PAYLOAD = "ALIGNING_PAYLOAD"
-    DESCENDING_TO_PAYLOAD = "DESCENDING_TO_PAYLOAD"
+    ASCENDING_FOR_PAYLOAD_RETRY = "ASCENDING_FOR_PAYLOAD_RETRY"
     PICKING_UP_PAYLOAD = "PICKING_UP_PAYLOAD"
     ASCENDING_FOR_VERIFICATION = "ASCENDING_FOR_VERIFICATION"
     VERIFYING_PAYLOAD = "VERIFYING_PAYLOAD"
@@ -75,6 +74,21 @@ class VehiclePosition:
 
 
 @dataclass
+class PrePickupSignature:
+    """
+    Pickup başlamadan hemen önce kaydedilen payload'ın görsel referansı.
+    Birkaç stabil frame'den elde edilen medyan değerler kullanılır.
+    """
+    area_px:      float   # medyan piksel alanı
+    width_px:     float   # medyan bbox genişliği
+    height_px:    float   # medyan bbox yüksekliği
+    aspect_ratio: float   # medyan en-boy oranı (max/min)
+    confidence:   float   # medyan detector confidence
+    # Kaç frame'den oluşturuldu (güvenilirlik göstergesi)
+    sample_count: int = 0
+
+
+@dataclass
 class MissionData:
     state: MissionState = MissionState.INIT
     first_target: Optional[Target] = None
@@ -83,5 +97,3 @@ class MissionData:
     pickup_attempts: int = 0
     release_count: int = 0
     mission_failed: bool = False
-    home_latitude: Optional[float] = None
-    home_longitude: Optional[float] = None

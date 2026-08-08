@@ -58,3 +58,18 @@ payload search basladıktan sonra eger gorntu isleme birden fazla payload tespit
 **oneri23**: iha payloadı almak icin payloadı ortalarken 0.4m de ortalıktan sonra direkt assagıya inis yapıyor. bu olmamalı. yere yakın ken tekrar ortlaması gerekiyor 0.2metrede iken falanda ortlaması lazım. 0.4 te ki ortalaması basarılı olmuyor
 
 **oneri24**: kod rtl ye girdigi zaman nedense bir lag giriyor goruntu isleme penceresi kasmaya baslıyor bunun sebebi bulunmalı
+
+**oneri25**:
+```
+STATE: RELEASING_RETURNED_PAYLOAD → RTL
+2026-08-08 16:57:57,440 | INFO     | iha_mission | RTL tamamlandı.
+2026-08-08 16:57:57,440 | INFO     | iha_mission | STATE: RTL → COMPLETE
+Fatal Python error: _PyThreadState_DeleteCurrent: the function must be called with the GIL held, after Python initialization and before Python finalization, but the GIL is released (the current Python thread state is NULL)
+Python runtime state: finalizing (tstate=0x0000000000ba6748)
+
+Thread 0x00007061c0a59080 (most recent call first):
+  <no Python frame>
+
+Extension modules: numpy.core._multiarray_umath, numpy.core._multiarray_tests, numpy.linalg._umath_linalg, numpy.fft._pocketfft_internal, numpy.random._common, numpy.random.bit_generator, numpy.random._bounded_integers, numpy.random._mt19937, numpy.random.mtrand, numpy.random._philox, numpy.random._pcg64, numpy.random._sfc64, numpy.random._generator, cv2, google.protobuf.pyext._message (total: 15)
+fish: Job 1, 'python3 main.py' terminated by signal SIGABRT (Abort)
+```

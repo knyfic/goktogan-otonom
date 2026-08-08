@@ -138,3 +138,8 @@ CAMERA_TIMEOUT = 3.0
 STATE_TIMEOUT = 120.0
 TAKEOFF_TIMEOUT = 45.0
 RTL_TIMEOUT = 120.0
+
+# Yarışma görevi maksimum süresi (saniye).
+# Kalkış tamamlandığı anda sayaç başlar.
+# Bu süre dolunca sistem hangi state'te olursa olsun RTL'ye geçer.
+MISSION_TIMEOUT_S = 11 * 60  # 660 saniye

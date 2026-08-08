@@ -38,6 +38,7 @@ from config import (
     ALIGNMENT_DESCENT_STEP_M,
     FINAL_TARGET_ALTITUDE,
     GPS_CANDIDATE_MIN_COUNT,
+    MISSION_TIMEOUT_S,
     MAX_PICKUP_ATTEMPTS,
     MAX_PAYLOAD_SIZE_FACTOR,
     PAYLOAD_ALIGN_TIMEOUT_S,
@@ -196,6 +197,13 @@ class MissionStateMachine:
         self._verify_votes: list[str] = []          # verification oy listesi
         self._verify_stabilize_start: float | None = None  # stabilizasyon sayacı
 
+        # ---- Görev zamanlayıcısı ----
+        # Kalkış tamamlanınca set edilir. None → görev henüz başlamadı.
+        # time.monotonic() tabanlı — sistem saatinden bağımsız.
+        self._mission_start_t: float | None = None
+        # Timeout tetiklendikten sonra tekrar RTL gönderilmesini engeller.
+        self._mission_timeout_triggered: bool = False
+
     # ==================================================================== #
     #  Ana döngü
     # ==================================================================== #
@@ -208,6 +216,36 @@ class MissionStateMachine:
             time.sleep(0.02)                      # ~50 Hz
 
     def _tick(self) -> None:
+        # ── Görev zamanlayıcısı watchdog ─────────────────────────────────
+        # Her tick'te kontrol edilir. Timer başlamışsa ve süre dolmuşsa
+        # hangi state'te olursa olsun RTL'ye geçilir.
+        # INIT, TAKEOFF, RTL ve COMPLETE state'lerinde çalışmaz.
+        if (
+            self._mission_start_t is not None
+            and not self._mission_timeout_triggered
+            and self.data.state not in (
+                MissionState.INIT,
+                MissionState.TAKEOFF,
+                MissionState.RTL,
+                MissionState.COMPLETE,
+            )
+        ):
+            elapsed = time.monotonic() - self._mission_start_t
+            if elapsed >= MISSION_TIMEOUT_S:
+                self._mission_timeout_triggered = True
+                mm = int(elapsed) // 60
+                ss = int(elapsed) % 60
+                self.log.warning(
+                    "GÖREV ZAMANAŞIMI: %d:%02d geçti (sınır=%d:%02d). "
+                    "Mevcut state=%s → RTL başlatılıyor.",
+                    mm, ss,
+                    MISSION_TIMEOUT_S // 60, MISSION_TIMEOUT_S % 60,
+                    self.data.state.value,
+                )
+                self.data.mission_failed = True
+                self._do_start_rtl()
+                return
+
         s = self.data.state
         if s == MissionState.INIT:
             self._do_init()
@@ -271,15 +309,19 @@ class MissionStateMachine:
         Hiçbir state handler doğrudan camera.show() çağırmaz.
         """
         if self._pending_display is not None:
-            self.camera.show(self._pending_display)
+            disp = self._pending_display
         else:
             frame = self.camera.latest()
             if frame is None:
                 self.camera.pump()
                 return
-            # Ham frame + durum yazısı
             disp = self._base_overlay(frame)
-            self.camera.show(disp)
+
+        # Timeout banner — timeout olunca her frame'de göster
+        if self._mission_timeout_triggered:
+            disp = self._draw_timeout_banner(disp)
+
+        self.camera.show(disp)
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -321,6 +363,45 @@ class MissionStateMachine:
                        cv2.MARKER_CROSS, 24, 1, cv2.LINE_AA)
         return out
 
+    @staticmethod
+    def _draw_timeout_banner(frame: np.ndarray) -> np.ndarray:
+        """
+        Timeout gerçekleştikten sonra her frame'e kırmızı bir banner çizer.
+        Yarı saydam, orta üstte belirgin şekilde görünür.
+        """
+        out = frame.copy()
+        h, w = out.shape[:2]
+        bh = 38
+        by = h // 2 - bh - 10   # dikey merkeze yakın
+        overlay = out.copy()
+        cv2.rectangle(overlay, (w // 4, by), (3 * w // 4, by + bh), (0, 0, 180), -1)
+        cv2.addWeighted(overlay, 0.75, out, 0.25, 0, out)
+        cv2.putText(
+            out, "MISSION TIMEOUT - RTL",
+            (w // 4 + 16, by + 26),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.80, (255, 255, 255), 2, cv2.LINE_AA,
+        )
+        return out
+
+    def _mission_timer_str(self) -> str:
+        """
+        Geçen görev süresini MM:SS formatında döndür.
+        Timer başlamadıysa '--:--', timeout olduysa '11:00 TIMEOUT' gösterir.
+        """
+        if self._mission_start_t is None:
+            return "--:--"
+        elapsed = int(time.monotonic() - self._mission_start_t)
+        elapsed = min(elapsed, MISSION_TIMEOUT_S)   # 11:00'dan yukarı taşmaz
+        mm = elapsed // 60
+        ss = elapsed % 60
+        base = f"{mm:02d}:{ss:02d}"
+        if self._mission_timeout_triggered:
+            return f"{base} TIMEOUT"
+        # Son 60 saniyede kırmızı uyarı için string'e işaret ekle (renk _draw_hud'da)
+        if elapsed >= MISSION_TIMEOUT_S - 60:
+            return f"{base} !"
+        return base
+
     def _hud_lines(self, extra: str = "") -> tuple[str, str]:
         """Standart HUD satırları: STATE + irtifa / heading + GPS."""
         pos = self.nav.position()
@@ -332,6 +413,7 @@ class MissionStateMachine:
             f"Alt {pos.relative_altitude:.1f}m  "
             f"Hdg {pos.heading_deg:.0f}°  "
             f"({pos.latitude:.5f}, {pos.longitude:.5f})"
+            f"  T:{self._mission_timer_str()}"
         )
         return line1, line2
 
@@ -472,6 +554,11 @@ class MissionStateMachine:
 
         self.log.info("Kalkış tamamlandı. İrtifa=%.1fm",
                       self.nav.position().relative_altitude)
+        # Görev zamanlayıcısını başlat — yalnızca bir kez set edilir.
+        if self._mission_start_t is None:
+            self._mission_start_t = time.monotonic()
+            self.log.info("Görev zamanlayıcısı başlatıldı. Süre sınırı: %d:%02d",
+                          MISSION_TIMEOUT_S // 60, MISSION_TIMEOUT_S % 60)
         self._init_search()
         self._goto(MissionState.SEARCHING_FIRST_TARGET)
 

@@ -52,3 +52,7 @@ payload search basladıktan sonra eger gorntu isleme birden fazla payload tespit
 **oneri20**: yalnızca gercek payloadın boyut hesabı yapılmadı fakat suanki algoritma ekranda aynı renkte gordugu her seyin boyut hesabını yapıyor
 
 **oneri21**: payloadı almak icin ilk hedefin konumuna dogru gidildigi sırada irtifanın 2 metre olmalı cunku goruntu isleme 1 metreden seklin tamamenı goremiyoru 2 metre olması daha iyi. 
+
+**öneri22mekanik**: yukler yarısma anında yerlestirelcegi icin hangi renk yukun hangi mıknatısa yerlestirilecegi karıstırılmaması amacıyla yuk mekanizmasına isaretler konulmalıdır.
+
+**oneri23**: iha payloadı almak icin payloadı ortalarken 0.4m de ortalıktan sonra direkt assagıya inis yapıyor. bu olmamalı. yere yakın ken tekrar ortlaması gerekiyor 0.2metrede iken falanda ortlaması lazım. 0.4 te ki ortalaması basarılı olmuyor

@@ -6,13 +6,17 @@ from vision.geometry import CameraModel
 from vision.payload_detector import PayloadDetector
 from vision.target_detector import TargetDetector
 
+# Test frame çözünürlüğü: gerçek kamera ile eşleşmeli
+W, H = 1920, 1080
+
 
 def test_blue_hexagon_detection():
-    img = np.zeros((720, 1280, 3), dtype=np.uint8)
+    img = np.zeros((H, W, 3), dtype=np.uint8)
+    # Hexagon: 1280×720'deki koordinatlar 1920×1080'e ölçeklenmiş
     pts = np.array(
         [
-            [560, 250], [720, 250], [800, 360],
-            [720, 470], [560, 470], [480, 360],
+            [840, 375], [1080, 375], [1200, 540],
+            [1080, 705], [840, 705], [720, 540],
         ],
         dtype=np.int32,
     )
@@ -26,9 +30,10 @@ def test_blue_hexagon_detection():
 
 
 def test_red_triangle_detection():
-    img = np.zeros((720, 1280, 3), dtype=np.uint8)
+    img = np.zeros((H, W, 3), dtype=np.uint8)
+    # Triangle: 1280×720'deki koordinatlar 1920×1080'e ölçeklenmiş
     pts = np.array(
-        [[640, 230], [500, 470], [780, 470]],
+        [[960, 345], [750, 705], [1170, 705]],
         dtype=np.int32,
     )
     cv2.fillPoly(img, [pts], (0, 0, 255))
@@ -41,10 +46,11 @@ def test_red_triangle_detection():
 
 
 def test_payload_detector_constructs():
-    camera = CameraModel(1280, 720, 78, 60)
+    camera = CameraModel(1920, 1080, 78, 46.4)
     detector = PayloadDetector(camera)
-    img = np.zeros((720, 1280, 3), dtype=np.uint8)
-    cv2.rectangle(img, (620, 350), (700, 390), (0, 0, 255), -1)
+    img = np.zeros((H, W, 3), dtype=np.uint8)
+    # Kırmızı dikdörtgen: 1920×1080 merkezine yakın
+    cv2.rectangle(img, (930, 525), (1050, 585), (0, 0, 255), -1)
 
     results = detector.detect(img, 1.0, TargetColor.RED)
     assert isinstance(results, list)

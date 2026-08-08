@@ -335,12 +335,18 @@ class MissionStateMachine:
         """
         Şeffaf HUD bandı çiz.
         Üst banda iki satır bilgi yaz — bant %55 opak, görüntü arkadan okunuyor.
+        Font ve marker boyutları frame çözünürlüğüne göre otomatik ölçeklenir.
         """
         out = frame.copy()
         h, w = out.shape[:2]
-        band_h = 56
 
-        # Yarı saydam bant: frame kopyası üzerine dikdörtgen, sonra blend
+        # Çözünürlüğe bağlı ölçek faktörü.
+        # 640'ı baz alarak 1920px'de ~3x, 1280px'de ~2x ölçek verir.
+        ui_scale = w / 640.0
+
+        band_h = int(56 * ui_scale)
+
+        # Yarı saydam bant
         overlay = out.copy()
         cv2.rectangle(overlay, (0, 0), (w, band_h), (10, 10, 10), -1)
         cv2.addWeighted(overlay, 0.55, out, 0.45, 0, out)
@@ -348,38 +354,48 @@ class MissionStateMachine:
         # İnce ayırıcı çizgi
         cv2.line(out, (0, band_h), (w, band_h), (60, 60, 60), 1)
 
-        # Satır 1
+        font_scale1 = 0.65 * ui_scale
+        font_scale2 = 0.58 * ui_scale
+        thickness1  = max(1, int(2 * ui_scale))
+        thickness2  = max(1, int(1 * ui_scale))
+        y1 = int(22 * ui_scale)
+        y2 = int(46 * ui_scale)
+
         cv2.putText(out, line1,
-                    (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.65, line1_color, 2,
-                    cv2.LINE_AA)
-        # Satır 2
+                    (10, y1), cv2.FONT_HERSHEY_SIMPLEX, font_scale1, line1_color,
+                    thickness1, cv2.LINE_AA)
         if line2:
             cv2.putText(out, line2,
-                        (10, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.58, line2_color, 1,
-                        cv2.LINE_AA)
+                        (10, y2), cv2.FONT_HERSHEY_SIMPLEX, font_scale2, line2_color,
+                        thickness2, cv2.LINE_AA)
+
         # Merkez artı işareti
         cx, cy = w // 2, h // 2
+        marker_size = int(24 * ui_scale)
         cv2.drawMarker(out, (cx, cy), (255, 255, 255),
-                       cv2.MARKER_CROSS, 24, 1, cv2.LINE_AA)
+                       cv2.MARKER_CROSS, marker_size, max(1, int(ui_scale)), cv2.LINE_AA)
         return out
 
     @staticmethod
     def _draw_timeout_banner(frame: np.ndarray) -> np.ndarray:
         """
         Timeout gerçekleştikten sonra her frame'e kırmızı bir banner çizer.
-        Yarı saydam, orta üstte belirgin şekilde görünür.
+        Boyutlar çözünürlüğe göre otomatik ölçeklenir.
         """
         out = frame.copy()
         h, w = out.shape[:2]
-        bh = 38
-        by = h // 2 - bh - 10   # dikey merkeze yakın
+        ui_scale = w / 640.0
+        bh = int(38 * ui_scale)
+        by = h // 2 - bh - int(10 * ui_scale)
+        x0, x1 = w // 4, 3 * w // 4
         overlay = out.copy()
-        cv2.rectangle(overlay, (w // 4, by), (3 * w // 4, by + bh), (0, 0, 180), -1)
+        cv2.rectangle(overlay, (x0, by), (x1, by + bh), (0, 0, 180), -1)
         cv2.addWeighted(overlay, 0.75, out, 0.25, 0, out)
         cv2.putText(
             out, "MISSION TIMEOUT - RTL",
-            (w // 4 + 16, by + 26),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.80, (255, 255, 255), 2, cv2.LINE_AA,
+            (x0 + int(16 * ui_scale), by + int(26 * ui_scale)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.80 * ui_scale,
+            (255, 255, 255), max(1, int(2 * ui_scale)), cv2.LINE_AA,
         )
         return out
 
@@ -435,19 +451,21 @@ class MissionStateMachine:
         """Payload overlay hazırla."""
         disp = frame.copy()
         h, w = disp.shape[:2]
+        ui_scale = w / 1280.0
+        font_scale = 0.50 * ui_scale
+        thickness  = max(1, int(ui_scale))
         for r in results:
             tx, ty = int(r.center_x), int(r.center_y)
-            # Payload çemberi + hedef çizgisi
-            cv2.circle(disp, (tx, ty), 10, (0, 255, 255), 2, cv2.LINE_AA)
-            cv2.line(disp, (w // 2, h // 2), (tx, ty), (0, 200, 200), 1, cv2.LINE_AA)
-            # Boyut kutusu
+            cv2.circle(disp, (tx, ty), int(10 * ui_scale), (0, 255, 255), max(1, int(2 * ui_scale)), cv2.LINE_AA)
+            cv2.line(disp, (w // 2, h // 2), (tx, ty), (0, 200, 200), thickness, cv2.LINE_AA)
             bw = int(r.width_px)
             bh = int(r.height_px)
             cv2.rectangle(disp, (tx - bw // 2, ty - bh // 2),
-                          (tx + bw // 2, ty + bh // 2), (0, 255, 255), 1)
+                          (tx + bw // 2, ty + bh // 2), (0, 255, 255), thickness)
             cv2.putText(disp, f"PL {r.confidence:.2f} {bw}x{bh}px",
-                        (tx + 12, ty - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.50,
-                        (0, 255, 200), 1, cv2.LINE_AA)
+                        (tx + int(12 * ui_scale), ty - int(6 * ui_scale)),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                        (0, 255, 200), thickness, cv2.LINE_AA)
 
         pl_str = f"{len(results)} pl" if results else "pl yok"
         l1, l2 = self._hud_lines(extra=f"{label}  {pl_str}")

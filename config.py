@@ -28,6 +28,11 @@ PAYLOAD_CONTACT_ALTITUDE = 0.0
 # Yük doğrulama için yükselme irtifası
 PAYLOAD_VERIFY_ALTITUDE = 1
 
+# Referans area ile karşılaştırma toleransı (normalize fark).
+# abs(current - ref) / ref < bu eşik → aynı nesne → payload hâlâ yerde
+# Kamera noise, küçük konumsal kayma için ~%30 tolerans mantıklı.
+VERIFY_AREA_TOLERANCE = 0.30
+
 # Verification temporal window: kaç ardışık frame'de "target kayboldu" görülmeli
 # ki pickup başarılı sayılsın. False-positive'e karşı koruma.
 VERIFY_ABSENT_FRAMES_REQUIRED = 4

@@ -1,5 +1,4 @@
 import math
-import math
 from dataclasses import dataclass
 
 # Altitude sıfıra çok yakın olduğunda hesaplamalar bozulmasın diye
@@ -46,4 +45,6 @@ def expected_payload_pixels(
     camera: CameraModel,
 ) -> tuple[float, float]:
     mpp_x, mpp_y = camera.meters_per_pixel(altitude_m)
+    mpp_x = max(mpp_x, 1e-9)
+    mpp_y = max(mpp_y, 1e-9)
     return physical_width_m / mpp_x, physical_height_m / mpp_y

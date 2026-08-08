@@ -45,7 +45,7 @@ payload search basladıktan sonra eger gorntu isleme birden fazla payload tespit
 
 **oneri19**: payload ı validaet etmesi icinde bir timeout olabilir diretk bulamazsa evet aldım dememeemli belki goruntu isleme anlık olarak bir aksaklıga ugramıs olabilir
 
-**oneri20**: bir kod daha olmalı ve bu kodun tek amacı ana gorevde bir sekilde cokme yasanırsa rtl yi tetiklemek olmalı oldugu yerde bosuna ugrasmasın veya kodu tekrar bir sekilde basltabilir. gorevin kaldıgı yer ve sekil payload gibi bilgeleri formatta saklanarak tekrar ana pyhton dosyası baslatıglıdıgn kullanabilir
+**oneri20**: bir kod daha olmalı ve bu kodun tek amacı ana gorevde bir sekilde cokme yasanırsa rtl yi tetiklemek olmalı oldugu yerde bosuna ugrasmasın veya kodu tekrar bir sekilde basltabilir. gorevin kaldıgı yer ve sekil payload gibi bilgeleri formatta saklanarak tekrar ana pyhton dosyası baslatıglıdıgn kullanabilir. + olarak ardupilot un parametreleri hakkında da arastırma yapılmalı belki rasberry pi dan gelen heart beat in kesilmesi sonucu rtl ye falan girebilir bunun olmasını istemiyoruz.
 
 **oneri19**: yuklerin bırakılması ksımında iha burnunu illa seklile ortalamk zorunda kalmamalı bu onun havada bos yere yaw yapmasına sebebp oluyor o anki oryantasyonu ne ise o sekilde isledigi gorntuye yaklassınve yukleri bıraksın yukle zaten ihanın ortasında bulunuyor
 
@@ -56,3 +56,5 @@ payload search basladıktan sonra eger gorntu isleme birden fazla payload tespit
 **öneri22mekanik**: yukler yarısma anında yerlestirelcegi icin hangi renk yukun hangi mıknatısa yerlestirilecegi karıstırılmaması amacıyla yuk mekanizmasına isaretler konulmalıdır.
 
 **oneri23**: iha payloadı almak icin payloadı ortalarken 0.4m de ortalıktan sonra direkt assagıya inis yapıyor. bu olmamalı. yere yakın ken tekrar ortlaması gerekiyor 0.2metrede iken falanda ortlaması lazım. 0.4 te ki ortalaması basarılı olmuyor
+
+**oneri24**: kod rtl ye girdigi zaman nedense bir lag giriyor goruntu isleme penceresi kasmaya baslıyor bunun sebebi bulunmalı

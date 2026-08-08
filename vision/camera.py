@@ -40,10 +40,11 @@ class GazeboCamera:
         self._frame: Optional[np.ndarray] = None
         self._lock = threading.Lock()
 
-        # Pencereyi ana thread'de aç
+        # Pencereyi ana thread'de aç — 1920×1080'i tam göstermek büyük ekran ister,
+        # yarım boyutta (960×540) gösterim yeterli ve taşınabilir.
         if self._preview:
             cv2.namedWindow(self._window_name, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(self._window_name, 960, 540)
+            cv2.resizeWindow(self._window_name, 1280, 720)
 
         self._image_type = importlib.import_module(f"{msgs_module}.image_pb2").Image
         self._node = transport.Node()

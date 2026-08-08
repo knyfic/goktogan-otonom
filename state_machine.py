@@ -58,7 +58,10 @@ from config import (
     SEARCH_SPEED_MPS,
     TARGET_APPROACH_ALTITUDE,
     TAKEOFF_ALTITUDE,
-    VERIFY_AREA_TOLERANCE,
+    VERIFY_ALT_TOLERANCE,
+    VERIFY_STABILIZE_S,
+    VERIFY_BAND_LOW,
+    VERIFY_BAND_HIGH,
     VERIFY_FALLBACK_CONFIDENCE,
     VERTICAL_SPEED_MPS,
 )
@@ -83,6 +86,9 @@ from vision.target_detector import TargetDetector
 
 # Referans area için kaç frame toplanacağı (median hesabı için)
 _REF_SAMPLE_COUNT = 5
+
+# Verification'da oy çokluğu için kaç frame toplanacağı
+_VERIFY_VOTE_COUNT = 6
 
 
 class MissionStateMachine:
@@ -187,6 +193,8 @@ class MissionStateMachine:
         self._ref_area_samples: list[float] = []   # ham sample'lar (mediana alınır)
         self._ref_area_recorded: bool = False       # referans tamamlandı mı?
         self._ref_area_px: float | None = None      # final referans değeri
+        self._verify_votes: list[str] = []          # verification oy listesi
+        self._verify_stabilize_start: float | None = None  # stabilizasyon sayacı
 
     # ==================================================================== #
     #  Ana döngü
@@ -1194,7 +1202,10 @@ class MissionStateMachine:
                             and results
                             and abs(pos.relative_altitude - PAYLOAD_VERIFY_ALTITUDE)
                                 <= ALTITUDE_TOLERANCE_M):
-                        self._ref_area_samples.append(results[0].area_px)
+                        # Merkeze en yakın candidate'ı kullan — büyük hedef dışlanır
+                        ref_cand = self._nearest_to_last_known(results)
+                        if ref_cand is not None:
+                            self._ref_area_samples.append(ref_cand.area_px)
                         # REF_SAMPLE_COUNT frame birikmişse median'a al
                         if len(self._ref_area_samples) >= _REF_SAMPLE_COUNT:
                             self._ref_area_px = statistics.median(self._ref_area_samples)
@@ -1393,37 +1404,65 @@ class MissionStateMachine:
 
     # ------------------------------------------------------------------ #
     def _do_ascend_for_verification(self) -> None:
-        if not self._alt_waiting:
+        pos = self.nav.position()
+
+        # Faz 1: Henüz altitude komutu verilmediyse ver
+        if not self._alt_waiting and self._verify_stabilize_start is None:
             self.log.info("Doğrulama irtifasına çıkılıyor: %.1fm", PAYLOAD_VERIFY_ALTITUDE)
             self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
             self._send_altitude(PAYLOAD_VERIFY_ALTITUDE, timeout=30.0)
             return
-        result = self._altitude_ok()
-        if result is True:
+
+        # Faz 2: Altitude komutu verildi, irtifaya ulaşılmasını bekle
+        if self._alt_waiting:
+            result = self._altitude_ok()
+            if result is False:
+                return  # hâlâ çıkıyor
+            # True veya None (timeout): irtifaya ulaşıldı ya da zaman aşımı
             self._reset_altitude_state()
-            self._goto(MissionState.VERIFYING_PAYLOAD)
-        elif result is None:
-            self.data.pickup_attempts += 1
-            self._retry_or_fail()
+            # Stabilizasyon sayacını başlat
+            self._verify_stabilize_start = time.monotonic()
+            self.log.info(
+                "Doğrulama irtifasına ulaşıldı (%.2fm). %.1fs stabilizasyon bekleniyor.",
+                pos.relative_altitude, VERIFY_STABILIZE_S,
+            )
+            return
+
+        # Faz 3: Stabilizasyon bekleniyor
+        elapsed = time.monotonic() - self._verify_stabilize_start
+        in_band = abs(pos.relative_altitude - PAYLOAD_VERIFY_ALTITUDE) <= VERIFY_ALT_TOLERANCE
+
+        if not in_band:
+            # İrtifa kaydı — nadiren olur, sadece logla
+            self.log.debug(
+                "Stabilizasyon sırasında irtifa bant dışı (%.2fm), bekleniyor.",
+                pos.relative_altitude,
+            )
+
+        if elapsed < VERIFY_STABILIZE_S:
+            return  # stabilizasyon süresi dolmadı
+
+        self.log.info(
+            "Stabilizasyon tamamlandı (%.2fm, %.1fs). Validation başlıyor.",
+            pos.relative_altitude, elapsed,
+        )
+        self._verify_stabilize_start = None
+        self._goto(MissionState.VERIFYING_PAYLOAD)
 
     # ------------------------------------------------------------------ #
     def _do_verify(self) -> None:
         """
-        Pickup doğrulaması — 1m referans area karşılaştırması.
+        Pickup doğrulaması — basit median area karşılaştırması.
 
-        Referans (self._ref_area_px): ALIGNING_PAYLOAD DESCENDING fazında
-        irtifa PAYLOAD_VERIFY_ALTITUDE bandına indiğinde kaydedilen
-        birkaç frame'in medyan payload area'sı.
+        Akış:
+          1. VERIFYING_PAYLOAD'a girildiğinde _VERIFY_COLLECT_COUNT frame toplanır.
+          2. Toplanan area değerlerinin medyanı hesaplanır.
+          3. Medyan, referans alanın [ref * VERIFY_LOW, ref * VERIFY_HIGH]
+             bandındaysa → payload hâlâ yerde → FAIL.
+          4. Bandin dışındaysa veya hiç tespit yoksa → pickup başarılı → SUCCESS.
 
-        Doğrulama: drone pickup sonrası tekrar PAYLOAD_VERIFY_ALTITUDE'a
-        yükseliyor. Kameradaki candidate'ın area'sı referansla karşılaştırılır.
-
-          abs(current - ref) / ref  <  VERIFY_AREA_TOLERANCE
-              → aynı nesne → payload hâlâ yerde → retry
-
-          abs(current - ref) / ref  ≥  VERIFY_AREA_TOLERANCE
-              veya hiç tespit yok
-              → farklı nesne veya yok → pickup başarılı
+        Referans (_ref_area_px): iniş sırasında PAYLOAD_VERIFY_ALTITUDE'da
+        kaydedilen birkaç frame'in medyanı. Yoksa fallback.
         """
         target = self.data.first_target
         if target is None:
@@ -1439,79 +1478,107 @@ class MissionStateMachine:
         raw   = self.payload_detector.detect(frame, pos.relative_altitude, color)
         candidates = self._filter_payload_results(raw, pos.relative_altitude)
 
+        # Validation'da confidence sıralaması yerine önceki hizalamadan bilinen
+        # payload merkezine en yakın contour'u seç.
+        # Aynı renkteki büyük hedef veya başka nesneler merkez uzaksa dışlanır.
+        best_candidate = self._nearest_to_last_known(candidates)
+
         ref = self._ref_area_px
 
-        # ── Referans yoksa: tespit var mı yok mu kontrolü (fallback) ──────
+        # ── Referans yoksa: basit fallback ─────────────────────────────────
         if ref is None:
             self._set_display_payload(frame, candidates, "DOĞRULA (ref yok)")
-            if not candidates or candidates[0].confidence < VERIFY_FALLBACK_CONFIDENCE:
-                self.log.info(
-                    "[PAYLOAD VALIDATION] result=SUCCESS (fallback: tespit yok/düşük güven)"
-                )
+            if best_candidate is None or best_candidate.confidence < VERIFY_FALLBACK_CONFIDENCE:
+                self.log.info("[PAYLOAD VALIDATION] result=SUCCESS (fallback: tespit yok/düşük güven)")
                 self._reset_ref()
                 self._goto(MissionState.TASK_2_COMPLETE)
             else:
                 self.data.pickup_attempts += 1
                 self.log.warning(
                     "[PAYLOAD VALIDATION] result=FAIL (fallback: güven=%.2f) Deneme %d/%d",
-                    candidates[0].confidence,
-                    self.data.pickup_attempts, MAX_PICKUP_ATTEMPTS,
+                    best_candidate.confidence, self.data.pickup_attempts, MAX_PICKUP_ATTEMPTS,
                 )
                 self._retry_or_fail()
             return
 
-        # ── Referans var: area karşılaştırması ────────────────────────────
-        if not candidates:
-            # Tespit yok → payload görünmüyor → pickup başarılı
-            self.log.info(
-                "[PAYLOAD VALIDATION] altitude=%.2fm  reference_area=%.0fpx²  "
-                "current_area=—  relative_difference=—  result=SUCCESS (tespit yok)",
-                pos.relative_altitude, ref,
+        # ── Frame toplama ──────────────────────────────────────────────────
+        in_band = abs(pos.relative_altitude - PAYLOAD_VERIFY_ALTITUDE) <= VERIFY_ALT_TOLERANCE
+        if not in_band:
+            self.log.debug(
+                "[PAYLOAD VALIDATION] irtifa bant dışı (%.2fm), frame atlandı.",
+                pos.relative_altitude,
             )
-            self._set_display_payload(frame, [], "DOĞRULA: BAŞARILI (tespit yok)")
-            self._reset_ref()
-            self._goto(MissionState.TASK_2_COMPLETE)
+            self._set_display_payload(
+                frame, candidates,
+                f"DOĞRULA (irtifa bekleniyor: {pos.relative_altitude:.2f}m/{PAYLOAD_VERIFY_ALTITUDE:.1f}m)",
+            )
             return
 
-        best = candidates[0]
-        rel_diff = abs(best.area_px - ref) / max(ref, 1.0)
+        # Merkeze en yakın candidate'ın area'sını kaydet, yoksa 0
+        area_this_frame = best_candidate.area_px if best_candidate is not None else 0.0
+        self._verify_votes.append(area_this_frame)
 
+        cur_str = f"{area_this_frame:.0f}" if area_this_frame else "—"
+        near_str = (
+            f" center=({best_candidate.center_x:.0f},{best_candidate.center_y:.0f})"
+            if best_candidate is not None else ""
+        )
         self.log.info(
             "[PAYLOAD VALIDATION] altitude=%.2fm  reference_area=%.0fpx²  "
-            "current_area=%.0fpx²  relative_difference=%.3f  threshold=%.2f  result=%s",
-            pos.relative_altitude, ref,
-            best.area_px, rel_diff, VERIFY_AREA_TOLERANCE,
-            "FAIL" if rel_diff < VERIFY_AREA_TOLERANCE else "SUCCESS",
+            "current_area=%s%s  frame=%d/%d",
+            pos.relative_altitude, ref, cur_str, near_str,
+            len(self._verify_votes), _VERIFY_VOTE_COUNT,
         )
-        label = (
-            f"DOĞRULA ref={ref:.0f} cur={best.area_px:.0f} "
-            f"diff={rel_diff:.2f}/tol={VERIFY_AREA_TOLERANCE:.2f}"
+        self._set_display_payload(
+            frame, ([best_candidate] if best_candidate else []),
+            f"DOĞRULA ref={ref:.0f} cur={cur_str} {len(self._verify_votes)}/{_VERIFY_VOTE_COUNT}",
         )
-        self._set_display_payload(frame, candidates, label)
 
-        if rel_diff < VERIFY_AREA_TOLERANCE:
-            # Aynı nesne görünüyor → payload alınamamış
+        if len(self._verify_votes) < _VERIFY_VOTE_COUNT:
+            return  # Henüz yeterli frame yok
+
+        # ── Karar ─────────────────────────────────────────────────────────
+        areas = self._verify_votes[:]
+        self._verify_votes.clear()
+
+        detected = [a for a in areas if a > 0]
+        median_area = statistics.median(detected) if detected else 0.0
+
+        # Payload hâlâ yerde bandı: referansın %60 ile %160 arasında
+        low  = ref * VERIFY_BAND_LOW
+        high = ref * VERIFY_BAND_HIGH
+
+        still_there = (detected and low <= median_area <= high)
+
+        self.log.info(
+            "[PAYLOAD VALIDATION] Final: ref=%.0fpx²  median=%.0fpx²  "
+            "band=[%.0f, %.0f]  detected=%d/%d  still_there=%s",
+            ref, median_area, low, high,
+            len(detected), _VERIFY_VOTE_COUNT, still_there,
+        )
+
+        if still_there:
             self.data.pickup_attempts += 1
             self.log.warning(
-                "[PAYLOAD VALIDATION] Payload hâlâ yerde (area eşleşti). "
-                "Deneme %d/%d", self.data.pickup_attempts, MAX_PICKUP_ATTEMPTS,
+                "[PAYLOAD VALIDATION] result=FAIL (payload hâlâ yerde). Deneme %d/%d",
+                self.data.pickup_attempts, MAX_PICKUP_ATTEMPTS,
             )
             self._retry_or_fail()
         else:
-            # Farklı nesne veya boyut belirgin farklı → pickup başarılı
             self.log.info(
                 "[PAYLOAD VALIDATION] result=SUCCESS "
-                "(area farkı %.0f%% > tolerans %.0f%%). Görev 2 tamamlandı.",
-                rel_diff * 100, VERIFY_AREA_TOLERANCE * 100,
+                "(median=%.0fpx² bant dışı veya tespit yok). Görev 2 tamamlandı.",
+                median_area,
             )
             self._reset_ref()
             self._goto(MissionState.TASK_2_COMPLETE)
 
     def _reset_ref(self) -> None:
-        """Referans area ve sample listelerini temizle."""
+        """Referans area, sample listelerini ve oy listesini temizle."""
         self._ref_area_px       = None
         self._ref_area_recorded = False
         self._ref_area_samples.clear()
+        self._verify_votes.clear()
 
     # ------------------------------------------------------------------ #
     def _do_after_task2(self) -> None:
@@ -1758,6 +1825,7 @@ class MissionStateMachine:
         self._payload_search_start = None  # payload arama sayacını sıfırla
         self.payload_tracker.reset()       # tracking geçmişini temizle
         self._reset_ref()                  # referans area temizle
+        self._verify_stabilize_start = None
         if self.data.pickup_attempts < MAX_PICKUP_ATTEMPTS:
             self.payload.clear_attached()
             self.data.pending_detection = None
@@ -1823,6 +1891,32 @@ class MissionStateMachine:
 
         # Tracker'a verilecek liste — sıralama tracker tarafından yapılır
         return filtered
+
+    def _nearest_to_last_known(self, candidates: list) -> object | None:
+        """
+        Candidate listesinden önceki hizalamadan bilinen payload merkezine
+        en yakın olanı döndür.
+
+        pending_detection (hizalama fazındaki son tespit) payload'ın
+        kameradaki gerçek konumunu tutar. Aynı renkteki büyük hedef
+        genellikle görüntünün kenarında olduğundan merkeze uzak kalır.
+
+        pending_detection yoksa en yüksek confidence'lıyı döndürür (fallback).
+        """
+        if not candidates:
+            return None
+
+        ref_det = self.data.pending_detection
+        if ref_det is None:
+            # Merkez bilgisi yok — fallback: en iyi confidence
+            return candidates[0]
+
+        ref_x, ref_y = ref_det.center_x, ref_det.center_y
+
+        def dist(c):
+            return (c.center_x - ref_x) ** 2 + (c.center_y - ref_y) ** 2
+
+        return min(candidates, key=dist)
 
     def _filter_active_detections(self, detections: list) -> list:
         """İşlenmiş hedefleri çıkar; kilit varsa yalnızca kilitli türe odaklan."""

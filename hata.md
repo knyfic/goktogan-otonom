@@ -46,3 +46,9 @@ payload search basladıktan sonra eger gorntu isleme birden fazla payload tespit
 **oneri19**: payload ı validaet etmesi icinde bir timeout olabilir diretk bulamazsa evet aldım dememeemli belki goruntu isleme anlık olarak bir aksaklıga ugramıs olabilir
 
 **oneri20**: bir kod daha olmalı ve bu kodun tek amacı ana gorevde bir sekilde cokme yasanırsa rtl yi tetiklemek olmalı oldugu yerde bosuna ugrasmasın veya kodu tekrar bir sekilde basltabilir. gorevin kaldıgı yer ve sekil payload gibi bilgeleri formatta saklanarak tekrar ana pyhton dosyası baslatıglıdıgn kullanabilir
+
+**oneri19**: yuklerin bırakılması ksımında iha burnunu illa seklile ortalamk zorunda kalmamalı bu onun havada bos yere yaw yapmasına sebebp oluyor o anki oryantasyonu ne ise o sekilde isledigi gorntuye yaklassınve yukleri bıraksın yukle zaten ihanın ortasında bulunuyor
+
+**oneri20**: yalnızca gercek payloadın boyut hesabı yapılmadı fakat suanki algoritma ekranda aynı renkte gordugu her seyin boyut hesabını yapıyor
+
+**oneri21**: payloadı almak icin ilk hedefin konumuna dogru gidildigi sırada irtifanın 2 metre olmalı cunku goruntu isleme 1 metreden seklin tamamenı goremiyoru 2 metre olması daha iyi. 

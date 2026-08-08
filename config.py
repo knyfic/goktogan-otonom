@@ -28,10 +28,19 @@ PAYLOAD_CONTACT_ALTITUDE = 0.0
 # Yük doğrulama için yükselme irtifası
 PAYLOAD_VERIFY_ALTITUDE = 1
 
-# Referans area ile karşılaştırma toleransı (normalize fark).
-# abs(current - ref) / ref < bu eşik → aynı nesne → payload hâlâ yerde
-# Kamera noise, küçük konumsal kayma için ~%30 tolerans mantıklı.
-VERIFY_AREA_TOLERANCE = 0.30
+# Validation irtifa toleransı: bu bantın dışındaki frame'ler sayılmaz.
+# ALTITUDE_TOLERANCE_M (0.20m) yerine daha sıkı tutuyoruz.
+VERIFY_ALT_TOLERANCE = 0.12   # metre
+
+# Doğrulama irtifasına ulaştıktan sonra stabilizasyon için bekleme süresi (s)
+VERIFY_STABILIZE_S = 1.0
+
+# Referans area ile karşılaştırma — bant yaklaşımı.
+# Pickup sonrası medyan area referansın bu bandında kalıyorsa payload hâlâ yerde.
+# [ref * 0.55, ref * 1.65]: aynı nesnenin ±%45–65 noise/pozisyon varyasyonu normal.
+# Band dışına çıkarsa ya da hiç görünmüyorsa → alındı.
+VERIFY_BAND_LOW  = 0.55   # referans alanın alt sınırı (x ref)
+VERIFY_BAND_HIGH = 1.65   # referans alanın üst sınırı (x ref)
 
 # Verification temporal window: kaç ardışık frame'de "target kayboldu" görülmeli
 # ki pickup başarılı sayılsın. False-positive'e karşı koruma.

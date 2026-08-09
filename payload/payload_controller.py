@@ -93,13 +93,14 @@ class PayloadController:
         Görev 1: Payload bırak.
         İlk çağrı → Payload 1 (Magnet 1 OFF, Magnet 2 dokunulmaz).
         İkinci çağrı → Payload 2 (Magnet 2 OFF).
+        Stepper motor DOKUNULMAZ.
         """
         if self._release_count == 0:
-            self.logger.info("PAYLOAD RELEASE #1 → Magnet 1 kapatılıyor. (%s)",
+            self.logger.info("PAYLOAD RELEASE #1 → SADECE Magnet 1 kapatılıyor. (%s)",
                              payload_type.value)
             res = self._backend.release_payload_1()
         else:
-            self.logger.info("PAYLOAD RELEASE #2 → Magnet 2 kapatılıyor. (%s)",
+            self.logger.info("PAYLOAD RELEASE #2 → SADECE Magnet 2 kapatılıyor. (%s)",
                              payload_type.value)
             res = self._backend.release_payload_2()
 
@@ -112,6 +113,25 @@ class PayloadController:
             self.logger.error("Payload bırakma başarısız (#%d): %s — %s",
                               self._release_count + 1, payload_type.value, res.message)
 
+        return _to_legacy(res, payload_type)
+
+    def release_returned_payload(self, payload_type: TargetColor) -> PayloadResult:
+        """
+        Görev 2, son adım: Yerden alınan ve geri taşınan payload'ı bırak.
+        İKİ MIKNATIS AYNI ANDA OFF → her ikisi de tutuyordur, biri kaybederse diğeri korur.
+        Stepper motor DOKUNULMAZ.
+        """
+        self.logger.info("PAYLOAD RELEASE (DÖNÜŞ) → İKİ MIKNATIS AYNI ANDA OFF. (%s)",
+                         payload_type.value)
+        res = self._backend.release_all_payloads()
+        if res.success:
+            self._release_count += 1
+            self.released_payloads.append(payload_type)
+            self.attached_payload = None
+            self.logger.info("Dönüş payload bırakıldı: %s", payload_type.value)
+        else:
+            self.logger.error("Dönüş payload bırakma başarısız: %s — %s",
+                              payload_type.value, res.message)
         return _to_legacy(res, payload_type)
 
     # ------------------------------------------------------------------ #

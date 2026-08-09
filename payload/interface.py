@@ -19,13 +19,21 @@ class PayloadBackend(ABC):
       SimulationBackend    → Gazebo / tam simülasyon
       RemoteRPiBackend     → Ubuntu → Wi-Fi → Raspberry Pi (HIL modu)
       LocalRPiBackend      → Raspberry Pi üzerinde doğrudan GPIO (gerçek uçuş)
+
+    ZAMANLAMA MANTIĞI (KRİTİK — DONANIM İLE UYUMLU):
+      initialize()                 → Stepper EN KISA konum, 2 MIKNATIS ON
+      release_payload_1()          → SADECE Magnet 1 OFF (stepper DOKUNULMAZ)
+      release_payload_2()          → SADECE Magnet 2 OFF (stepper DOKUNULMAZ)
+      release_all_payloads()       → İKİ MIKNATIS AYNI ANDA OFF (Görev 2 sonu)
+      send_pickup_command()        → Stepper AŞAĞI + 2 Magnet ON (yerden alma)
+      finish_pickup()              → Stepper YUKARI (alınan yükü taşımak)
     """
 
     # ------------------------------------------------------------------ #
     @abstractmethod
     def initialize(self) -> PayloadOperationResult:
         """
-        Donanımı başlat: mıknatısları ON, stepper güvenli konumda.
+        Donanımı başlat: mıknatısları ON, stepper güvenli (en kısa) konumda.
         İki mıknatısın da ON başlaması zorunlu.
         """
 
@@ -35,6 +43,7 @@ class PayloadBackend(ABC):
         """
         Non-blocking pickup komutu gönder.
         Stepper aşağı harekete başlar; tamamlanması beklenmez.
+        İKİ MIKNATIS da ON → biri tutmazsa diğeri tutsun diye.
         State machine, PAYLOAD_SERVO_WAIT_S sonra finish_pickup çağırır.
         """
 
@@ -49,17 +58,24 @@ class PayloadBackend(ABC):
     @abstractmethod
     def release_payload_1(self) -> PayloadOperationResult:
         """
-        1. payload'ı bırak:
-          stepper release konuma in → Magnet 1 OFF → stepper yukarı çık.
-          Magnet 2 DOKUNULMAZ.
+        1. payload'ı bırak (Görev 1 adım 1):
+          SADECE Magnet 1 OFF. Stepper DOKUNULMAZ.
+          Magnet 2 DOKUNULMAZ (kırmızı yükü taşımaya devam etmeli).
         """
 
     @abstractmethod
     def release_payload_2(self) -> PayloadOperationResult:
         """
-        2. payload'ı bırak:
-          stepper release konuma in → Magnet 2 OFF → stepper yukarı çık.
-          Magnet 1 DOKUNULMAZ (pickup sonrası her ikisi de ON).
+        2. payload'ı bırak (Görev 1 adım 2):
+          SADECE Magnet 2 OFF. Stepper DOKUNULMAZ.
+        """
+
+    @abstractmethod
+    def release_all_payloads(self) -> PayloadOperationResult:
+        """
+        Geri getirilen payload'ı bırak (Görev 2 sonu):
+          İKİ MIKNATIS AYNI ANDA OFF. Stepper DOKUNULMAZ.
+          Amaç: yerden 2 mıknatısla alınan yükü 2. hedefe bırakmak.
         """
 
     # ------------------------------------------------------------------ #

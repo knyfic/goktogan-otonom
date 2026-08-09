@@ -27,6 +27,7 @@ CMD_SEND_PICKUP      = "SEND_PICKUP_COMMAND"
 CMD_FINISH_PICKUP    = "FINISH_PICKUP"
 CMD_RELEASE_1        = "RELEASE_PAYLOAD_1"
 CMD_RELEASE_2        = "RELEASE_PAYLOAD_2"
+CMD_RELEASE_ALL      = "RELEASE_ALL_PAYLOADS"
 CMD_SET_MAGNET       = "SET_MAGNET"
 CMD_EMERGENCY_STOP   = "EMERGENCY_STOP"
 CMD_CLEAR_ATTACHED   = "CLEAR_ATTACHED"
@@ -142,6 +143,11 @@ class RemoteRPiBackend(PayloadBackend):
     def release_payload_2(self) -> PayloadOperationResult:
         self._log.info("[REMOTE] release_payload_2")
         resp = self._send(CMD_RELEASE_2)
+        return self._to_result(resp)
+
+    def release_all_payloads(self) -> PayloadOperationResult:
+        self._log.info("[REMOTE] release_all_payloads (İKİ MIKNATIS AYNI ANDA OFF)")
+        resp = self._send(CMD_RELEASE_ALL)
         return self._to_result(resp)
 
     def set_magnet(self, magnet_id: MagnetId, on: bool) -> PayloadOperationResult:

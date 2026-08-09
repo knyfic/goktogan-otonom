@@ -166,24 +166,20 @@ class LocalRPiBackend:
     # ── Release ───────────────────────────────────────────────────────────── #
     def release_payload_1(self) -> dict:
         """
-        1. Payload bırakma:
-          ENABLE → Stepper ↓ → Magnet 1 OFF → Stepper ↑ → DISABLE
-          Magnet 2 DOKUNULMAZ.
+        1. Payload bırakma (Görev 1, adım 1):
+          SADECE Magnet 1 OFF. Stepper DOKUNULMAZ (zaten en kısa konumda).
+          Magnet 2 DOKUNULMAZ (kırmızı yükü taşımaya devam etmeli).
         """
         if self._emergency:
             return _fail("EMERGENCY_ACTIVE")
         if self._carried < 1:
             return _fail("INVALID_STATE", "Bırakılacak payload yok.")
 
-        self._log.info("Release Payload 1: Stepper↓ → Magnet1 OFF → Stepper↑")
+        self._log.info("Release Payload 1: SADECE Magnet1 OFF (stepper DOKUNULMAZ)")
         self._state = "RELEASING"
-        self._stepper.enable()
-        self._stepper.move_down(self._steps)
         self._magnets.magnet_1_off()   # Magnet 2 DOKUNULMAZ
         self._log.info("Magnet 1 → OFF. Magnet 2 durumu: %s",
                        "ON" if self._magnets.state_2 else "OFF")
-        self._stepper.move_up(self._steps)
-        self._stepper.disable()
         self._carried -= 1
         self._state = "READY"
         self._log.info("release_payload_1 tamamlandı. carried=%d", self._carried)
@@ -191,27 +187,45 @@ class LocalRPiBackend:
 
     def release_payload_2(self) -> dict:
         """
-        2. Payload bırakma:
-          ENABLE → Stepper ↓ → Magnet 2 OFF → Stepper ↑ → DISABLE
+        2. Payload bırakma (Görev 1, adım 2):
+          SADECE Magnet 2 OFF. Stepper DOKUNULMAZ.
+          BÖYLECE GÖREV 1 SONUNDA İKİ YÜK DE BIRAKILMIŞ OLUR.
         """
         if self._emergency:
             return _fail("EMERGENCY_ACTIVE")
         if self._carried < 1:
             return _fail("INVALID_STATE", "Bırakılacak payload yok.")
 
-        self._log.info("Release Payload 2: Stepper↓ → Magnet2 OFF → Stepper↑")
+        self._log.info("Release Payload 2: SADECE Magnet2 OFF (stepper DOKUNULMAZ)")
         self._state = "RELEASING"
-        self._stepper.enable()
-        self._stepper.move_down(self._steps)
         self._magnets.magnet_2_off()
         self._log.info("Magnet 2 → OFF. Magnet 1 durumu: %s",
                        "ON" if self._magnets.state_1 else "OFF")
-        self._stepper.move_up(self._steps)
-        self._stepper.disable()
         self._carried -= 1
         self._state = "READY"
         self._log.info("release_payload_2 tamamlandı. carried=%d", self._carried)
         return _ok("Payload 2 released.")
+
+    def release_all_payloads(self) -> dict:
+        """
+        Geri getirilen payload bırakma (Görev 2, son adım):
+          İKİ MIKNATIS AYNI ANDA OFF.
+          Stepper DOKUNULMAZ.
+          Amaç: 2. hedefe yerden alınan yükü (iki mıknatısla taşınan) bırakmak.
+        """
+        if self._emergency:
+            return _fail("EMERGENCY_ACTIVE")
+        if self._carried < 1:
+            return _fail("INVALID_STATE", "Bırakılacak payload yok.")
+
+        self._log.info("Release ALL: İKİ MIKNATIS AYNI ANDA OFF (stepper DOKUNULMAZ)")
+        self._state = "RELEASING"
+        self._magnets.all_off()
+        self._log.info("Magnet 1 → OFF  Magnet 2 → OFF")
+        self._carried = 0
+        self._state = "READY"
+        self._log.info("release_all_payloads tamamlandı. carried=%d", self._carried)
+        return _ok("All payloads released.")
 
     # ── Tekil mıknatıs ────────────────────────────────────────────────────── #
     def set_magnet(self, magnet_id: str, on: bool) -> dict:

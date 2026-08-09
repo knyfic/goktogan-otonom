@@ -74,8 +74,7 @@ class SimulationBackend(PayloadBackend):
             return PayloadOperationResult.fail(
                 OperationResult.INVALID_STATE, "Bırakılacak payload yok.")
         self._state = PayloadMechanismState.RELEASING
-        self._log.info("[SIM] release_payload_1: Stepper↓ → Magnet1 OFF → Stepper↑")
-        # Magnet 2 DOKUNULMAZ
+        self._log.info("[SIM] release_payload_1: SADECE Magnet1 OFF (stepper DOKUNULMAZ)")
         self._magnets.magnet_1_on = False
         self._carried -= 1
         self._state = PayloadMechanismState.READY
@@ -91,13 +90,29 @@ class SimulationBackend(PayloadBackend):
             return PayloadOperationResult.fail(
                 OperationResult.INVALID_STATE, "Bırakılacak payload yok.")
         self._state = PayloadMechanismState.RELEASING
-        self._log.info("[SIM] release_payload_2: Stepper↓ → Magnet2 OFF → Stepper↑")
+        self._log.info("[SIM] release_payload_2: SADECE Magnet2 OFF (stepper DOKUNULMAZ)")
         self._magnets.magnet_2_on = False
         self._carried -= 1
         self._state = PayloadMechanismState.READY
         self._log.info("[SIM] release_payload_2 tamamlandı. Magnet1=%s Magnet2=OFF carried=%d",
                        "ON" if self._magnets.magnet_1_on else "OFF", self._carried)
         return PayloadOperationResult.ok("Payload 2 released (simulation).")
+
+    def release_all_payloads(self) -> PayloadOperationResult:
+        if self._emergency:
+            return PayloadOperationResult.fail(
+                OperationResult.EMERGENCY_ACTIVE, "Emergency stop aktif.")
+        if self._carried < 1:
+            return PayloadOperationResult.fail(
+                OperationResult.INVALID_STATE, "Bırakılacak payload yok.")
+        self._state = PayloadMechanismState.RELEASING
+        self._log.info("[SIM] release_all_payloads: İKİ MIKNATIS AYNI ANDA OFF")
+        self._magnets.magnet_1_on = False
+        self._magnets.magnet_2_on = False
+        self._carried = 0
+        self._state = PayloadMechanismState.READY
+        self._log.info("[SIM] release_all_payloads tamamlandı. carried=%d", self._carried)
+        return PayloadOperationResult.ok("All payloads released (simulation).")
 
     # ------------------------------------------------------------------ #
     def set_magnet(self, magnet_id: MagnetId, on: bool) -> PayloadOperationResult:

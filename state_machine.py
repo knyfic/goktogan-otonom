@@ -1776,13 +1776,14 @@ class MissionStateMachine:
         if self._align_phase == "RELEASING":
             target = self.data.second_target
             if target is not None:
-                # Alınan yükün rengi: first_target'ın payload'ı (tersine)
+                # Görev 2: Yerden 2 mıknatıs ile alınan payload, 2. hedefe bırakılır.
+                # Bu yüzden İKİ MIKNATIS AYNI ANDA OFF olmalı (release_returned_payload).
                 payload_type = self.payload_for_target(self.data.first_target) \
                     if self.data.first_target is not None \
                     else self.payload_for_target(target)
-                result = self.payload.release_payload(payload_type)
+                result = self.payload.release_returned_payload(payload_type)
                 self.log.info(
-                    "Geri getirilen yük 2. hedefte bırakıldı: %s (hedef=%s %s) — başarı=%s",
+                    "Geri getirilen yük 2. hedefte bırakıldı: %s (hedef=%s %s) — başarı=%s (2 MAGNET OFF)",
                     payload_type.value,
                     target.shape.value, target.color.value,
                     result.success,

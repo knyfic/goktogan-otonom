@@ -7,6 +7,7 @@ Desteklenen komutlar:
   FINISH_PICKUP
   RELEASE_PAYLOAD_1
   RELEASE_PAYLOAD_2
+  RELEASE_ALL_PAYLOADS   ← Görev 2: geri getirilen payload için 2 mıknatıs aynı anda OFF
   SET_MAGNET            params: { "magnet_id": "MAGNET_1"|"MAGNET_2", "on": true|false }
   EMERGENCY_STOP
   CLEAR_ATTACHED
@@ -68,6 +69,9 @@ class CommandDispatcher:
 
         if command == "RELEASE_PAYLOAD_2":
             return b.release_payload_2()
+
+        if command == "RELEASE_ALL_PAYLOADS":
+            return b.release_all_payloads()
 
         if command == "SET_MAGNET":
             magnet_id = params.get("magnet_id", "")

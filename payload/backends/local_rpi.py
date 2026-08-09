@@ -149,13 +149,9 @@ class LocalRPiBackend(PayloadBackend):
             return _fail(OperationResult.EMERGENCY_ACTIVE)
         if self._carried < 1:
             return _fail(OperationResult.INVALID_STATE, "Bırakılacak payload yok.")
-        self._log.info("Release 1: Stepper↓ → Magnet1 OFF → Stepper↑")
+        self._log.info("Release 1: SADECE Magnet1 OFF (stepper DOKUNULMAZ)")
         self._state = PayloadMechanismState.RELEASING
-        self._stepper.enable()
-        self._stepper.move_down(self._steps)
         self._magnets.magnet_1_off()          # Magnet 2 DOKUNULMAZ
-        self._stepper.move_up(self._steps)
-        self._stepper.disable()
         self._carried -= 1
         self._state = PayloadMechanismState.READY
         return _ok("Payload 1 released.")
@@ -165,16 +161,24 @@ class LocalRPiBackend(PayloadBackend):
             return _fail(OperationResult.EMERGENCY_ACTIVE)
         if self._carried < 1:
             return _fail(OperationResult.INVALID_STATE, "Bırakılacak payload yok.")
-        self._log.info("Release 2: Stepper↓ → Magnet2 OFF → Stepper↑")
+        self._log.info("Release 2: SADECE Magnet2 OFF (stepper DOKUNULMAZ)")
         self._state = PayloadMechanismState.RELEASING
-        self._stepper.enable()
-        self._stepper.move_down(self._steps)
         self._magnets.magnet_2_off()
-        self._stepper.move_up(self._steps)
-        self._stepper.disable()
         self._carried -= 1
         self._state = PayloadMechanismState.READY
         return _ok("Payload 2 released.")
+
+    def release_all_payloads(self) -> PayloadOperationResult:
+        if self._emergency:
+            return _fail(OperationResult.EMERGENCY_ACTIVE)
+        if self._carried < 1:
+            return _fail(OperationResult.INVALID_STATE, "Bırakılacak payload yok.")
+        self._log.info("Release ALL: İKİ MIKNATIS AYNI ANDA OFF (stepper DOKUNULMAZ)")
+        self._state = PayloadMechanismState.RELEASING
+        self._magnets.all_off()
+        self._carried = 0
+        self._state = PayloadMechanismState.READY
+        return _ok("All payloads released.")
 
     def set_magnet(self, magnet_id: MagnetId, on: bool) -> PayloadOperationResult:
         self._magnets.set_by_id(magnet_id.value, on)

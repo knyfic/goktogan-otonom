@@ -81,3 +81,14 @@ fish: Job 1, 'python3 main.py' terminated by signal SIGABRT (Abort)
 **oneri28**:rasberry pi ile connection refused duruma dustugu gibi program cokuyor iha rtl falan yapmalı belirli bir timeout boyunca sinyal gelmez ise vb vb... 
 
 **oneri29**: kameranın sallanması saglayacak olan gerekli fiziksel parametrelerini ayarlanabilir. bu sayede sim daha tuturlı bir sekilde gercegi yansıtır.
+
+**oneri30**: step motorun adımlarını tamamlaması cok uzun suruyor "2026-08-09 15:51:32,004 | INFO     | payload_service | Stepper ↓ aşağı: 17143 adım
+2026-08-09 15:51:32,004 | INFO     | payload_service | Yanıt gönderildi → 192.168.1.5:57694
+2026-08-09 15:51:35,070 | INFO     | payload_service | Bağlantı kabul edildi: 192.168.1.5:57698
+2026-08-09 15:51:35,071 | INFO     | payload_service | Komut alındı: FINISH_PICKUP  params={}
+2026-08-09 15:52:05,071 | INFO     | payload_service | Pickup tamamlandı, Stepper↑
+2026-08-09 15:52:05,071 | INFO     | payload_service | Stepper ↑ yukarı: 17143 adım" (hil modunda rasberrypi da calısan kodun cıktısı)
+yani ana kodun bu kısmında "2026-08-09 15:51:31,744 | INFO     | iha_mission | [REMOTE] send_pickup_command
+2026-08-09 15:51:32,019 | INFO     | iha_mission | Pickup servo komutu gönderildi (RED). 3.0s bekleniyor...
+2026-08-09 15:51:35,024 | INFO     | iha_mission | [REMOTE] finish_pickup
+2026-08-09 15:52:41,432 | INFO     | iha_mission | PAYLOAD PICKUP TAMAMLANDI: RED" goruntu isleme ve sistem tam anlmaıyla donuyor servo job ı bitine kadar. bu gercekten guzel servoyu beklemesi zaten bizim ihtiyacımız olan bir sey fakat sorun şu: ana kod serovyu beklesin o job u dinlesin fakat donmasına gerek yok. + olarak artık fizksel bir servo ile test ettigimiz icin yapay bir 3 saniye beklniyor yazısına ihtyacımız yok hala simler icin 3 saniye beklesin fakat pencerede yazmasına gerekyok.

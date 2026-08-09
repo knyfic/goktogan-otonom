@@ -79,3 +79,5 @@ fish: Job 1, 'python3 main.py' terminated by signal SIGABRT (Abort)
 **oneri27**: zamanlaycı python kodu baslar baslamaz baslamalı. takeoff falan beklemememli program acıldıgı andan itibaren zaman calısmalı.
 
 **oneri28**:rasberry pi ile connection refused duruma dustugu gibi program cokuyor iha rtl falan yapmalı belirli bir timeout boyunca sinyal gelmez ise vb vb... 
+
+**oneri29**: kameranın sallanması saglayacak olan gerekli fiziksel parametrelerini ayarlanabilir. bu sayede sim daha tuturlı bir sekilde gercegi yansıtır.

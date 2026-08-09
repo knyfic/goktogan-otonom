@@ -59,16 +59,32 @@ class MagnetController:
     # ── GPIO kurulum ─────────────────────────────────────────────────────── #
     def setup(self, initial_on: bool = True) -> None:
         """
-        gpiochip aç, pinleri çıkış olarak yapılandır.
+        gpiochip aç, pinleri çıkış olarak yapılandır. Güvenli: tekrar çağrılabilir.
         initial_on=True → Her iki mıknatıs başlangıçta ON (tutma).
         """
         initial_level = 1 if (initial_on == self._hold_high) else 0
-        # Açıkça: hold_high=True ve initial_on=True → level=1 (HIGH=HOLD)
 
         if _GPIO_AVAILABLE:
-            self._handle = lgpio.gpiochip_open(self._chip)
-            lgpio.gpio_claim_output(self._handle, self._pin_1, initial_level)
-            lgpio.gpio_claim_output(self._handle, self._pin_2, initial_level)
+            if self._handle is not None:
+                try:
+                    lgpio.gpiochip_close(self._handle)
+                except Exception:
+                    pass
+                self._handle = None
+
+            handle = None
+            try:
+                handle = lgpio.gpiochip_open(self._chip)
+                lgpio.gpio_claim_output(handle, self._pin_1, initial_level)
+                lgpio.gpio_claim_output(handle, self._pin_2, initial_level)
+                self._handle = handle
+            except Exception:
+                if handle is not None:
+                    try:
+                        lgpio.gpiochip_close(handle)
+                    except Exception:
+                        pass
+                raise
         else:
             self._log.debug("[STUB] magnets setup: initial=%s",
                             "ON" if initial_on else "OFF")

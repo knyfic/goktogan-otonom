@@ -70,19 +70,32 @@ class DRV8834:
 
     # ── GPIO kurulum ─────────────────────────────────────────────────────── #
     def setup(self) -> None:
-        """gpiochip aç, pinleri çıkış olarak yapılandır."""
+        """gpiochip aç, pinleri çıkış olarak yapılandır. Güvenli: tekrar çağrılabilir."""
         if not _GPIO_AVAILABLE:
             return
 
-        self._handle = lgpio.gpiochip_open(self._chip)
+        if self._handle is not None:
+            try:
+                lgpio.gpiochip_close(self._handle)
+            except Exception:
+                pass
+            self._handle = None
 
-        # STEP: LOW başlangıç
-        lgpio.gpio_claim_output(self._handle, self._step_pin,   0)
-        # DIR: LOW başlangıç
-        lgpio.gpio_claim_output(self._handle, self._dir_pin,    0)
-        # ENABLE: pasif başlangıç (yük kaybetme)
-        enable_initial = 1 if self._active_low else 0   # active_low → HIGH=pasif
-        lgpio.gpio_claim_output(self._handle, self._enable_pin, enable_initial)
+        handle = None
+        try:
+            handle = lgpio.gpiochip_open(self._chip)
+            lgpio.gpio_claim_output(handle, self._step_pin,   0)
+            lgpio.gpio_claim_output(handle, self._dir_pin,    0)
+            enable_initial = 1 if self._active_low else 0
+            lgpio.gpio_claim_output(handle, self._enable_pin, enable_initial)
+            self._handle = handle
+        except Exception:
+            if handle is not None:
+                try:
+                    lgpio.gpiochip_close(handle)
+                except Exception:
+                    pass
+            raise
 
         self._log.debug("DRV8834 lgpio kurulumu tamamlandı.")
 

@@ -3,14 +3,29 @@
 # Raspberry Pi tarafında raspberry-pi-5/config/payload.yaml kullanılır.
 
 # ── Backend seçimi ──────────────────────────────────────────────────────────
-# "simulation"    → SimulationBackend (Gazebo, GPIO yok)
-# "hil"           → RemoteRPiBackend  (Ubuntu → Wi-Fi → Raspberry Pi)
-# "real"          → LocalRPiBackend   (yalnızca Raspberry Pi üzerinde)
-backend: simulation
+# Bu değeri değiştirerek hangi donanımın kullanılacağını belirle.
+# main.py bu değeri okur — kod içinde magic string yoktur.
+#
+#   simulation  → SimulationBackend  (Gazebo, GPIO yok)
+#   hil         → RemoteRPiBackend   (Ubuntu → Wi-Fi → Raspberry Pi)
+#   real        → LocalRPiBackend    (Raspberry Pi üzerinde, doğrudan GPIO)
+backend: hil
+
+# ── Kamera seçimi ───────────────────────────────────────────────────────────
+# backend: simulation → gazebo kamera kullanılır (config.py'deki CAMERA_TOPIC)
+# backend: hil        → gazebo kamera kullanılır (Ubuntu'da Gazebo çalışıyor)
+# backend: real       → gerçek kamera kullanılır (aşağıdaki ayarlar geçerli)
+camera:
+  source: 0          # USB kamera index veya "/dev/video0" veya RTSP URL
+  width:  1920
+  height: 1080
+  fps:    30
 
 # ── Remote backend (HIL modu) ───────────────────────────────────────────────
+# backend: hil seçildiğinde bu blok okunur.
+# host ve port buradan gelir — main.py içinde IP adresi yoktur.
 remote:
-  host: raspberry-pi-5.local   # Raspberry Pi hostname veya IP
+  host: 192.168.1.21   # Raspberry Pi'nin IP'si veya hostname'i
   port: 5700
   timeout_s: 10.0
 

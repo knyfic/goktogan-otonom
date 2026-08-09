@@ -75,3 +75,7 @@ fish: Job 1, 'python3 main.py' terminated by signal SIGABRT (Abort)
 ```
 
 **oneri26**: payloadı almaya giderken tekrar yukselmeli ve ardında goruntu isleme ile hedefi ortalamalı mevcut irtfida dusuk oluyor. tıpkı returning payload da oldugu gibi.
+
+**oneri27**: zamanlaycı python kodu baslar baslamaz baslamalı. takeoff falan beklemememli program acıldıgı andan itibaren zaman calısmalı.
+
+**oneri28**:rasberry pi ile connection refused duruma dustugu gibi program cokuyor iha rtl falan yapmalı belirli bir timeout boyunca sinyal gelmez ise vb vb... 

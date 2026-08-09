@@ -1,4 +1,16 @@
+"""
+İHA Mission Ana Giriş Noktası.
+
+Payload backend seçimi payload/config.yaml üzerinden yapılır.
+Bu dosyada backend ile ilgili magic string veya magic number yoktur.
+
+  payload/config.yaml → backend: simulation   # Gazebo
+  payload/config.yaml → backend: hil          # Ubuntu → Wi-Fi → RPi
+"""
+import os
 import sys
+
+import yaml
 
 from config import (
     CAMERA_TOPIC,
@@ -9,64 +21,57 @@ from config import (
     PREVIEW_WINDOW_NAME,
 )
 from flight.navigation import Navigation
-from payload.backends.simulation import SimulationBackend
 from payload.payload_controller import PayloadController
 from state_machine import MissionStateMachine
 from utils.logging import setup_logging
 from vision.camera import GazeboCamera
 
-# ── Backend seçimi: tek bir yer ──────────────────────────────────────────────
-#
-# SIMULATION (Gazebo):
-#   backend = SimulationBackend(logger=logger)
-#
-# HIL (Ubuntu → Wi-Fi → Raspberry Pi):
-#   from payload.backends.remote_rpi import RemoteRPiBackend
-#   backend = RemoteRPiBackend(host="192.168.1.42", port=5700, logger=logger)
-#
-# GERÇEK UÇUŞ (Raspberry Pi üzerinde çalıştırılır):
-#   from raspberry_pi_5.payload_service.local_backend import LocalRPiBackend
-#   backend = LocalRPiBackend(config_path="config/payload.yaml", logger=logger)
-#
-# ─────────────────────────────────────────────────────────────────────────────
-BACKEND_MODE = "simulation"   # "simulation" | "hil" | "real"
+# Payload config dosyasının yolu — bu dosyaya göre göreceli
+_PAYLOAD_CONFIG = os.path.join(os.path.dirname(__file__), "payload", "config.yaml")
 
 
-def _build_backend(mode: str, logger):
+def _load_payload_config() -> dict:
+    with open(_PAYLOAD_CONFIG, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def _build_backend(cfg: dict, logger):
+    """
+    payload/config.yaml'daki 'backend' anahtarına göre uygun backend'i oluşturur.
+    Tüm bağlantı parametreleri (host, port, timeout) config'den okunur.
+    """
+    mode = cfg.get("backend", "simulation")
+    logger.info("Payload backend modu: %s  (kaynak: payload/config.yaml)", mode)
+
     if mode == "simulation":
+        from payload.backends.simulation import SimulationBackend
         return SimulationBackend(logger=logger)
 
     if mode == "hil":
         from payload.backends.remote_rpi import RemoteRPiBackend
-        import yaml, os
-        cfg_path = os.path.join(os.path.dirname(__file__), "payload", "config.yaml")
-        with open(cfg_path) as f:
-            cfg = yaml.safe_load(f)
         remote = cfg.get("remote", {})
         return RemoteRPiBackend(
-            host=remote.get("host", "raspberry-pi-5.local"),
-            port=remote.get("port", 5700),
+            host=remote["host"],              # config.yaml'dan — kod içinde IP yok
+            port=remote["port"],
+            timeout=remote.get("timeout_s", 10.0),
             logger=logger,
         )
 
-    if mode == "real":
-        # Gerçek uçuşta bu kod Raspberry Pi üzerinde çalışır.
-        # raspberry-pi-5/payload_service/local_backend.py kullanılır.
-        raise RuntimeError(
-            "Gerçek uçuş için kodu Raspberry Pi üzerinde çalıştırın "
-            "ve LocalRPiBackend kullanın."
-        )
-
-    raise ValueError(f"Bilinmeyen backend modu: {mode!r}")
+    raise ValueError(
+        f"Bilinmeyen payload backend: {mode!r}. "
+        f"payload/config.yaml içinde 'backend' değerini "
+        f"'simulation' veya 'hil' olarak ayarlayın."
+    )
 
 
 def main():
     logger = setup_logging()
     logger.info("Starting İHA Gazebo autonomy mission.")
-    logger.info("Payload backend modu: %s", BACKEND_MODE)
 
     camera: GazeboCamera | None = None
     try:
+        payload_cfg = _load_payload_config()
+
         navigation = Navigation(MAVLINK_CONNECTION)
 
         camera = GazeboCamera(
@@ -77,7 +82,7 @@ def main():
             window_name=PREVIEW_WINDOW_NAME,
         )
 
-        backend = _build_backend(BACKEND_MODE, logger)
+        backend = _build_backend(payload_cfg, logger)
         payload = PayloadController(backend=backend, logger=logger)
 
         mission = MissionStateMachine(
@@ -89,9 +94,7 @@ def main():
         mission.run()
 
     except KeyboardInterrupt:
-        logger.warning(
-            "Keyboard interrupt. No automatic DISARM command is sent."
-        )
+        logger.warning("Keyboard interrupt.")
         return 130
     except Exception:
         logger.exception("Mission terminated by exception.")

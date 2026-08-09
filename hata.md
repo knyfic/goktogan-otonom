@@ -73,3 +73,5 @@ Thread 0x00007061c0a59080 (most recent call first):
 Extension modules: numpy.core._multiarray_umath, numpy.core._multiarray_tests, numpy.linalg._umath_linalg, numpy.fft._pocketfft_internal, numpy.random._common, numpy.random.bit_generator, numpy.random._bounded_integers, numpy.random._mt19937, numpy.random.mtrand, numpy.random._philox, numpy.random._pcg64, numpy.random._sfc64, numpy.random._generator, cv2, google.protobuf.pyext._message (total: 15)
 fish: Job 1, 'python3 main.py' terminated by signal SIGABRT (Abort)
 ```
+
+**oneri26**: payloadı almaya giderken tekrar yukselmeli ve ardında goruntu isleme ile hedefi ortalamalı mevcut irtfida dusuk oluyor. tıpkı returning payload da oldugu gibi.

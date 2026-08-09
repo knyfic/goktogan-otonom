@@ -1,0 +1,48 @@
+# Raspberry Pi 5 — Payload Donanım Konfigürasyonu
+# Bu dosya yalnızca Raspberry Pi üzerinde çalışan kodlar tarafından kullanılır.
+# Ubuntu tarafındaki payload/config.yaml ile karıştırma.
+
+# ── TCP Servis ───────────────────────────────────────────────────────────────
+server:
+  host: 0.0.0.0   # Tüm arayüzlerden bağlantı kabul et
+  port: 5700
+  max_connections: 1   # Aynı anda yalnızca bir kontrol kaynağı
+
+# ── Stepper motor (DRV8834 — Indexer / Full-step mode) ──────────────────────
+stepper:
+  step_pin:   13   # BCM
+  enable_pin: 19   # BCM
+  dir_pin:    26   # BCM
+
+  step_delay_s:      0.001   # Her STEP pulse arası bekleme
+  dir_setup_delay_s: 0.005   # Yön değişimi sonrası kurulum gecikmesi
+
+  # Mekanik hesap (değiştirme — donanım testi ile doğrulanmış)
+  steps_per_revolution: 200    # 1.8° / step
+  mm_per_revolution:    0.7    # Vida adımı
+  travel_mm:            60.0   # Tam hareket mesafesi
+  steps_for_travel:     17143  # = travel_mm / mm_per_revolution * steps_per_revolution
+
+  # ENABLE polarity: LOW = aktif (DRV8834 varsayılanı)
+  enable_active_low: true
+
+# ── Mıknatıslar ──────────────────────────────────────────────────────────────
+magnets:
+  magnet_1_pin: 5   # BCM — Mavi kablo
+  magnet_2_pin: 6   # BCM — Kırmızı kablo
+
+  # HIGH = HOLD (tutma), LOW = RELEASE (bırakma)
+  hold_level:    HIGH
+  release_level: LOW
+
+  initial_magnet_1: ON
+  initial_magnet_2: ON
+
+# ── Payload bırakma sırası ───────────────────────────────────────────────────
+payload_sequence:
+  magnet_1_first: true   # true → 1. bırakma = Magnet 1 OFF
+
+# ── GPIO ─────────────────────────────────────────────────────────────────────
+gpio:
+  mode: BCM
+  cleanup_on_exit: true

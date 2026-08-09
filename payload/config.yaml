@@ -1,0 +1,59 @@
+# Payload sistemi konfigürasyonu
+# Bu dosya Ubuntu (mission) tarafı için referans alınır.
+# Raspberry Pi tarafında raspberry-pi-5/config/payload.yaml kullanılır.
+
+# ── Backend seçimi ──────────────────────────────────────────────────────────
+# "simulation"    → SimulationBackend (Gazebo, GPIO yok)
+# "hil"           → RemoteRPiBackend  (Ubuntu → Wi-Fi → Raspberry Pi)
+# "real"          → LocalRPiBackend   (yalnızca Raspberry Pi üzerinde)
+backend: simulation
+
+# ── Remote backend (HIL modu) ───────────────────────────────────────────────
+remote:
+  host: raspberry-pi-5.local   # Raspberry Pi hostname veya IP
+  port: 5700
+  timeout_s: 10.0
+
+# ── Stepper motor ───────────────────────────────────────────────────────────
+stepper:
+  # GPIO pinleri (BCM mode)
+  step_pin:   13
+  enable_pin: 19
+  dir_pin:    26
+
+  # Zamanlama
+  step_delay_s:      0.001   # Her STEP pulse arasındaki bekleme (HIGH + LOW)
+  dir_setup_delay_s: 0.005   # Yön değişimi sonrası kurulum gecikmesi
+
+  # Mekanik hesap
+  # 1.8° / step → 200 full-step / devir, vida adımı 0.7 mm/devir
+  # 60 mm hareket ≈ 60 / 0.7 * 200 = 17143 adım
+  steps_per_revolution: 200
+  mm_per_revolution:    0.7
+  travel_mm:            60.0
+  steps_for_travel:     17143   # ≈ travel_mm / mm_per_revolution * steps_per_revolution
+
+  # ENABLE polarity (DRV8834)
+  # LOW  = driver aktif   (enable_active_low: true)
+  # HIGH = driver pasif
+  enable_active_low: true
+
+# ── Mıknatıslar ─────────────────────────────────────────────────────────────
+magnets:
+  magnet_1_pin: 5    # Mavi kablo
+  magnet_2_pin: 6    # Kırmızı kablo
+
+  # HIGH = tutma (HOLD), LOW = bırakma (RELEASE)
+  hold_level:    HIGH
+  release_level: LOW
+
+  # Başlangıç durumu: her iki mıknatıs da tutma konumunda
+  initial_magnet_1: ON
+  initial_magnet_2: ON
+
+# ── Payload sıralaması ──────────────────────────────────────────────────────
+# release_payload ilk çağrıldığında hangisi bırakılır?
+# "magnet_1_first": true  → 1. bırakma = Magnet 1 OFF
+# "magnet_1_first": false → 1. bırakma = Magnet 2 OFF
+payload_sequence:
+  magnet_1_first: true

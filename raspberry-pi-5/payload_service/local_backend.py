@@ -64,12 +64,13 @@ class LocalRPiBackend:
     ) -> None:
         self._stepper  = stepper
         self._magnets  = magnets
-        self._steps    = steps       # Tam hareket adım sayısı (60 mm ≈ 17143)
+        self._steps    = steps
         self._log      = logger or logging.getLogger(__name__)
         self._state    = "UNINITIALIZED"
         self._emergency = False
         self._carried  = 2
         self._move_thread: threading.Thread | None = None
+        self.stepper_duration: float | None = None   # factory tarafından set edilir
 
     # ── Factory ──────────────────────────────────────────────────────────── #
     @classmethod
@@ -89,10 +90,12 @@ class LocalRPiBackend:
             step_pin=sc["step_pin"],
             enable_pin=sc["enable_pin"],
             dir_pin=sc["dir_pin"],
-            step_delay_s=sc.get("step_delay_s", 0.001),
             dir_setup_delay_s=sc.get("dir_setup_delay_s", 0.005),
             enable_active_low=sc.get("enable_active_low", True),
             chip=chip,
+            start_delay_us=sc.get("start_delay_us",  1500),
+            target_delay_us=sc.get("target_delay_us", 1200),
+            ramp_steps=sc.get("ramp_steps", 250),
             logger=log,
         )
 
@@ -105,8 +108,13 @@ class LocalRPiBackend:
             logger=log,
         )
 
-        steps = sc.get("steps_for_travel", 17143)
-        return cls(stepper=stepper, magnets=magnets, steps=steps, logger=log)
+        steps = sc.get("steps_for_travel", 10000)
+        avg_us = (sc.get("start_delay_us", 1500) + sc.get("target_delay_us", 1200)) / 2
+        inst = cls(stepper=stepper, magnets=magnets, steps=steps, logger=log)
+        inst.stepper_duration = steps * (avg_us + 10) * 1e-6
+        log.info("Stepper hareket süresi tahmini: %.1fs (%d adım)",
+                 inst.stepper_duration, steps)
+        return inst
 
     # ── Lifecycle ─────────────────────────────────────────────────────────── #
     def initialize(self) -> dict:

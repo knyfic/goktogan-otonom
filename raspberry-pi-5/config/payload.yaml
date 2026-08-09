@@ -14,14 +14,18 @@ stepper:
   enable_pin: 19   # BCM
   dir_pin:    26   # BCM
 
-  step_delay_s:      0.001   # Her STEP pulse arası bekleme
-  dir_setup_delay_s: 0.005   # Yön değişimi sonrası kurulum gecikmesi
+  # Yön değişimi sonrası kurulum gecikmesi
+  dir_setup_delay_s: 0.005
 
-  # Mekanik hesap (değiştirme — donanım testi ile doğrulanmış)
-  steps_per_revolution: 200    # 1.8° / step
-  mm_per_revolution:    0.7    # Vida adımı
-  travel_mm:            60.0   # Tam hareket mesafesi
-  steps_for_travel:     17143  # = travel_mm / mm_per_revolution * steps_per_revolution
+  # Rampa profili — Arduino referans kodundan (en iyi çalışan değerler)
+  # Step pulse: 10µs HIGH tetik + delay µs LOW bekleme
+  start_delay_us:  1500    # µs — başlangıç pulse aralığı (yavaş başla)
+  target_delay_us: 1200    # µs — hedef pulse aralığı (tam hız)
+  ramp_steps:       250    # kaç adımda hedefe ulaş (başta ve sonda)
+
+  # Tam hareket mesafesi
+  # Arduino: stepsPerRevolution = 10000
+  steps_for_travel: 10000
 
   # ENABLE polarity: LOW = aktif (DRV8834 varsayılanı)
   enable_active_low: true

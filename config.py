@@ -73,7 +73,7 @@ ALIGN_ON_TARGET_TIMEOUT_S = 5
 # Gerçek uçuşta (HIL/real) bu değer stepper süresinden hesaplanır:
 #   steps_for_travel × step_delay_s × 2 = 17143 × 0.001 × 2 ≈ 34.3s
 # Buradaki değer yalnızca simulation backend için geçerlidir.
-PAYLOAD_SERVO_WAIT_S = 3.0
+PAYLOAD_SERVO_WAIT_S = 35.0
 
 FIELD_WIDTH = 30.0
 FIELD_LENGTH = 100.0

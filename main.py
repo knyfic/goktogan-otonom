@@ -120,7 +120,10 @@ def main():
         navigation = Navigation(MAVLINK_CONNECTION)
         camera     = _build_camera(mode, payload_cfg, logger)
         backend    = _build_backend(mode, payload_cfg, logger)
-        payload    = PayloadController(backend=backend, logger=logger)
+        # Renk haritası: hangi renk payload hangi mıknatısta
+        color_map  = payload_cfg.get("payload_color_map", {})
+        payload    = PayloadController(backend=backend, logger=logger,
+                                       color_map=color_map or None)
 
         mission = MissionStateMachine(
             navigation=navigation,

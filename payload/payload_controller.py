@@ -59,16 +59,21 @@ class PayloadController:
     """
     State machine'in görev 1 ve 2 sırasında çağırdığı payload API katmanı.
 
-    Hangi payload'ın hangisine karşılık geldiğini takip eder:
-      release_count == 0 → Payload 1 bırakılacak  (Magnet 1)
-      release_count == 1 → Payload 2 bırakılacak  (Magnet 2)
-      pickup sonrası      → Her iki mıknatıs ON
+    Hangi renk payload'ın hangi mıknatısta olduğunu payload/config.yaml'dan okur:
+      payload_color_map:
+        RED:  magnet_1
+        BLUE: magnet_2
+
+    release_payload(color) çağrılınca:
+      RED  → release_payload_1()
+      BLUE → release_payload_2()
     """
 
     def __init__(
         self,
         backend: PayloadBackend,
         logger: logging.Logger,
+        color_map: dict | None = None,
     ) -> None:
         self._backend       = backend
         self.logger         = logger
@@ -76,13 +81,19 @@ class PayloadController:
         self.attached_payload: TargetColor | None = None
         self._release_count = 0
 
-        # Stepper süresi (saniye) — state machine bekleme süresini buradan alır.
-        # SimulationBackend için None döner, state machine config.py'deki
-        # PAYLOAD_SERVO_WAIT_S değerini kullanır.
-        # LocalRPiBackend / RemoteRPiBackend gerçek stepper süresini döndürür.
+        # Renk → mıknatıs eşleşmesi.
+        # config.yaml'dan inject edilir; yoksa varsayılan: RED=magnet_1, BLUE=magnet_2
+        self._color_map: dict[str, str] = color_map or {
+            "RED":  "magnet_1",
+            "BLUE": "magnet_2",
+        }
+        self.logger.info(
+            "Payload renk haritası: RED→%s  BLUE→%s",
+            self._color_map.get("RED"), self._color_map.get("BLUE"),
+        )
+
         self._stepper_duration: float | None = getattr(backend, "stepper_duration", None)
 
-        # Başlatma
         res = self._backend.initialize()
         if not res.success:
             self.logger.error("Payload backend initialize başarısız: %s", res.message)
@@ -97,27 +108,32 @@ class PayloadController:
     def release_payload(self, payload_type: TargetColor) -> PayloadResult:
         """
         Görev 1: Payload bırak.
-        İlk çağrı → Payload 1 (Magnet 1 OFF, Magnet 2 dokunulmaz).
-        İkinci çağrı → Payload 2 (Magnet 2 OFF).
-        Stepper motor DOKUNULMAZ.
+        Hangi mıknatısın kapatılacağı payload_color_map'ten belirlenir:
+          RED  → config'deki RED mıknatısı kapat
+          BLUE → config'deki BLUE mıknatısı kapat
+        Diğer mıknatıs DOKUNULMAZ.
         """
-        if self._release_count == 0:
-            self.logger.info("PAYLOAD RELEASE #1 → SADECE Magnet 1 kapatılıyor. (%s)",
-                             payload_type.value)
+        color_key = payload_type.value.upper()   # "RED" veya "BLUE"
+        magnet = self._color_map.get(color_key, "magnet_1")
+
+        self.logger.info(
+            "PAYLOAD RELEASE: %s → %s kapatılıyor",
+            payload_type.value, magnet,
+        )
+
+        if magnet == "magnet_1":
             res = self._backend.release_payload_1()
         else:
-            self.logger.info("PAYLOAD RELEASE #2 → SADECE Magnet 2 kapatılıyor. (%s)",
-                             payload_type.value)
             res = self._backend.release_payload_2()
 
         if res.success:
             self._release_count += 1
             self.released_payloads.append(payload_type)
-            self.logger.info("Payload bırakıldı (#%d): %s",
-                             self._release_count, payload_type.value)
+            self.logger.info("Payload bırakıldı (#%d): %s → %s",
+                             self._release_count, payload_type.value, magnet)
         else:
-            self.logger.error("Payload bırakma başarısız (#%d): %s — %s",
-                              self._release_count + 1, payload_type.value, res.message)
+            self.logger.error("Payload bırakma başarısız: %s → %s — %s",
+                              payload_type.value, magnet, res.message)
 
         return _to_legacy(res, payload_type)
 

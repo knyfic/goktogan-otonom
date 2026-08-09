@@ -15,6 +15,12 @@ Rampa profili (Arduino referans kodundan):
   hedef_hız     = 1200µs  → hedefe ivmelen
   rampa_adımı   = 250     → kaç adımda hıza ulaş
   Hem başta hem sonda rampa uygulanır.
+
+Mekanik (mil / leadscrew):
+  mm_per_revolution   = 0.7    → Mil 1 tam devir = 0.7 mm doğrusal hareket
+  steps_per_revolution = 200   → NEMA 17 full-step (1.8°/adım)
+  mm_per_step         = 0.0035 → 0.7 / 200 = 0.0035 mm / adım
+  50 mm seyahat       = 14286 adım (tam sayı)
 """
 from __future__ import annotations
 
@@ -34,19 +40,28 @@ _DEFAULT_TARGET_DELAY_US = 1200   # µs — hedef pulse aralığı (hızlı)
 _DEFAULT_RAMP_STEPS      = 250    # adım sayısı — rampa uzunluğu
 _STEP_HIGH_US            = 10     # µs — STEP pin'in HIGH kalma süresi
 
+# Mekanik sabitler (mil / leadscrew) — config'ten de ayarlanabilir
+_MM_PER_REVOLUTION_DEFAULT    = 0.7    # 1 tam devir = 0.7 mm doğrusal
+_STEPS_PER_REVOLUTION_DEFAULT = 200    # Full-step, NEMA 17
+
 
 class DRV8834:
     """
     DRV8834 stepper motor sürücüsü — rampalı lgpio tabanlı.
 
-    Kullanım:
+    Kullanım (adım bazlı):
         stepper = DRV8834(step_pin=13, enable_pin=19, dir_pin=26)
         stepper.setup()
         stepper.enable()
-        stepper.move_down(10000)
-        stepper.move_up(10000)
+        stepper.move_down(14286)   # 50 mm aşağı
+        stepper.move_up(14286)     # 50 mm yukarı
         stepper.disable()
         stepper.close()
+
+    Kullanım (mm bazlı — yeni):
+        stepper.enable()
+        stepper.move_down_mm(50.0)
+        stepper.move_up_mm(50.0)
     """
 
     DIR_DOWN = 0   # DIR LOW  → aşağı (fiziksel bağlantıya göre)
@@ -64,6 +79,9 @@ class DRV8834:
         start_delay_us:     int   = _DEFAULT_START_DELAY_US,
         target_delay_us:    int   = _DEFAULT_TARGET_DELAY_US,
         ramp_steps:         int   = _DEFAULT_RAMP_STEPS,
+        # Mekanik parametreler (mil / leadscrew) — mm ↔ step çevirisi için
+        mm_per_revolution:  float = _MM_PER_REVOLUTION_DEFAULT,
+        steps_per_revolution: int = _STEPS_PER_REVOLUTION_DEFAULT,
         logger: logging.Logger | None = None,
     ) -> None:
         self._step_pin    = step_pin
@@ -82,19 +100,49 @@ class DRV8834:
         self._target_us = target_delay_us
         self._ramp      = ramp_steps
 
+        # Mekanik (mil) — mm ↔ adım çevirisi
+        self._mm_per_rev    = float(mm_per_revolution)
+        self._steps_per_rev = int(steps_per_revolution)
+        self._mm_per_step   = self._mm_per_rev / max(self._steps_per_rev, 1)
+
         if not _GPIO_AVAILABLE:
             self._log.warning("lgpio bulunamadı — stepper stub modda çalışıyor.")
+        else:
+            self._log.info(
+                "Stepper mekanik: %.4f mm/adım (%d adım/devir × %.2f mm/devir)",
+                self._mm_per_step, self._steps_per_rev, self._mm_per_rev,
+            )
+
+    # ── Yardımcı: mm ↔ adım çevirisi ──────────────────────────────────────── #
+    @property
+    def mm_per_step(self) -> float:
+        """Bir adımın doğrusal karşılığı (mm)."""
+        return self._mm_per_step
+
+    def mm_to_steps(self, mm: float) -> int:
+        """Verilen doğrusal mesafeyi (mm) tam adım sayısına çevir."""
+        if abs(mm) < 1e-9:
+            return 0
+        steps = int(round(mm / self._mm_per_step))
+        return max(0, steps)
+
+    def steps_to_mm(self, steps: int) -> float:
+        """Verilen adım sayısını doğrusal mesafeye (mm) çevir."""
+        return steps * self._mm_per_step
 
     # ── GPIO kurulum ─────────────────────────────────────────────────────── #
     def setup(self) -> None:
+        """gpiochip aç, pinleri çıkış olarak yapılandır. Güvenli: tekrar çağrılabilir."""
         if not _GPIO_AVAILABLE:
             return
+
         if self._handle is not None:
             try:
                 lgpio.gpiochip_close(self._handle)
             except Exception:
                 pass
             self._handle = None
+
         handle = None
         try:
             handle = lgpio.gpiochip_open(self._chip)
@@ -110,6 +158,7 @@ class DRV8834:
                 except Exception:
                     pass
             raise
+
         self._log.debug("DRV8834 lgpio kurulumu tamamlandı.")
 
     # ── Driver aktif/pasif ────────────────────────────────────────────────── #
@@ -188,12 +237,25 @@ class DRV8834:
                        steps, "DOWN" if direction == self.DIR_DOWN else "UP")
 
     def move_down(self, steps: int) -> None:
-        self._log.info("Stepper ↓ aşağı: %d adım", steps)
+        self._log.info("Stepper ↓ aşağı: %d adım (%s mm)",
+                       steps, f"{self.steps_to_mm(steps):.2f}")
         self.move_steps(steps, self.DIR_DOWN)
 
     def move_up(self, steps: int) -> None:
-        self._log.info("Stepper ↑ yukarı: %d adım", steps)
+        self._log.info("Stepper ↑ yukarı: %d adım (%s mm)",
+                       steps, f"{self.steps_to_mm(steps):.2f}")
         self.move_steps(steps, self.DIR_UP)
+
+    # ── MM bazlı hareket (ergonomik) ─────────────────────────────────────── #
+    def move_down_mm(self, mm: float) -> None:
+        """Verilen doğrusal mesafe (mm) kadar aşağı iner."""
+        steps = self.mm_to_steps(mm)
+        self.move_down(steps)
+
+    def move_up_mm(self, mm: float) -> None:
+        """Verilen doğrusal mesafe (mm) kadar yukarı çıkar."""
+        steps = self.mm_to_steps(mm)
+        self.move_up(steps)
 
     # ── Hareket süresi tahmini ────────────────────────────────────────────── #
     def estimate_duration_s(self, steps: int) -> float:
@@ -203,6 +265,10 @@ class DRV8834:
         """
         avg_us = (self._start_us + self._target_us) / 2.0
         return steps * (avg_us + _STEP_HIGH_US) * 1e-6
+
+    def estimate_duration_mm(self, mm: float) -> float:
+        """Doğrusal mesafe (mm) için tahmini hareket süresi (saniye)."""
+        return self.estimate_duration_s(self.mm_to_steps(mm))
 
     # ── Acil durdurma ─────────────────────────────────────────────────────── #
     def emergency_stop(self) -> None:

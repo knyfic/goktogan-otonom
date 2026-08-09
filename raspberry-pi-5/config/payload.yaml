@@ -23,9 +23,22 @@ stepper:
   target_delay_us: 1200    # µs — hedef pulse aralığı (tam hız)
   ramp_steps:       250    # kaç adımda hedefe ulaş (başta ve sonda)
 
-  # Tam hareket mesafesi
-  # Arduino: stepsPerRevolution = 10000
-  steps_for_travel: 10000
+  # ── Mekanik parametreler ────────────────────────────────────────────────
+  # Mil (leadscrew) özellikleri:
+  #   mm_per_revolution   = 0.7      → Mil 1 tam devir = 0.7 mm doğrusal hareket
+  #   steps_per_revolution = 200     → NEMA 17 full-step (1.8°/adım)
+  #   mm_per_step         = 0.0035   → 0.7 / 200 = 0.0035 mm / adım
+  #
+  # Toplam seyahat: 50 mm
+  #   steps_for_travel = travel_mm / (mm_per_revolution / steps_per_revolution)
+  #                    = 50 / (0.7 / 200)
+  #                    = 14285.714  →  14286 (tam sayıya yuvarlandı)
+  #
+  # Tahmini süre: 14286 adım × ortalama ~1210µs/adım ≈ 17.3 sn / yön
+  mm_per_revolution:    0.7
+  steps_per_revolution: 200
+  travel_mm:            50.0
+  steps_for_travel:     14286
 
   # ENABLE polarity: LOW = aktif (DRV8834 varsayılanı)
   enable_active_low: true
@@ -42,9 +55,10 @@ magnets:
   initial_magnet_1: ON
   initial_magnet_2: ON
 
-# ── Payload bırakma sırası ───────────────────────────────────────────────────
-payload_sequence:
-  magnet_1_first: true   # true → 1. bırakma = Magnet 1 OFF
+# ── Payload sıralaması ──────────────────────────────────────────────────────
+payload_color_map:
+  RED:  magnet_1   # KIRMIZI payload → Magnet 1 (GPIO 5)
+  BLUE: magnet_2   # MAVİ payload    → Magnet 2 (GPIO 6)
 
 # ── GPIO ─────────────────────────────────────────────────────────────────────
 gpio:

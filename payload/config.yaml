@@ -24,7 +24,7 @@ backend: hil
 remote:
   host: 192.168.1.21   # Raspberry Pi'nin IP'si veya hostname'i
   port: 5700
-  timeout_s: 180.0     # NOT: release işlemi ~70sn sürer (17143 adım × 2 yön). Büyük tutun.
+  timeout_s: 180.0     # NOT: pickup (stepper ↓+↑) ~35sn sürer (14286 adım × 2 yön). Büyük tutun.
 
 # ── Stepper motor ───────────────────────────────────────────────────────────
 stepper:
@@ -42,9 +42,22 @@ stepper:
   target_delay_us: 1200    # µs — hedef pulse aralığı (tam hız)
   ramp_steps:       250    # kaç adımda hedefe ulaş (başta ve sonda)
 
-  # Tam hareket mesafesi
-  # Arduino: stepsPerRevolution = 10000
-  steps_for_travel: 10000
+  # ── Mekanik parametreler ────────────────────────────────────────────────
+  # Mil (leadscrew) özellikleri:
+  #   mm_per_revolution   = 0.7      → Mil 1 tam devir = 0.7 mm doğrusal hareket
+  #   steps_per_revolution = 200     → NEMA 17 full-step (1.8°/adım)
+  #   mm_per_step         = 0.0035   → 0.7 / 200 = 0.0035 mm / adım
+  #
+  # Toplam seyahat: 50 mm
+  #   steps_for_travel = travel_mm / (mm_per_revolution / steps_per_revolution)
+  #                    = 50 / (0.7 / 200)
+  #                    = 14285.714  →  14286 (tam sayıya yuvarlandı)
+  #
+  # Tahmini süre: 14286 adım × ortalama ~1210µs/adım ≈ 17.3 sn / yön
+  mm_per_revolution:    0.7
+  steps_per_revolution: 200
+  travel_mm:            50.0
+  steps_for_travel:     14286
 
   # ENABLE polarity (DRV8834)
   enable_active_low: true
@@ -63,11 +76,17 @@ magnets:
   initial_magnet_2: ON
 
 # ── Payload sıralaması ──────────────────────────────────────────────────────
-# release_payload ilk çağrıldığında hangisi bırakılır?
-# "magnet_1_first": true  → 1. bırakma = Magnet 1 OFF
-# "magnet_1_first": false → 1. bırakma = Magnet 2 OFF
-payload_sequence:
-  magnet_1_first: true
+# Hangi renk payload hangi mıknatısa bağlı?
+# Fiziksel kuruluma göre ayarla.
+#
+# Örnek:
+#   Mavi altıgen hedefine KIRMIZI payload bırakılmalı
+#   → KIRMIZI payload Magnet 1'de (GPIO 5, mavi kablo)
+#
+# Bunu değiştirmek için yalnızca bu iki satırı güncelle:
+payload_color_map:
+  RED:  magnet_1   # KIRMIZI payload → Magnet 1 (GPIO 5)
+  BLUE: magnet_2   # MAVİ payload    → Magnet 2 (GPIO 6)
 
 # ── GPIO chip (backend: real için) ──────────────────────────────────────────
 # Raspberry Pi 5'te /dev/gpiochip0 varsayılandır.

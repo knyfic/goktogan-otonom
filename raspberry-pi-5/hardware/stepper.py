@@ -49,8 +49,8 @@ class DRV8834:
         stepper.close()
     """
 
-    DIR_DOWN = 1   # DIR HIGH → aşağı (Arduino: dirPin HIGH = 1. yön)
-    DIR_UP   = 0   # DIR LOW  → yukarı
+    DIR_DOWN = 0   # DIR LOW  → aşağı (fiziksel bağlantıya göre)
+    DIR_UP   = 1   # DIR HIGH → yukarı
 
     def __init__(
         self,

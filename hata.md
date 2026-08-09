@@ -92,3 +92,10 @@ yani ana kodun bu kısmında "2026-08-09 15:51:31,744 | INFO     | iha_mission |
 2026-08-09 15:51:32,019 | INFO     | iha_mission | Pickup servo komutu gönderildi (RED). 3.0s bekleniyor...
 2026-08-09 15:51:35,024 | INFO     | iha_mission | [REMOTE] finish_pickup
 2026-08-09 15:52:41,432 | INFO     | iha_mission | PAYLOAD PICKUP TAMAMLANDI: RED" goruntu isleme ve sistem tam anlmaıyla donuyor servo job ı bitine kadar. bu gercekten guzel servoyu beklemesi zaten bizim ihtiyacımız olan bir sey fakat sorun şu: ana kod serovyu beklesin o job u dinlesin fakat donmasına gerek yok. + olarak artık fizksel bir servo ile test ettigimiz icin yapay bir 3 saniye beklniyor yazısına ihtyacımız yok hala simler icin 3 saniye beklesin fakat pencerede yazmasına gerekyok.
+
+
+**oneri31**: ilk yuk mavi yuk yani kırmızı ucgen hedefe bırakılacak olan yuk oldugu zaman payload bırakma gorevi basarılı bir seklde tamamnalmıyor yuk bırakılmıyor. mıktanıslar aktif kalmaya devam ediyor. fakat kod bıraktıgını sanıyor.
+
+**oneri32**: ornegin ilk kırmızı hedefe yoneldikten sonra araması gereken seyin mavi altıgen oldugunu kodunbilmesi gerekior payload bırakma gorevi sırasında. cunku iki adet alanımız var birisi kırmızı cugen diger mavi altıgen eyer ilk yuku zaten kırmızı ucgene bırakmıssı ikinci alanı mavi altıgen olmak zorunda. kafa karısıklıgı yasmamalı baska bir kırmızı ucgen goruncu ona yonelmemeli cunku aradıgı sey artık mavi altıgen. aynısı tam tersi icinde gecerli
+
+**soneri33**: step sasyısı ve step yonu ayarlanmalı

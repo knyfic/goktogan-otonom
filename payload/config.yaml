@@ -24,7 +24,7 @@ backend: hil
 remote:
   host: 192.168.1.21   # Raspberry Pi'nin IP'si veya hostname'i
   port: 5700
-  timeout_s: 10.0
+  timeout_s: 180.0     # NOT: release işlemi ~70sn sürer (17143 adım × 2 yön). Büyük tutun.
 
 # ── Stepper motor ───────────────────────────────────────────────────────────
 stepper:

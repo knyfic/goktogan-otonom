@@ -48,7 +48,7 @@ class RemoteRPiBackend(PayloadBackend):
         self,
         host: str,
         port: int,
-        timeout: float = 10.0,
+        timeout: float = 180.0,
         logger: logging.Logger | None = None,
     ) -> None:
         self._host    = host
@@ -58,6 +58,20 @@ class RemoteRPiBackend(PayloadBackend):
         self._cached_status: PayloadSystemStatus | None = None
 
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _set_socket_keepalive(sock: socket.socket) -> None:
+        """Uzun süreli bağlantılarda (release ~70sn) NAT/WiFi idle timeout'u önle."""
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            if hasattr(socket, "TCP_KEEPIDLE"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 5)
+            if hasattr(socket, "TCP_KEEPINTVL"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 3)
+            if hasattr(socket, "TCP_KEEPCNT"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)
+        except OSError:
+            pass
+
     def _send(self, command: str, params: dict | None = None) -> dict:
         """
         Raspberry Pi'ye JSON komut gönder, yanıtı parse et.
@@ -71,8 +85,8 @@ class RemoteRPiBackend(PayloadBackend):
         try:
             with socket.create_connection((self._host, self._port),
                                           timeout=self._timeout) as sock:
+                self._set_socket_keepalive(sock)
                 sock.sendall(payload_bytes)
-                # Yanıt: tek satır JSON + newline
                 data = b""
                 while True:
                     chunk = sock.recv(4096)

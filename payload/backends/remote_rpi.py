@@ -57,6 +57,8 @@ class RemoteRPiBackend(PayloadBackend):
         self._timeout = timeout
         self._log     = logger or logging.getLogger(__name__)
         self._cached_status: PayloadSystemStatus | None = None
+        # initialize() sonrası STATUS komutu ile RPi'den alınan stepper süresi
+        self.stepper_duration: float | None = None
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -123,7 +125,19 @@ class RemoteRPiBackend(PayloadBackend):
     def initialize(self) -> PayloadOperationResult:
         self._log.info("[REMOTE] initialize → %s:%d", self._host, self._port)
         resp = self._send(CMD_INITIALIZE)
-        return self._to_result(resp)
+        result = self._to_result(resp)
+        # RPi'nin stepper süresini al — state machine bekleme süresini buradan hesaplar
+        if result.success:
+            try:
+                status_resp = self._send(CMD_STATUS)
+                duration = status_resp.get("status", {}).get("stepper_duration")
+                if duration is not None:
+                    self.stepper_duration = float(duration)
+                    self._log.info("[REMOTE] Stepper süresi RPi'den alındı: %.1fs",
+                                   self.stepper_duration)
+            except Exception:
+                pass   # Eski RPi firmware — stepper_duration yok, config.py değeri kullanılır
+        return result
 
     def send_pickup_command(self) -> PayloadOperationResult:
         self._log.info("[REMOTE] send_pickup_command")

@@ -165,8 +165,8 @@ class MissionStateMachine:
 
         # ---- Payload pickup servo bekleme ----
         # _do_pickup servo komutunu gönderince bu zaman damgası set edilir.
-        # _do_wait_servo_then_ascend bu zamanı kontrol eder.
         self._pickup_servo_start: float | None = None
+        self._pickup_servo_wait:  float        = PAYLOAD_SERVO_WAIT_S
 
         # ---- Payload hassas iniş state'i ----
         # _payload_descent_alt: bir sonraki iniş hedefi; None = henüz başlamadı
@@ -1468,7 +1468,11 @@ class MissionStateMachine:
         """
         Non-blocking servo bekleme.
         İlk çağrıda servo komutunu gönder; sonraki tick'lerde
-        PAYLOAD_SERVO_WAIT_S geçti mi diye kontrol et.
+        bekleme süresi doldu mu diye kontrol et.
+
+        Bekleme süresi: payload.servo_wait_s → stepper'ın gerçek süresi
+        (LocalRPiBackend/RemoteRPiBackend tarafından hesaplanır).
+        None dönerse simulation için config.py PAYLOAD_SERVO_WAIT_S kullanılır.
         """
         target = self.data.first_target
         if target is None:
@@ -1479,22 +1483,32 @@ class MissionStateMachine:
             payload_type = self.payload_for_target(target)
             self.payload.send_pickup_command(payload_type)
             self._pickup_servo_start = time.monotonic()
+            # Gerçek stepper süresini backend'den al, yoksa simulation değeri
+            wait = self.payload.servo_wait_s
+            if wait is None:
+                wait = PAYLOAD_SERVO_WAIT_S
+            self._pickup_servo_wait = wait
             self.log.info(
-                "Pickup servo komutu gönderildi (%s). %.1fs bekleniyor...",
-                payload_type.value, PAYLOAD_SERVO_WAIT_S,
+                "Pickup komutu gönderildi (%s). %.1fs bekleniyor...",
+                payload_type.value, self._pickup_servo_wait,
             )
             return
 
         elapsed = time.monotonic() - self._pickup_servo_start
-        if elapsed < PAYLOAD_SERVO_WAIT_S:
+        wait    = getattr(self, "_pickup_servo_wait", PAYLOAD_SERVO_WAIT_S)
+
+        if elapsed < wait:
             frame = self.camera.latest()
             if frame is not None:
-                servo_str = f"SERVO BEKLE {elapsed:.1f}/{PAYLOAD_SERVO_WAIT_S:.0f}s"
-                l1, l2 = self._hud_lines(extra=servo_str)
-                self._pending_display = self._draw_hud(
-                    frame, l1, l2,
-                    line1_color=(0, 200, 255),
-                )
+                # Simulation: kalan süreyi göster. Gerçek donanım: sadece normal HUD.
+                is_sim = (self.payload.servo_wait_s is None)
+                if is_sim:
+                    extra = f"PICKUP BEKLE {elapsed:.1f}/{wait:.0f}s"
+                    l1, l2 = self._hud_lines(extra=extra)
+                    self._pending_display = self._draw_hud(
+                        frame, l1, l2, line1_color=(0, 200, 255))
+                else:
+                    self._pending_display = self._base_overlay(frame)
             return
 
         self._pickup_servo_start = None

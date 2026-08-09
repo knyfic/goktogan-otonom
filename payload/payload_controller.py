@@ -74,9 +74,15 @@ class PayloadController:
         self.logger         = logger
         self.released_payloads: list[TargetColor] = []
         self.attached_payload: TargetColor | None = None
-        self._release_count = 0        # kaç kez release_payload çağrıldı
+        self._release_count = 0
 
-        # Başlatma: mıknatıslar ON, stepper güvenli konum
+        # Stepper süresi (saniye) — state machine bekleme süresini buradan alır.
+        # SimulationBackend için None döner, state machine config.py'deki
+        # PAYLOAD_SERVO_WAIT_S değerini kullanır.
+        # LocalRPiBackend / RemoteRPiBackend gerçek stepper süresini döndürür.
+        self._stepper_duration: float | None = getattr(backend, "stepper_duration", None)
+
+        # Başlatma
         res = self._backend.initialize()
         if not res.success:
             self.logger.error("Payload backend initialize başarısız: %s", res.message)
@@ -183,3 +189,12 @@ class PayloadController:
         """Tek mıknatısı bağımsız kontrol et (debug/override için)."""
         res = self._backend.set_magnet(magnet_id, on)
         return _to_legacy(res, TargetColor.RED)
+
+    @property
+    def servo_wait_s(self) -> float | None:
+        """
+        Stepper'ın aşağı hareketi için gereken süre (saniye).
+        None dönerse state machine config.py'deki PAYLOAD_SERVO_WAIT_S kullanır.
+        Gerçek backend'lerde steps_for_travel × step_delay × 2 olarak hesaplanır.
+        """
+        return self._stepper_duration

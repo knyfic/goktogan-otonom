@@ -63,6 +63,8 @@ class LocalRPiBackend(PayloadBackend):
         self._emergency = False
         self._carried   = 2
         self._move_thread: threading.Thread | None = None
+        # factory tarafından set edilir
+        self.stepper_duration: float | None = None
 
     # ── Factory ──────────────────────────────────────────────────────────── #
     @classmethod
@@ -103,7 +105,13 @@ class LocalRPiBackend(PayloadBackend):
         )
 
         steps = sc.get("steps_for_travel", 17143)
-        return cls(stepper=stepper, magnets=magnets, steps=steps, logger=log)
+        # Stepper aşağı hareket süresi: steps × step_delay × 2 (HIGH+LOW)
+        # Bu süre state machine'in bekleme süresi olarak kullanılır.
+        stepper_duration = steps * sc.get("step_delay_s", 0.001) * 2
+        inst = cls(stepper=stepper, magnets=magnets, steps=steps, logger=log)
+        inst.stepper_duration = stepper_duration
+        log.info("Stepper hareket süresi: %.1fs (%d adım)", stepper_duration, steps)
+        return inst
 
     # ── PayloadBackend interface ──────────────────────────────────────────── #
 

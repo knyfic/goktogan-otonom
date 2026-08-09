@@ -87,7 +87,14 @@ class CommandDispatcher:
 
         if command == "STATUS":
             s = b.status()
-            return {"success": True, "status": s}
+            # stepper_duration'ı da ekle — Ubuntu tarafı bekleme süresini buradan alır
+            return {
+                "success": True,
+                "status": {
+                    **s,
+                    "stepper_duration": getattr(b, "stepper_duration", None),
+                },
+            }
 
         return self._err(f"Bilinmeyen komut: {command!r}")
 

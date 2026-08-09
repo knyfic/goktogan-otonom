@@ -20,7 +20,7 @@ Mekanik (mil / leadscrew):
   mm_per_revolution   = 0.7    → Mil 1 tam devir = 0.7 mm doğrusal hareket
   steps_per_revolution = 200   → NEMA 17 full-step (1.8°/adım)
   mm_per_step         = 0.0035 → 0.7 / 200 = 0.0035 mm / adım
-  50 mm seyahat       = 14286 adım (tam sayı)
+  40 mm seyahat       = 11429 adım (tam sayı)
 """
 from __future__ import annotations
 
@@ -53,15 +53,15 @@ class DRV8834:
         stepper = DRV8834(step_pin=13, enable_pin=19, dir_pin=26)
         stepper.setup()
         stepper.enable()
-        stepper.move_down(14286)   # 50 mm aşağı
-        stepper.move_up(14286)     # 50 mm yukarı
+        stepper.move_down(11429)   # 40 mm aşağı
+        stepper.move_up(11429)     # 40 mm yukarı
         stepper.disable()
         stepper.close()
 
     Kullanım (mm bazlı — yeni):
         stepper.enable()
-        stepper.move_down_mm(50.0)
-        stepper.move_up_mm(50.0)
+        stepper.move_down_mm(40.0)
+        stepper.move_up_mm(40.0)
     """
 
     DIR_DOWN = 0   # DIR LOW  → aşağı (fiziksel bağlantıya göre)

@@ -20,7 +20,7 @@ Mekanik (mil / leadscrew):
   mm_per_revolution   = 0.7    → Mil 1 tam devir = 0.7 mm doğrusal hareket
   steps_per_revolution = 200   → NEMA 17 full-step (1.8°/adım)
   mm_per_step         = 0.0035 → 0.7 / 200 = 0.0035 mm / adım
-  50 mm seyahat       = 14286 adım (tam sayı)
+  40 mm seyahat       = 11429 adım (tam sayı)
 """
 from __future__ import annotations
 

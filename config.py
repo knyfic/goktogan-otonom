@@ -71,7 +71,7 @@ ALIGN_ON_TARGET_TIMEOUT_S = 5
 # Servo/mekanik mekanizmanın çalışması için bekleme süresi (saniye).
 # Simulation modunda yapay bekleme için kullanılır.
 # Gerçek uçuşta (HIL/real) bu değer stepper süresinden hesaplanır:
-#   steps_for_travel × step_delay_s × 2 = 17143 × 0.001 × 2 ≈ 34.3s
+#   steps_for_travel × step_delay_s × 2 = 11429 × 0.001 × 2 ≈ 22.9s
 # Buradaki değer yalnızca simulation backend için geçerlidir.
 PAYLOAD_SERVO_WAIT_S = 1
 

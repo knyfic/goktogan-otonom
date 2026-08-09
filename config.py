@@ -98,6 +98,12 @@ CAMERA_HORIZONTAL_FOV_DEG = 66.0
 # 4:3 sensörde eski değer 60° idi; 16:9'a geçince V-FOV düşer.
 CAMERA_VERTICAL_FOV_DEG = 41.0
 
+# Gerçek kamera kaynağı — yalnızca backend: real modunda kullanılır.
+# Gazebo / HIL modunda bu değer okunmaz.
+# 0 = ilk USB kamera, "/dev/video0" veya RTSP URL de olabilir.
+REAL_CAMERA_SOURCE = 0
+REAL_CAMERA_FPS    = 30
+
 MIN_TARGET_AREA_PX = 250.0
 MIN_PAYLOAD_AREA_PX = 20.0
 DETECTION_HISTORY_SIZE = 5

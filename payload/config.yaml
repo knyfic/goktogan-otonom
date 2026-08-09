@@ -11,15 +11,12 @@
 #   real        → LocalRPiBackend    (Raspberry Pi üzerinde, doğrudan GPIO)
 backend: hil
 
-# ── Kamera seçimi ───────────────────────────────────────────────────────────
-# backend: simulation → gazebo kamera kullanılır (config.py'deki CAMERA_TOPIC)
-# backend: hil        → gazebo kamera kullanılır (Ubuntu'da Gazebo çalışıyor)
-# backend: real       → gerçek kamera kullanılır (aşağıdaki ayarlar geçerli)
-camera:
-  source: 0          # USB kamera index veya "/dev/video0" veya RTSP URL
-  width:  1920
-  height: 1080
-  fps:    30
+# ── Kamera notu ─────────────────────────────────────────────────────────────
+# Kamera çözünürlüğü ve FOV config.py içinde tanımlıdır:
+#   CAMERA_WIDTH_PX, CAMERA_HEIGHT_PX, CAMERA_HORIZONTAL_FOV_DEG, CAMERA_VERTICAL_FOV_DEG
+# Gerçek kamera kaynağı (USB index/device path) ve FPS de config.py'de:
+#   REAL_CAMERA_SOURCE, REAL_CAMERA_FPS
+# Bu değerleri burada tekrar tanımlamak gereksiz çoğalmaya yol açar.
 
 # ── Remote backend (HIL modu) ───────────────────────────────────────────────
 # backend: hil seçildiğinde bu blok okunur.
@@ -72,3 +69,8 @@ magnets:
 # "magnet_1_first": false → 1. bırakma = Magnet 2 OFF
 payload_sequence:
   magnet_1_first: true
+
+# ── GPIO chip (backend: real için) ──────────────────────────────────────────
+# Raspberry Pi 5'te /dev/gpiochip0 varsayılandır.
+gpio:
+  chip: 0

@@ -44,5 +44,6 @@ payload_sequence:
 
 # ── GPIO ─────────────────────────────────────────────────────────────────────
 gpio:
-  mode: BCM
-  cleanup_on_exit: true
+  chip: 0            # /dev/gpiochip0 (RPi 5 varsayılanı)
+  # NOT: lgpio BCM pin numaralarını doğrudan kullanır,
+  # RPi.GPIO gibi setmode(BCM) gerekmez.

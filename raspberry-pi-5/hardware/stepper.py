@@ -1,13 +1,17 @@
 """
-DRV8834 Stepper Motor Sürücüsü — Raspberry Pi 5 / BCM GPIO.
+DRV8834 Stepper Motor Sürücüsü — Raspberry Pi 5 / lgpio.
 
 Indexer modda Full-step kullanımı:
-  ENABLE LOW  → driver aktif
-  ENABLE HIGH → driver pasif
+  ENABLE LOW  (0) → driver aktif
+  ENABLE HIGH (1) → driver pasif
 
 Güvenlik kuralı:
   enable() → move_steps() → disable()
   Yük altında bekleme süresince ENABLE LOW kalmalı.
+
+lgpio kullanım notu:
+  RPi 5'te RPi.GPIO çalışmaz, lgpio gereklidir.
+  sudo apt install python3-lgpio  veya  pip install lgpio
 """
 from __future__ import annotations
 
@@ -15,7 +19,7 @@ import logging
 import time
 
 try:
-    import RPi.GPIO as GPIO
+    import lgpio
     _GPIO_AVAILABLE = True
 except ImportError:
     _GPIO_AVAILABLE = False
@@ -23,28 +27,30 @@ except ImportError:
 
 class DRV8834:
     """
-    DRV8834 stepper motor sürücüsü için düşük seviye sürücü sınıfı.
+    DRV8834 stepper motor sürücüsü — lgpio tabanlı.
 
     Kullanım:
         stepper = DRV8834(step_pin=13, enable_pin=19, dir_pin=26)
+        stepper.setup()          # gpiochip aç, pinleri tanımla
         stepper.enable()
-        stepper.move_steps(100, direction=True)   # True = ileri/aşağı
-        stepper.move_steps(100, direction=False)  # False = geri/yukarı
+        stepper.move_down(17143)
+        stepper.move_up(17143)
         stepper.disable()
+        stepper.close()          # gpiochip kapat
     """
 
-    # Yön sabitleri — donanım bağlantısına göre ayarla
-    DIR_DOWN = True    # payload aşağıya iner
-    DIR_UP   = False   # payload yukarı çıkar
+    DIR_DOWN = 1   # DIR HIGH → aşağı
+    DIR_UP   = 0   # DIR LOW  → yukarı
 
     def __init__(
         self,
-        step_pin:   int,
-        enable_pin: int,
-        dir_pin:    int,
+        step_pin:          int,
+        enable_pin:        int,
+        dir_pin:           int,
         step_delay_s:      float = 0.001,
         dir_setup_delay_s: float = 0.005,
-        enable_active_low: bool  = True,
+        enable_active_low: bool  = True,   # True: LOW=aktif (DRV8834 varsayılanı)
+        chip:              int   = 0,       # /dev/gpiochip0
         logger: logging.Logger | None = None,
     ) -> None:
         self._step_pin   = step_pin
@@ -53,108 +59,111 @@ class DRV8834:
         self._step_delay = step_delay_s
         self._dir_delay  = dir_setup_delay_s
         self._active_low = enable_active_low
+        self._chip       = chip
         self._log        = logger or logging.getLogger(__name__)
         self._enabled    = False
         self._emergency  = False
+        self._handle     = None   # lgpio chip handle
 
         if not _GPIO_AVAILABLE:
-            self._log.warning("RPi.GPIO bulunamadı — stepper stub modda çalışıyor.")
+            self._log.warning("lgpio bulunamadı — stepper stub modda çalışıyor.")
 
     # ── GPIO kurulum ─────────────────────────────────────────────────────── #
     def setup(self) -> None:
-        """GPIO pinlerini çıkış olarak yapılandır. Başlatmada bir kez çağrılır."""
+        """gpiochip aç, pinleri çıkış olarak yapılandır."""
         if not _GPIO_AVAILABLE:
             return
-        GPIO.setup(self._step_pin,   GPIO.OUT, initial=GPIO.LOW)
-        GPIO.setup(self._dir_pin,    GPIO.OUT, initial=GPIO.LOW)
-        # ENABLE başlangıçta pasif (yükü kaybetme)
-        initial_enable = GPIO.LOW if self._active_low else GPIO.HIGH
-        GPIO.setup(self._enable_pin, GPIO.OUT, initial=initial_enable)
-        self._log.debug("DRV8834 GPIO kurulumu tamamlandı.")
+
+        self._handle = lgpio.gpiochip_open(self._chip)
+
+        # STEP: LOW başlangıç
+        lgpio.gpio_claim_output(self._handle, self._step_pin,   0)
+        # DIR: LOW başlangıç
+        lgpio.gpio_claim_output(self._handle, self._dir_pin,    0)
+        # ENABLE: pasif başlangıç (yük kaybetme)
+        enable_initial = 1 if self._active_low else 0   # active_low → HIGH=pasif
+        lgpio.gpio_claim_output(self._handle, self._enable_pin, enable_initial)
+
+        self._log.debug("DRV8834 lgpio kurulumu tamamlandı.")
 
     # ── Driver aktif/pasif ────────────────────────────────────────────────── #
     def enable(self) -> None:
-        """Stepper sürücüyü aktif et (ENABLE LOW)."""
-        if not _GPIO_AVAILABLE:
+        """Stepper sürücüyü aktif et."""
+        level = 0 if self._active_low else 1   # active_low: LOW=aktif
+        if _GPIO_AVAILABLE and self._handle is not None:
+            lgpio.gpio_write(self._handle, self._enable_pin, level)
+        else:
             self._log.debug("[STUB] stepper enable")
-            self._enabled = True
-            return
-        level = GPIO.LOW if self._active_low else GPIO.HIGH
-        GPIO.output(self._enable_pin, level)
         self._enabled = True
-        self._log.debug("DRV8834 ENABLE → aktif")
+        self._log.debug("DRV8834 ENABLE → aktif (level=%d)", level)
 
     def disable(self) -> None:
-        """Stepper sürücüyü pasif et (ENABLE HIGH). Yüksüz konumda çağır."""
-        if not _GPIO_AVAILABLE:
+        """Stepper sürücüyü pasif et. Yüksüz konumda çağır."""
+        level = 1 if self._active_low else 0   # active_low: HIGH=pasif
+        if _GPIO_AVAILABLE and self._handle is not None:
+            lgpio.gpio_write(self._handle, self._enable_pin, level)
+        else:
             self._log.debug("[STUB] stepper disable")
-            self._enabled = False
-            return
-        level = GPIO.HIGH if self._active_low else GPIO.LOW
-        GPIO.output(self._enable_pin, level)
         self._enabled = False
-        self._log.debug("DRV8834 ENABLE → pasif")
+        self._log.debug("DRV8834 ENABLE → pasif (level=%d)", level)
 
     # ── Hareket ──────────────────────────────────────────────────────────── #
-    def move_steps(self, steps: int, direction: bool) -> None:
+    def move_steps(self, steps: int, direction: int) -> None:
         """
         Belirtilen adım sayısı kadar hareket et.
 
         Args:
             steps:     Adım sayısı (pozitif tam sayı).
-            direction: True = DIR_DOWN (aşağı), False = DIR_UP (yukarı).
-
-        Dikkat: Bu metod blocking'dir. State machine PAYLOAD_SERVO_WAIT_S
-                ile beklemeyi yönetir; bu fonksiyon stepper hareketi için
-                ayrı bir thread'de çalıştırılır (LocalRPiBackend yönetir).
+            direction: DIR_DOWN (1) veya DIR_UP (0).
         """
         if self._emergency:
-            self._log.error("move_steps: emergency stop aktif, hareket engellendi.")
+            self._log.error("move_steps: emergency stop aktif.")
             return
         if steps <= 0:
             return
 
-        dir_level = GPIO.HIGH if direction else GPIO.LOW
-
-        if _GPIO_AVAILABLE:
-            GPIO.output(self._dir_pin, dir_level)
+        if _GPIO_AVAILABLE and self._handle is not None:
+            lgpio.gpio_write(self._handle, self._dir_pin, direction)
             time.sleep(self._dir_delay)
 
             for _ in range(steps):
                 if self._emergency:
                     break
-                GPIO.output(self._step_pin, GPIO.HIGH)
+                lgpio.gpio_write(self._handle, self._step_pin, 1)
                 time.sleep(self._step_delay)
-                GPIO.output(self._step_pin, GPIO.LOW)
+                lgpio.gpio_write(self._handle, self._step_pin, 0)
                 time.sleep(self._step_delay)
         else:
-            dir_name = "DOWN" if direction else "UP"
-            self._log.debug("[STUB] move_steps: %d adım, yön=%s", steps, dir_name)
-            # Simüle gecikme
+            name = "DOWN" if direction == self.DIR_DOWN else "UP"
+            self._log.debug("[STUB] move_steps: %d adım %s", steps, name)
             time.sleep(steps * self._step_delay * 2)
 
         self._log.info("move_steps tamamlandı: %d adım, yön=%s",
-                       steps, "DOWN" if direction else "UP")
+                       steps, "DOWN" if direction == self.DIR_DOWN else "UP")
 
     def move_down(self, steps: int) -> None:
-        """Payload aşağıya indir (release/pickup konumuna)."""
+        """Payload aşağıya indir."""
         self._log.info("Stepper ↓ aşağı: %d adım", steps)
-        self.move_steps(steps, direction=self.DIR_DOWN)
+        self.move_steps(steps, self.DIR_DOWN)
 
     def move_up(self, steps: int) -> None:
-        """Payload yukarı çıkar (transport konumuna)."""
+        """Payload yukarı çıkar."""
         self._log.info("Stepper ↑ yukarı: %d adım", steps)
-        self.move_steps(steps, direction=self.DIR_UP)
+        self.move_steps(steps, self.DIR_UP)
 
     # ── Acil durdurma ─────────────────────────────────────────────────────── #
     def emergency_stop(self) -> None:
-        """Tüm hareketleri acilen durdur."""
+        """Tüm hareketleri durdur. ENABLE kapatılmaz — pozisyonu koru."""
         self._emergency = True
         self._log.warning("DRV8834 EMERGENCY STOP!")
-        # Sürücüyü pasife alma: yük altında mı olduğunu bilmiyoruz,
-        # bu nedenle ENABLE'ı KAPATMIYORUZ — pozisyonu koru.
-        # Üst katman (LocalRPiBackend) güvenli kapanışı yönetir.
 
     def reset_emergency(self) -> None:
-        """Acil durdurma bayrağını temizle (initialize sonrası)."""
         self._emergency = False
+
+    # ── Kapatma ───────────────────────────────────────────────────────────── #
+    def close(self) -> None:
+        """lgpio chip handle'ı kapat."""
+        if _GPIO_AVAILABLE and self._handle is not None:
+            lgpio.gpiochip_close(self._handle)
+            self._handle = None
+            self._log.debug("lgpio gpiochip kapatıldı.")

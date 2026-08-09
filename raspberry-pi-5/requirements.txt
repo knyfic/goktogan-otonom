@@ -1,2 +1,2 @@
-RPi.GPIO>=0.7.1
+lgpio>=0.2.2
 PyYAML>=6.0

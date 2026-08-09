@@ -19,7 +19,7 @@ from pathlib import Path
 import yaml
 
 try:
-    import RPi.GPIO as GPIO
+    import lgpio as _lgpio_check
     _GPIO_AVAILABLE = True
 except ImportError:
     _GPIO_AVAILABLE = False
@@ -83,11 +83,7 @@ class LocalRPiBackend:
 
         sc = cfg["stepper"]
         mc = cfg["magnets"]
-
-        if _GPIO_AVAILABLE:
-            mode = GPIO.BCM if cfg.get("gpio", {}).get("mode", "BCM") == "BCM" else GPIO.BOARD
-            GPIO.setmode(mode)
-            GPIO.setwarnings(False)
+        chip = cfg.get("gpio", {}).get("chip", 0)   # /dev/gpiochip0
 
         stepper = DRV8834(
             step_pin=sc["step_pin"],
@@ -96,6 +92,7 @@ class LocalRPiBackend:
             step_delay_s=sc.get("step_delay_s", 0.001),
             dir_setup_delay_s=sc.get("dir_setup_delay_s", 0.005),
             enable_active_low=sc.get("enable_active_low", True),
+            chip=chip,
             logger=log,
         )
 
@@ -104,6 +101,7 @@ class LocalRPiBackend:
             pin_1=mc["magnet_1_pin"],
             pin_2=mc["magnet_2_pin"],
             hold_high=hold_high,
+            chip=chip,
             logger=log,
         )
 
@@ -247,11 +245,11 @@ class LocalRPiBackend:
         }
 
     def cleanup(self) -> None:
-        """Güvenli kapanış: mıknatıslar HOLD, GPIO temizle."""
-        self._log.info("LocalRPiBackend cleanup: Mıknatıslar HOLD, stepper DISABLE.")
+        """Güvenli kapanış: mıknatıslar HOLD, handle'ları kapat."""
+        self._log.info("LocalRPiBackend cleanup başlıyor.")
         try:
             self._magnets.safe_hold()
             self._stepper.disable()
         finally:
-            if _GPIO_AVAILABLE:
-                GPIO.cleanup()
+            self._stepper.close()
+            self._magnets.close()

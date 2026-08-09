@@ -94,6 +94,8 @@ class LocalRPiBackend(PayloadBackend):
             start_delay_us=sc.get("start_delay_us",  1500),
             target_delay_us=sc.get("target_delay_us", 1200),
             ramp_steps=sc.get("ramp_steps", 250),
+            mm_per_revolution=sc.get("mm_per_revolution", 0.7),
+            steps_per_revolution=sc.get("steps_per_revolution", 200),
             logger=log,
         )
 

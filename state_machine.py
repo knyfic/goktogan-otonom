@@ -595,7 +595,7 @@ class MissionStateMachine:
             known = self.data.first_target
             detections = [
                 d for d in detections
-                if not (d.color.value == known.color.value
+                if not (d.color == known.color
                         and d.shape == known.shape.value)
             ]
             # İkinci hedef için kilidi sıfırla (birinciye ait kilit kalmış olabilir)
@@ -1790,11 +1790,11 @@ class MissionStateMachine:
         if self._align_phase == "RELEASING":
             target = self.data.second_target
             if target is not None:
-                # Görev 2: Yerden 2 mıknatıs ile alınan payload, 2. hedefe bırakılır.
-                # Bu yüzden İKİ MIKNATIS AYNI ANDA OFF olmalı (release_returned_payload).
-                payload_type = self.payload_for_target(self.data.first_target) \
-                    if self.data.first_target is not None \
-                    else self.payload_for_target(target)
+                if self.data.first_target is not None:
+                    picked_up_from = self.data.first_target
+                    payload_type = MissionStateMachine.payload_for_target(picked_up_from)
+                else:
+                    payload_type = MissionStateMachine.payload_for_target(target)
                 result = self.payload.release_returned_payload(payload_type)
                 self.log.info(
                     "Geri getirilen yük 2. hedefte bırakıldı: %s (hedef=%s %s) — başarı=%s (2 MAGNET OFF)",
@@ -1938,6 +1938,10 @@ class MissionStateMachine:
 
     @staticmethod
     def payload_for_target(target) -> TargetColor:
+        if target.color == TargetColor.BLUE and target.shape == TargetType.HEXAGON:
+            return TargetColor.RED
+        elif target.color == TargetColor.RED and target.shape == TargetType.TRIANGLE:
+            return TargetColor.BLUE
         return TargetColor.RED if target.color == TargetColor.BLUE else TargetColor.BLUE
 
     def _retry_or_fail(self) -> None:

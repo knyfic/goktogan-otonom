@@ -1913,8 +1913,10 @@ class MissionStateMachine:
         self._goto(MissionState.RTL)
 
     def _do_wait_rtl(self) -> None:
-        deadline = time.monotonic() + 120.0
-        while time.monotonic() < deadline:
+        # 1) Önce aracı home'a getirmek için makul bir süre bekle
+        arrival_deadline = time.monotonic() + 300.0  # 5 dakika
+        arrived = False
+        while time.monotonic() < arrival_deadline:
             self._pending_display = None
             frame = self.camera.latest()
             if frame is not None:
@@ -1926,12 +1928,54 @@ class MissionStateMachine:
                     and haversine_m(pos.latitude, pos.longitude,
                                     self.nav.home_lat, self.nav.home_lon) < 2.0
                     and pos.relative_altitude < 1.5):
-                self.log.info("RTL tamamlandı.")
+                arrived = True
+                self.log.info("RTL: home'a ulaşıldı (%.2fm). Disarm bekleniyor.", pos.relative_altitude)
+                break
+            time.sleep(0.1)
+
+        if not arrived:
+            self.log.error("RTL arrival timeout (home'a ulaşılmadı). Görev COMPLETE'a geçiliyor.")
+            self._goto(MissionState.COMPLETE)
+            return
+
+        # 2) Home'a ulaşıldı — şimdi motorların disarm olmasını bekle
+        disarm_deadline = time.monotonic() + 300.0  # ek 5 dakika
+        try:
+            master = getattr(self.nav, 'master', None)
+            if master is None:
+                self.log.warning("Navigation master erişilemedi; doğrudan COMPLETE'a geçiliyor.")
                 self._goto(MissionState.COMPLETE)
                 return
-            time.sleep(0.1)
-        self.log.error("RTL timeout.")
-        self._goto(MissionState.COMPLETE)
+
+            while time.monotonic() < disarm_deadline:
+                # preview güncelle
+                self._pending_display = None
+                frame = self.camera.latest()
+                if frame is not None:
+                    self._pending_display = self._base_overlay(frame)
+                self._pump_preview()
+
+                try:
+                    armed = master.motors_armed()
+                except Exception:
+                    # Eğer master ile iletişimde anlık hata olursa tekrar dene
+                    armed = True
+
+                if not armed:
+                    self.log.info("Araç disarm oldu. RTL tamamlandı.")
+                    self._goto(MissionState.COMPLETE)
+                    return
+
+                time.sleep(0.5)
+
+            # Timeout — disarm gerçekleşmedi
+            self.log.error("RTL disarm bekleme timeout. COMPLETE'a geçiliyor.")
+            self._goto(MissionState.COMPLETE)
+            return
+        except Exception:
+            self.log.exception("RTL disarm beklenirken beklenmeyen hata.")
+            self._goto(MissionState.COMPLETE)
+            return
 
     # ==================================================================== #
     #  Yardımcı metodlar

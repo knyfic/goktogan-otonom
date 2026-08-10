@@ -3,6 +3,13 @@ Raspberry Pi Camera Module 3 (CSI / CAM0) sarıcı.
 
 Picamera2 (libcamera tabanlı) ile 1920x1080 BGR frame üretir.
 Ubuntu üzerinde test ederken Picamera2 yoksa uyarı verip stub çalışır.
+
+ÖNEMLİ (RENK SIRASI DÜZELTME):
+  Picamera2 + IMX708 (Cam Module 3) + libcamera kombinasyonunda "RGB888"
+  format adı altında DONANIM ASLINDA BGR888 çıktısı verir. Bu yüzden
+  önce BGR888 formatını doğrudan istemeye çalışırız (en hızlı: dönüşüm yok).
+  Desteklenmezse RGB888 kullanırız ama DONÜŞÜM YAPMAYIZ — çünkü veri zaten BGR.
+  Eski kod COLOR_RGB2BGR uyguluyordu ve tam tersi renkler çıkıyordu (mavi=kırmızı).
 """
 from __future__ import annotations
 
@@ -47,6 +54,13 @@ class RPiCam3:
         self._running    = False
         self._picam: Optional[Picamera2] = None
 
+        # Format stratejisi: hangi Picamera2 formatı seçildi ve cvtColor uygulanacak mı?
+        #   ("BGR888", None)          en iyi — doğrudan BGR, CPU maliyeti sıfır
+        #   ("RGB888", None)          fallback — donanım RGB888 izin veriyor ama BGR veriyor
+        #   ("RGB888", COLOR_BGR2RGB) son fallback — gerçekten RGB gelirse kanal takası
+        self._fmt_name:   str                        = "STUB"
+        self._cvt_code:   Optional[int]              = None
+
         if not _PICAMERA2_AVAILABLE:
             self._log.warning(
                 "picamera2 bulunamadı — RPiCam3 STUB modda. "
@@ -54,14 +68,32 @@ class RPiCam3:
             )
             return
 
-        # Gerçek donanım: Picamera2 kur
+        # ── Strateji 1: DOĞRUDAN BGR888 (en iyisi — dönüşüm yok) ────────────
         picam = Picamera2(camera_num=camera_num)
-        config = picam.create_video_configuration(
-            main={
-                "size":   (width, height),
-                "format": "RGB888",
-            },
-        )
+        try:
+            config = picam.create_video_configuration(
+                main={"size": (width, height), "format": "BGR888"},
+            )
+            picam.configure(config)      # BGR888 desteklenmezse burada RuntimeError verir
+            self._fmt_name = "BGR888"
+            self._cvt_code = None        # doğrudan BGR — dokunma
+            self._log.info(
+                "Picamera2 format: BGR888 (doğrudan OpenCV uyumlu — CPU kazanımı)"
+            )
+        except Exception as exc1:
+            # ── Strateji 2: RGB888 ama DONÜŞÜMSÜZ (IMX708 aslında BGR verir) ─
+            self._log.info(
+                "BGR888 desteklenmiyor (%s) — RGB888 fallback, cvtColor YOK "
+                "(IMX708 RGB888 format adı altında BGR üretiyor).", exc1,
+            )
+            picam = Picamera2(camera_num=camera_num)
+            config = picam.create_video_configuration(
+                main={"size": (width, height), "format": "RGB888"},
+            )
+            picam.configure(config)
+            self._fmt_name = "RGB888"
+            self._cvt_code = None  # ⚠ ESKİ KOD BURAYA COLOR_RGB2BGR KOYDUĞU İÇİN RENKLER TERSİYDİ
+
         # FPS kontrolü — RPi Cam 3 30 FPS 1080p rahat yapar
         try:
             config["controls"]["FrameDurationLimits"] = (
@@ -69,12 +101,16 @@ class RPiCam3:
             )
         except Exception:
             self._log.debug("FrameDurationLimits kontrolleri yok — varsayılan FPS kullanılıyor.")
-        picam.configure(config)
+
         picam.start()
         self._picam = picam
         self._log.info(
-            "RPi Camera Module 3 açıldı (CAM%d) %dx%d@%d — Picamera2, libcamera",
+            "RPi Camera Module 3 açıldı (CAM%d) %dx%d@%d — Picamera2/libcamera "
+            "format=%s  cvt=%s",
             camera_num, width, height, fps,
+            self._fmt_name,
+            "yok (CPU kazanımı)" if self._cvt_code is None
+                else f"cv2.{['BGR2RGB','RGB2BGR'][self._cvt_code//2]}",
         )
 
         # Capture thread başlat
@@ -88,15 +124,20 @@ class RPiCam3:
         assert self._picam is not None
         while self._running:
             try:
-                # Picamera2 capture_array → HWC RGB (uint8)
-                rgb = self._picam.capture_array()
-                if rgb is None or rgb.size == 0:
+                raw = self._picam.capture_array()
+                if raw is None or raw.size == 0 or raw.ndim < 3:
                     continue
-                # RGB → BGR (OpenCV / state machine uyumlu)
-                # capture_array memory bazen şekli (H,W,3) değil (H,W,4) verir; düzelt
-                if rgb.ndim == 3 and rgb.shape[2] == 4:
-                    rgb = rgb[:, :, :3]
-                bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+                # (H,W,4) RGBA/BGRA şeklinde gelebilir → ilk 3 kanalı al
+                if raw.shape[2] == 4:
+                    raw = raw[:, :, :3]
+
+                # Renk dönüşümü (varsa)
+                if self._cvt_code is None:
+                    bgr = raw
+                else:
+                    bgr = cv2.cvtColor(raw, self._cvt_code)
+
                 with self._lock:
                     self._frame = bgr
             except Exception as exc:

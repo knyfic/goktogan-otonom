@@ -59,8 +59,9 @@ class RemoteRPiCamera:
         reconnect_wait_s:  float = 1.0,
         preview:           bool  = False,
         swap_rb_channels:  bool  = False,
-        window_name:       str   = "İHA Kamera",
+        window_name: str   = "İHA Kamera",
         logger:            logging.Logger | None = None,
+        orientation:       str   = "NORMAL",
     ) -> None:
         self._host       = host
         self._port       = int(port)
@@ -72,7 +73,7 @@ class RemoteRPiCamera:
         self._win        = window_name
         self._log        = logger or logging.getLogger(__name__)
         # orientation: apply a spatial normalization before any detector sees frames
-        self._orientation = 'NORMAL'
+        self._orientation = str(orientation).upper() if orientation is not None else 'NORMAL'
 
         self._lock       = threading.Lock()
         self._frame: Optional[np.ndarray] = None

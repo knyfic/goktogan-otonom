@@ -100,6 +100,7 @@ def _build_camera(mode: str, cfg: dict, logger):
                 swap_rb_channels=swap,
                 window_name=PREVIEW_WINDOW_NAME,
                 logger=logger,
+                orientation=CAMERA_ORIENTATION,
             )
 
         raise ValueError(

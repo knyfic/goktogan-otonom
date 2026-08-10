@@ -40,13 +40,21 @@ def _load_payload_config() -> dict:
 
 def _build_camera(mode: str, cfg: dict, logger):
     """
-    simulation / hil → GazeboCamera  (Gazebo topic'ten frame alır)
-    real             → RealCamera    (USB/CSI kamera, OpenCV ile)
+    Kamera nesnesini konfigürasyona göre oluştur.
 
-    Her iki sınıf da aynı arayüzü sunar: latest(), show(), pump(), close_preview()
-    State machine kamera türünü bilmez.
+    Kamera arayüzü (latest() / show() / pump() / close_preview()) HER
+    senaryoda aynıdır — state machine / görüntü işleme kodu HİÇBİR
+    DEĞİŞİKLİK GÖRMEZ.
+
+    Senaryo seçimi:
+      simulation             → GazeboCamera  (simülasyon topic'ten)
+      hil + hil_camera=gazebo     → GazeboCamera (geleneksel HIL)
+      hil + hil_camera=remote_rpi → RemoteRPiCamera (GERÇEK RPi Camera Module 3,
+                                   Wi-Fi/TCP üzerinden — mekanik hala Gazebo)
+      real                   → RealCamera    (yerel USB/CSI kamera)
     """
-    if mode in ("simulation", "hil"):
+    # ── Simulation — her zaman Gazebo ──────────────────────────────────────
+    if mode == "simulation":
         from vision.camera import GazeboCamera
         return GazeboCamera(
             topic=CAMERA_TOPIC,
@@ -56,6 +64,45 @@ def _build_camera(mode: str, cfg: dict, logger):
             window_name=PREVIEW_WINDOW_NAME,
         )
 
+    # ── HIL — konfigürasyona göre Gazebo ya da GERÇEK RPi Kamera ───────────
+    if mode == "hil":
+        hil_cam = str(cfg.get("hil_camera", "gazebo")).lower()
+        logger.info("HIL kamera kaynağı seçimi: hil_camera=%s", hil_cam)
+
+        if hil_cam == "gazebo":
+            from vision.camera import GazeboCamera
+            return GazeboCamera(
+                topic=CAMERA_TOPIC,
+                msgs_module=GAZEBO_MSGS_MODULE,
+                transport_module=GAZEBO_TRANSPORT_MODULE,
+                preview=ENABLE_LIVE_PREVIEW,
+                window_name=PREVIEW_WINDOW_NAME,
+            )
+
+        if hil_cam == "remote_rpi":
+            from vision.remote_rpi_camera import RemoteRPiCamera
+            rc = cfg.get("remote_camera", {})
+            host = rc.get("host", cfg.get("remote", {}).get("host", "192.168.1.21"))
+            port = int(rc.get("port", 5701))
+            logger.info(
+                "HIL → GERÇEK Raspberry Pi Camera Module 3 akışı: "
+                "TCP üzerinden %s:%d bekleniyor...",
+                host, port,
+            )
+            return RemoteRPiCamera(
+                host=host,
+                port=port,
+                preview=ENABLE_LIVE_PREVIEW,
+                window_name=PREVIEW_WINDOW_NAME,
+                logger=logger,
+            )
+
+        raise ValueError(
+            f"Bilinmeyen HIL kamera türü hil_camera={hil_cam!r}. "
+            f"Kabul edilen: 'gazebo', 'remote_rpi'."
+        )
+
+    # ── Real — Raspberry Pi üzerinde doğrudan donanım ──────────────────────
     if mode == "real":
         from vision.real_camera import RealCamera
         return RealCamera(

@@ -26,6 +26,18 @@ remote:
   port: 5700
   timeout_s: 180.0     # NOT: pickup (stepper ↓+↑) ~28sn sürer (11429 adım × 2 yön). Büyük tutun.
 
+# ── HIL modu kamera kaynağı seçimi ──────────────────────────────────────────
+# hil_camera:
+#   gazebo     → Geleneksel HIL: kamera Gazebo topic'ten gelir (CAMERA_TOPIC)
+#   remote_rpi → GERÇEK HIL: Raspberry Pi üzerindeki Camera Module 3'ten
+#                TCP/Wi-Fi üzerinden gerçek frame alınır.
+#                Mekanik (İHA + GPS) hala Gazebo.
+# remote_camera:  hil_camera: remote_rpi iken Ubuntu'nun bağlanacağı RPi adresi
+hil_camera: remote_rpi
+remote_camera:
+  host: 192.168.1.21   # Raspberry Pi (payload.remote.host ile AYNI olmalı)
+  port: 5701           # RPi camera_server portu (payload 5700 yanında)
+
 # ── Stepper motor ───────────────────────────────────────────────────────────
 stepper:
   # GPIO pinleri (BCM mode)

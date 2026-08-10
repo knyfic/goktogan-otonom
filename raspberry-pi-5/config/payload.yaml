@@ -8,6 +8,19 @@ server:
   port: 5700
   max_connections: 1   # Aynı anda yalnızca bir kontrol kaynağı
 
+# ── Kamera Akış Servisi (HIL testi için GERÇEK Raspberry Pi Camera Module 3) ─
+# HIL modunda Ubuntu mission kodu buraya bağlanır ve gerçek kameradan frame alır.
+# Mekanik (İHA + GPS) hala Gazebo'da, kamera ise RPi Cam 3 (CSI port 0 / CAM0).
+camera_server:
+  enable: true            # false → kamera servisini başlatma (eski HIL için uyumluluk)
+  host: 0.0.0.0           # Tüm arayüzlerden bağlantı kabul et
+  port: 5701              # Payload TCP (5700) yanında ikinci port
+  camera_num: 0           # 0 = CAM0 (CSI port 0), kullanıcının belirttiği fiziksel port
+  width: 1920             # CAMERA_WIDTH_PX ile tutarlı
+  height: 1080            # CAMERA_HEIGHT_PX ile tutarlı
+  fps: 30                 # Hedef FPS (RPi Cam 3 1080p30 rahat destekler)
+  jpeg_quality: 80        # 1-100 — daha yüksek: daha net, daha fazla bant genişliği
+
 # ── Stepper motor (DRV8834 — Indexer / Full-step mode) ──────────────────────
 stepper:
   step_pin:   13   # BCM

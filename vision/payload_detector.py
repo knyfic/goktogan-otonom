@@ -27,10 +27,116 @@ class PayloadDetector:
       - Elips kernel + çoklu iterasyon morfoloji
       - Solidity (doluluk) + rectangularity (dikdörtgensellik) doğrulaması
       - Beklenen 2:1 aspect ratio'ya yakınlık zorunlu (PAYLOAD_WIDTH / PAYLOAD_HEIGHT = 2)
+      - 3. emniyet katmanı: İlk 12 frame'de otomatik B↔R kanal takası kalibrasyonu
     """
+
+    CALIBRATION_FRAMES = 12
 
     def __init__(self, camera: CameraModel):
         self.camera = camera
+
+        # ⚠ Defansif otomatik B↔R takası (3. emniyet katmanı, AutoSwap V3)
+        self._auto_swap: Optional[bool] = None
+        self._calib_count: int = 0
+        self._calib_sum_noswap: int = 0
+        self._calib_sum_swap:   int = 0
+        self._calib_homo_noswap: float = 0.0
+        self._calib_homo_swap:   float = 0.0
+        self._calib_max_noswap:  int = 0
+        self._calib_max_swap:    int = 0
+
+    # ──────────────────────────────────────────────────────────────
+    # Defansif B↔R otomatik kalibrasyon
+    # ──────────────────────────────────────────────────────────────
+
+    def _maybe_auto_swap(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """AutoSwap V3 — TargetDetector ile aynı ÜÇ METRİK (SUM/HOMO/MAXBANT)
+        algoritması; tek renkli ve karışık sahnelerde doğru karar verir.
+        """
+        if self._auto_swap is True:
+            return frame_bgr[:, :, ::-1].copy()
+        if self._auto_swap is False:
+            return frame_bgr
+
+        h, w = frame_bgr.shape[:2]
+        scale = max(1, min(w, h) // 480)
+        small = frame_bgr[::scale, ::scale]
+        small_swap = small[:, :, ::-1].copy()
+
+        def _split(bgr) -> tuple[int, int]:
+            hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+            mb = cv2.inRange(
+                hsv,
+                np.array([95, 70, 55], dtype=np.uint8),
+                np.array([130, 255, 255], dtype=np.uint8),
+            )
+            mrl = cv2.inRange(
+                hsv,
+                np.array([0, 70, 55], dtype=np.uint8),
+                np.array([10, 255, 255], dtype=np.uint8),
+            )
+            mrh = cv2.inRange(
+                hsv,
+                np.array([170, 70, 55], dtype=np.uint8),
+                np.array([179, 255, 255], dtype=np.uint8),
+            )
+            return (
+                int(cv2.countNonZero(mb)),
+                int(cv2.countNonZero(mrl) + cv2.countNonZero(mrh)),
+            )
+
+        b_blue, b_red = _split(small)
+        s_blue, s_red = _split(small_swap)
+        eps = 20
+
+        self._calib_sum_noswap  += (b_blue + b_red)
+        self._calib_sum_swap    += (s_blue + s_red)
+        self._calib_max_noswap  += max(b_blue, b_red)
+        self._calib_max_swap    += max(s_blue, s_red)
+        self._calib_homo_noswap += (max(b_blue, b_red) + eps) / (min(b_blue, b_red) + eps)
+        self._calib_homo_swap   += (max(s_blue, s_red) + eps) / (min(s_blue, s_red) + eps)
+        self._calib_count += 1
+
+        if self._calib_count < self.CALIBRATION_FRAMES:
+            return frame_bgr
+
+        eps_m = 50
+        r_sum  = (self._calib_sum_swap  + eps_m) / (self._calib_sum_noswap  + eps_m)
+        r_homo = (self._calib_homo_swap + eps_m) / (self._calib_homo_noswap + eps_m)
+        r_max  = (self._calib_max_swap  + eps_m) / (self._calib_max_noswap  + eps_m)
+
+        swap_wins = (
+            (1 if r_sum  >= 1.35 else 0)
+            + (1 if r_homo >= 1.35 else 0)
+            + (1 if r_max  >= 1.35 else 0)
+        )
+        any_clear = max(r_sum, r_homo, r_max) >= 2.5
+        self._auto_swap = bool(swap_wins >= 2 or any_clear)
+
+        import logging
+        log = logging.getLogger("PayloadDetector")
+        if self._auto_swap:
+            log.warning(
+                "[AutoSwap-V3][Payload] ⚠ BAYT SIRASI TERS — KALICI B↔R takası AÇILDI. "
+                "SUM=%.1fx HOMO=%.1fx MAXBANT=%.1fx swap_wins=%d/3 clear_win=%s",
+                r_sum, r_homo, r_max, swap_wins, any_clear,
+            )
+        else:
+            log.info(
+                "[AutoSwap-V3][Payload] ✓ Renk kanalları DÜZGÜN — takas YOK. "
+                "SUM=%.1fx HOMO=%.1fx MAXBANT=%.1fx swap_wins=%d/3",
+                r_sum, r_homo, r_max, swap_wins,
+            )
+
+        self._calib_sum_noswap = 0
+        self._calib_sum_swap = 0
+        self._calib_homo_noswap = 0.0
+        self._calib_homo_swap = 0.0
+        self._calib_max_noswap = 0
+        self._calib_max_swap = 0
+        self._calib_count = 0
+
+        return frame_bgr
 
     # ──────────────────────────────────────────────────────────────
     # Ön işleme & renk maskesi
@@ -156,6 +262,9 @@ class PayloadDetector:
     # ──────────────────────────────────────────────────────────────
 
     def detect(self, frame_bgr, altitude_m, color):
+        # 3. emniyet katmanı — Defansif B↔R otomatik kalibrasyon
+        frame_bgr = self._maybe_auto_swap(frame_bgr)
+
         hsv = self._preprocess_for_hsv(frame_bgr)
         mask = self._mask(hsv, color)
         mask = self._clean_mask(mask)

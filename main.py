@@ -84,15 +84,17 @@ def _build_camera(mode: str, cfg: dict, logger):
             rc = cfg.get("remote_camera", {})
             host = rc.get("host", cfg.get("remote", {}).get("host", "192.168.1.21"))
             port = int(rc.get("port", 5701))
+            swap = bool(rc.get("swap_rb_channels", False))
             logger.info(
                 "HIL → GERÇEK Raspberry Pi Camera Module 3 akışı: "
-                "TCP üzerinden %s:%d bekleniyor...",
-                host, port,
+                "TCP üzerinden %s:%d bekleniyor... swap_rb=%s",
+                host, port, swap,
             )
             return RemoteRPiCamera(
                 host=host,
                 port=port,
                 preview=ENABLE_LIVE_PREVIEW,
+                swap_rb_channels=swap,
                 window_name=PREVIEW_WINDOW_NAME,
                 logger=logger,
             )

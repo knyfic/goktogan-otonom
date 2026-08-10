@@ -4,12 +4,17 @@ Raspberry Pi Camera Module 3 (CSI / CAM0) sarıcı.
 Picamera2 (libcamera tabanlı) ile 1920x1080 BGR frame üretir.
 Ubuntu üzerinde test ederken Picamera2 yoksa uyarı verip stub çalışır.
 
-ÖNEMLİ (RENK SIRASI DÜZELTME):
-  Picamera2 + IMX708 (Cam Module 3) + libcamera kombinasyonunda "RGB888"
-  format adı altında DONANIM ASLINDA BGR888 çıktısı verir. Bu yüzden
-  önce BGR888 formatını doğrudan istemeye çalışırız (en hızlı: dönüşüm yok).
-  Desteklenmezse RGB888 kullanırız ama DONÜŞÜM YAPMAYIZ — çünkü veri zaten BGR.
-  Eski kod COLOR_RGB2BGR uyguluyordu ve tam tersi renkler çıkıyordu (mavi=kırmızı).
+ÖNEMLİ (RENK SIRASI DÜZELTME — IMX708 BİLİNEN SORUNU):
+  Picamera2 + IMX708 (Cam Module 3) + libcamera kombinasyonu
+  FORMAT ADI İLE GERÇEK BYTE SIRASINI UYUŞTURMAYABİLİR.
+  Bazı firmware/sürümlerinde:
+    • format="BGR888" istendiği halde ham veri RGB888 gelir
+    • format="RGB888" istendiği halde ham veri BGR888 gelir
+    • İkisi de tamamen karışık gelir
+
+  Bu yüzden 4 AŞAMALI bir strateji uygularız; hiçbiri çalışmazsa
+  constructor parametresinden verilen `swap_rb_channels` ile
+  ZORLAMALI kanal takası yapılır (IMX708 için default=True).
 """
 from __future__ import annotations
 
@@ -34,6 +39,11 @@ class RPiCam3:
     Varsayılan: CAM0 (CSI port 0) — camera_num=0.
     Frame formatı: BGR (OpenCV / state machine ile uyumlu).
     Arka thread'de sürekli capture eder, latest() en son frame'i döndürür.
+
+    Parametreler:
+      swap_rb_channels — None = otomatik strateji sonucu neyse onu kullan
+                         True = her halükarda R ↔ B kanallarını takas et (IMX708 default)
+                         False = kesinlikle takas yapma (dönüşüm doğru çalışıyorsa)
     """
 
     def __init__(
@@ -42,22 +52,25 @@ class RPiCam3:
         width:  int = 1920,
         height: int = 1080,
         fps:    int = 30,
+        swap_rb_channels: Optional[bool] = True,
         logger: logging.Logger | None = None,
     ) -> None:
         self._camera_num = camera_num
         self._width      = width
         self._height     = height
         self._fps        = fps
+        self._forced_swap = swap_rb_channels   # None / True / False
         self._log        = logger or logging.getLogger(__name__)
         self._lock       = threading.Lock()
         self._frame: Optional[np.ndarray] = None
         self._running    = False
         self._picam: Optional[Picamera2] = None
 
-        # Format stratejisi: hangi Picamera2 formatı seçildi ve cvtColor uygulanacak mı?
-        #   ("BGR888", None)          en iyi — doğrudan BGR, CPU maliyeti sıfır
-        #   ("RGB888", None)          fallback — donanım RGB888 izin veriyor ama BGR veriyor
-        #   ("RGB888", COLOR_BGR2RGB) son fallback — gerçekten RGB gelirse kanal takası
+        # Stratejinin sonucu: capture_array() sonrası uygulanan cvtCode
+        #   None              → raw == BGR (dokunma)
+        #   cv2.COLOR_RGB2BGR → raw == RGB → BGR takası
+        #   cv2.COLOR_BGR2RGB → raw zaten BGR idi ama tekrar takas edildi (ters döndü)
+        # En sonda _force_swap (True ise) ekstra `[:, :, ::-1]` uygular
         self._fmt_name:   str                        = "STUB"
         self._cvt_code:   Optional[int]              = None
 
@@ -68,49 +81,105 @@ class RPiCam3:
             )
             return
 
-        # ── Strateji 1: DOĞRUDAN BGR888 (en iyisi — dönüşüm yok) ────────────
+        # ══════════════════════════════════════════════════════════════
+        # AŞAMALI FORMAT SEÇİM STRATEJİSİ
+        # ══════════════════════════════════════════════════════════════
+
+        # AŞAMA 1 — Doğrudan BGR888 (ideal, dönüşüm maliyeti sıfır)
         picam = Picamera2(camera_num=camera_num)
         try:
             config = picam.create_video_configuration(
                 main={"size": (width, height), "format": "BGR888"},
             )
-            picam.configure(config)      # BGR888 desteklenmezse burada RuntimeError verir
-            self._fmt_name = "BGR888"
-            self._cvt_code = None        # doğrudan BGR — dokunma
-            self._log.info(
-                "Picamera2 format: BGR888 (doğrudan OpenCV uyumlu — CPU kazanımı)"
-            )
-        except Exception as exc1:
-            # ── Strateji 2: RGB888 ama DONÜŞÜMSÜZ (IMX708 aslında BGR verir) ─
-            self._log.info(
-                "BGR888 desteklenmiyor (%s) — RGB888 fallback, cvtColor YOK "
-                "(IMX708 RGB888 format adı altında BGR üretiyor).", exc1,
-            )
-            picam = Picamera2(camera_num=camera_num)
-            config = picam.create_video_configuration(
-                main={"size": (width, height), "format": "RGB888"},
-            )
             picam.configure(config)
-            self._fmt_name = "RGB888"
-            self._cvt_code = None  # ⚠ ESKİ KOD BURAYA COLOR_RGB2BGR KOYDUĞU İÇİN RENKLER TERSİYDİ
+            self._fmt_name = "BGR888"
+            self._cvt_code = None
+            self._log.info(
+                "[Aşama 1 OK] Picamera2 format: BGR888 (doğrudan OpenCV uyumlu)."
+            )
+            self._picam = picam
+        except Exception as exc1:
+            self._log.info("[Aşama 1 FAIL] BGR888 desteklenmiyor: %s", exc1)
+            self._picam = None
+
+        # AŞAMA 2 — RGB888 + DONANIM GERÇEKTEN BGR VERİYORSA (cvt yok)
+        if self._picam is None:
+            picam = Picamera2(camera_num=camera_num)
+            try:
+                config = picam.create_video_configuration(
+                    main={"size": (width, height), "format": "RGB888"},
+                )
+                picam.configure(config)
+                # IMX708 çoğu sürümde RGB888 adı altında BGR baytları gönderir.
+                # Eğer _forced_swap=False ise buna inanıyoruz demektir.
+                if self._forced_swap is False:
+                    self._fmt_name = "RGB888(cvt=RGB2BGR)"
+                    self._cvt_code = cv2.COLOR_RGB2BGR
+                    self._log.info(
+                        "[Aşama 2 OK] RGB888 seçildi, swap_rb_channels=False → "
+                        "gerçekten RGB geliyor varsayılıyor → COLOR_RGB2BGR uygulanacak."
+                    )
+                else:
+                    # forced_swap=None veya True — IMX708 davranışını varsay:
+                    # format adı RGB888 ama ham baytlar BGR → cvt yok, sonraki
+                    # adımda global swap uygulanır
+                    self._fmt_name = "RGB888(IMX708-stub-cvt=YOK)"
+                    self._cvt_code = None
+                    self._log.info(
+                        "[Aşama 2 OK] RGB888 seçildi, IMX708 varsayımıyla "
+                        "baytlar BGR kabul edildi (cvt yok). Zorlamalı swap sonrası BGR çıkacak."
+                    )
+                self._picam = picam
+            except Exception as exc2:
+                self._log.warning("[Aşama 2 FAIL] RGB888 de desteklenmiyor: %s", exc2)
+                self._picam = None
+
+        # AŞAMA 3 — Bütün stratejiler başarısız olduysa XRGB8888 gibi geniş format
+        if self._picam is None:
+            picam = Picamera2(camera_num=camera_num)
+            try:
+                config = picam.create_video_configuration(
+                    main={"size": (width, height)},  # varsayılan format neyse onu kullan
+                )
+                picam.configure(config)
+                self._fmt_name = f"DEFAULT({config['main']['format']})"
+                self._cvt_code = cv2.COLOR_RGB2BGR   # güvenli varsayım
+                self._log.warning(
+                    "[Aşama 3 OK] Özel formatların hepsi reddedildi, varsayılan format=%s "
+                    "kullanılıyor → COLOR_RGB2BGR uygulanacak.", self._fmt_name
+                )
+                self._picam = picam
+            except Exception as exc3:
+                self._log.error("Tüm format stratejileri başarısız: %s", exc3)
+                raise RuntimeError(
+                    f"Picamera2 format seçimi başarısız (BGR888/RGB888/varsayılan). "
+                    f"Son hata: {exc3}"
+                ) from exc3
 
         # FPS kontrolü — RPi Cam 3 30 FPS 1080p rahat yapar
+        assert self._picam is not None
         try:
-            config["controls"]["FrameDurationLimits"] = (
-                int(1e6 / max(fps, 1)), int(1e6 / max(fps, 1))
-            )
+            picam_cf = self._picam.camera_configuration
+            if picam_cf is not None and "controls" in picam_cf:
+                picam_cf["controls"]["FrameDurationLimits"] = (
+                    int(1e6 / max(fps, 1)), int(1e6 / max(fps, 1))
+                )
         except Exception:
-            self._log.debug("FrameDurationLimits kontrolleri yok — varsayılan FPS kullanılıyor.")
+            self._log.debug(
+                "FrameDurationLimits kontrolleri yazılamadı — varsayılan FPS kullanılıyor."
+            )
 
-        picam.start()
-        self._picam = picam
+        self._picam.start()
         self._log.info(
             "RPi Camera Module 3 açıldı (CAM%d) %dx%d@%d — Picamera2/libcamera "
-            "format=%s  cvt=%s",
+            "fmt=%s  cvt=%s  swap_rb=%s",
             camera_num, width, height, fps,
             self._fmt_name,
-            "yok (CPU kazanımı)" if self._cvt_code is None
-                else f"cv2.{['BGR2RGB','RGB2BGR'][self._cvt_code//2]}",
+            "yok" if self._cvt_code is None
+                else ("COLOR_RGB2BGR" if self._cvt_code == cv2.COLOR_RGB2BGR
+                      else f"cv2.code={self._cvt_code}"),
+            "ZORLU(True)" if self._forced_swap is True
+                else ("YOK(False)" if self._forced_swap is False else "OTOMATIK"),
         )
 
         # Capture thread başlat
@@ -132,14 +201,22 @@ class RPiCam3:
                 if raw.shape[2] == 4:
                     raw = raw[:, :, :3]
 
-                # Renk dönüşümü (varsa)
+                # Aşama-1: Format stratejisine göre renk dönüşümü
                 if self._cvt_code is None:
-                    bgr = raw
+                    frame = raw
                 else:
-                    bgr = cv2.cvtColor(raw, self._cvt_code)
+                    frame = cv2.cvtColor(raw, self._cvt_code)
+
+                # Aşama-2: Zorlamalı R↔B takası (forced_swap)
+                #   IMX708 + libcamera sürüm kombinasyonuna göre
+                #   yukarıdaki adımda renkler yine de ters kalmış olabilir.
+                if self._forced_swap is True:
+                    frame = frame[:, :, ::-1].copy()   # B ↔ R kanallarını takas et
+                # Not: _forced_swap=None ise Aşama-1'in sonucu neyse odur (OTOMATIK)
+                # _forced_swap=False ise dokunma
 
                 with self._lock:
-                    self._frame = bgr
+                    self._frame = frame
             except Exception as exc:
                 self._log.warning("RPiCam3 capture hatası (devam ediyor): %s", exc)
 
@@ -148,8 +225,6 @@ class RPiCam3:
         """En son frame'in BGR kopyasını döndür. None = henüz frame yok."""
         with self._lock:
             if self._frame is None:
-                # Stub: test ortamı için siyah frame döndür (None yerine) —
-                # state machine None frame görürse döngüyü atlar, canlı testte sorun yok.
                 if not _PICAMERA2_AVAILABLE:
                     return np.zeros((self._height, self._width, 3), dtype=np.uint8)
                 return None

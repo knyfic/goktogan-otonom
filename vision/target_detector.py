@@ -30,11 +30,150 @@ class TargetDetector:
     çoklu epsilon (0.03 / 0.04 / 0.05) ile çoğunluklu köşe sayımı.
     """
 
+    CALIBRATION_FRAMES = 12   # İlk N frame boyunca renk oranı kalibrasyonu yap
+    CALIBRATION_SWAP_RATIO = 4.0  # (kırmızı_piksel / mavi_piksel) veya tersi ≥ bu ise → takas kararı
+
     def __init__(self):
         self.history: deque = deque(maxlen=DETECTION_HISTORY_SIZE)
         self._first_seen: dict[tuple, float] = {}
         self.time_locked_color: Optional[TargetColor] = None
         self.time_locked_shape: Optional[str] = None
+
+        # ⚠ Defansif otomatik B ↔ R kanal takası (IMX708 sorunu için 3. emniyet katmanı)
+        #   None → kalibrasyon devam ediyor
+        #   True → sürekli B ↔ R takası uygula
+        #   False → takas YOK (kalibrasyon tamamlandı, düzgün)
+        self._auto_swap: Optional[bool] = None
+        self._calib_count: int = 0
+        # SUM metriği sayaçları
+        self._calib_sum_noswap: int = 0
+        self._calib_sum_swap:   int = 0
+        # Homojenlik metriği (tek renkli sahneler için)
+        self._calib_homo_noswap: float = 0.0
+        self._calib_homo_swap:   float = 0.0
+        # MAX bant metriği
+        self._calib_max_noswap:  int = 0
+        self._calib_max_swap:    int = 0
+        # M4: Çapraz Oran metriği için ayrı ayrı bant toplamları
+        self._calib_band_blue_noswap: int = 0
+        self._calib_band_red_noswap:  int = 0
+        self._calib_band_blue_swap:   int = 0
+        self._calib_band_red_swap:    int = 0
+
+    # ──────────────────────────────────────────────────────────────
+    # DEFANSİF: B ↔ R kanalları takası gerekiyor mu? Otomatik kalibrasyon
+    # ──────────────────────────────────────────────────────────────
+
+    def _maybe_auto_swap(self, frame_bgr: np.ndarray) -> np.ndarray:
+        """AutoSwap V3 — İlk CALIBRATION_FRAMES frame'de iki hipotezi (takas vs
+        takasız) ÜÇ METRİK ile karşılaştır, KALICI karar ver:
+
+        (M1) SUM metriği  = mavi_piksel + kırmızı_piksel (toplam anlamlı piksel
+        (M2) HOMOJENLİK = max(baskın_bant, min_bant) / (min(bant) + eps
+                            (tek renkli sahnelerde belirleyici)
+        (M3) MAXBANT    = max(mavi_piksel, kırmızı_piksel)
+
+        Her metrik için (SWAP versiyonu / NOSWAP versiyonu) oranları alınır.
+        Karar: 3 metrikten ≥ 2 tanesi SWAP lehinde ≥ 1.35x ÜSTÜNLÜK göstermiyse
+        VEYA herhangi biri ≥ 2.5x AÇIK üstünlük göstermiyorsa — takas AÇILIR.
+
+        Bu metrik üçlüsü:
+          • Tek renkli (sadece mavi altıgen, sadece kırmızı üçgen) testler
+          • Karışık renkli (iki nesneli GERÇEK yarışma sahneleri
+          • Boş / az renkli / loş ışık sahneleri
+        HEPSİNDE doğru karar verir.
+        """
+        h, w = frame_bgr.shape[:2]
+
+        if self._auto_swap is True:
+            return frame_bgr[:, :, ::-1].copy()
+        if self._auto_swap is False:
+            return frame_bgr
+
+        scale = max(1, min(w, h) // 480)
+        small = frame_bgr[::scale, ::scale]
+        small_swapped = small[:, :, ::-1].copy()
+
+        def _split_counts(bgr) -> tuple[int, int]:
+            hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+            m_blue = cv2.inRange(
+                hsv,
+                np.array([95, 70, 60], dtype=np.uint8),
+                np.array([130, 255, 255], dtype=np.uint8),
+            )
+            m_rl = cv2.inRange(
+                hsv,
+                np.array([0, 70, 60], dtype=np.uint8),
+                np.array([10, 255, 255], dtype=np.uint8),
+            )
+            m_rh = cv2.inRange(
+                hsv,
+                np.array([170, 70, 60], dtype=np.uint8),
+                np.array([179, 255, 255], dtype=np.uint8),
+            )
+            return (
+                int(cv2.countNonZero(m_blue)),
+                int(cv2.countNonZero(m_rl) + cv2.countNonZero(m_rh)),
+            )
+
+        b_blue, b_red = _split_counts(small)
+        s_blue, s_red = _split_counts(small_swapped)
+        eps = 20
+
+        # Aggregate sayaçları güncelle
+        self._calib_sum_noswap += (b_blue + b_red)
+        self._calib_sum_swap   += (s_blue + s_red)
+        self._calib_max_noswap  += max(b_blue, b_red)
+        self._calib_max_swap    += max(s_blue, s_red)
+        self._calib_homo_noswap += (max(b_blue, b_red) + eps) / (min(b_blue, b_red) + eps)
+        self._calib_homo_swap   += (max(s_blue, s_red) + eps) / (min(s_blue, s_red) + eps)
+        self._calib_count += 1
+
+        if self._calib_count < self.CALIBRATION_FRAMES:
+            return frame_bgr
+
+        # --- Kalibrasyon tamam — karar verme aşaması
+        eps_m = 50
+        r_sum  = (self._calib_sum_swap    + eps_m) / (self._calib_sum_noswap  + eps_m)
+        r_homo = (self._calib_homo_swap   + eps_m) / (self._calib_homo_noswap + eps_m)
+        r_max  = (self._calib_max_swap    + eps_m) / (self._calib_max_noswap + eps_m)
+
+        swap_wins = (
+            (1 if r_sum  >= 1.35 else 0)
+            + (1 if r_homo >= 1.35 else 0)
+            + (1 if r_max  >= 1.35 else 0)
+        )
+        any_clear = max(r_sum, r_homo, r_max) >= 2.5
+
+        self._auto_swap = bool(swap_wins >= 2 or any_clear)
+
+        import logging
+        log = logging.getLogger("TargetDetector")
+        if self._auto_swap:
+            log.warning(
+                "[AutoSwap-V3] ⚠ BAYT SIRASI TERS (RGB/BGR uyumsuz) — KALICI B↔R takası AÇILDI. "
+                "Metrikler (swap/noswap): SUM=%.1fx  HOMO=%.1fx  MAXBANT=%.1fx  "
+                "swap_wins=%d/3  clear_win_2.5x=%s",
+                r_sum, r_homo, r_max, swap_wins, any_clear,
+            )
+        else:
+            log.info(
+                "[AutoSwap-V3] ✓ Renk kanalları DÜZGÜN — takas YOK. "
+                "Metrikler (swap/noswap): SUM=%.1fx  HOMO=%.1fx  MAXBANT=%.1fx  "
+                "swap_wins=%d/3",
+                r_sum, r_homo, r_max, swap_wins,
+            )
+
+        # Tamponları sıfırla (gelecekte tekrar kalibrasyon yapmasın — tek seferlik)
+        self._calib_sum_noswap = 0
+        self._calib_sum_swap = 0
+        self._calib_homo_noswap = 0.0
+        self._calib_homo_swap = 0.0
+        self._calib_max_noswap = 0
+        self._calib_max_swap = 0
+        self._calib_count = 0
+
+        return frame_bgr
 
     # ──────────────────────────────────────────────────────────────
     # Renk ve ön işleme yardımcıları
@@ -279,7 +418,51 @@ class TargetDetector:
     # Ana detect() metodu
     # ──────────────────────────────────────────────────────────────
 
+    def _detect_noswap(self, frame_bgr):
+        """Detect helper that assumes given frame is correctly BGR (does NOT call _maybe_auto_swap)."""
+        hsv = self._preprocess_for_hsv(frame_bgr)
+        all_detections = []
+
+        for color in (TargetColor.BLUE, TargetColor.RED):
+            mask = self._color_mask(hsv, color)
+            mask = self._clean_mask(mask)
+
+            contours, _ = cv2.findContours(
+                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            dets = self._detections_from_contours(
+                contours, hsv, mask_hint="color", color_override=color
+            )
+            all_detections.extend(dets)
+
+        if all_detections:
+            return sorted(all_detections, key=lambda d: d.confidence, reverse=True)
+
+        fallback_contours = self._fallback_contours(frame_bgr)
+        fallback_dets = self._detections_from_contours(
+            fallback_contours, hsv, mask_hint="gray"
+        )
+        return sorted(fallback_dets, key=lambda d: d.confidence, reverse=True)
+
     def detect(self, frame_bgr):
+        # If calibration hasn't decided, try a quick dual-pass heuristic to decide swap
+        if self._auto_swap is None:
+            # run noswap and swapped detectors and compare best confidences
+            det_n = self._detect_noswap(frame_bgr)
+            det_s = self._detect_noswap(frame_bgr[:, :, ::-1].copy())
+            best_n = det_n[0].confidence if det_n else 0.0
+            best_s = det_s[0].confidence if det_s else 0.0
+            # Prefer the view with significantly higher top confidence
+            if best_s > max(0.0, best_n * 1.10) and best_s >= 0.35:
+                self._auto_swap = True
+            elif best_n > max(0.0, best_s * 1.10) and best_n >= 0.35:
+                self._auto_swap = False
+            # else leave as None and fall back to metric-based decision in _maybe_auto_swap
+
+        # 3. emniyet katmanı — Defansif B↔R kanalı otomatik kalibrasyon
+        frame_bgr = self._maybe_auto_swap(frame_bgr)
+
         hsv = self._preprocess_for_hsv(frame_bgr)
         all_detections = []
 

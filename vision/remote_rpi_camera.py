@@ -58,6 +58,7 @@ class RemoteRPiCamera:
         read_timeout_s:    float = 2.0,
         reconnect_wait_s:  float = 1.0,
         preview:           bool  = False,
+        swap_rb_channels:  bool  = False,
         window_name:       str   = "İHA Kamera",
         logger:            logging.Logger | None = None,
     ) -> None:
@@ -67,6 +68,7 @@ class RemoteRPiCamera:
         self._read_to    = float(read_timeout_s)
         self._recon_wait = float(reconnect_wait_s)
         self._preview    = bool(preview)
+        self._swap_rb    = bool(swap_rb_channels)
         self._win        = window_name
         self._log        = logger or logging.getLogger(__name__)
 
@@ -85,8 +87,10 @@ class RemoteRPiCamera:
         self._thread  = threading.Thread(target=self._rx_loop, daemon=True)
         self._thread.start()
         self._log.info(
-            "RemoteRPiCamera başlatıldı (HIL) — hedef %s:%d, arka thread RX",
+            "RemoteRPiCamera başlatıldı (HIL) — hedef %s:%d, arka thread RX, "
+            "swap_rb_channels=%s",
             self._host, self._port,
+            "True (B↔R TAKASLI)" if self._swap_rb else "False (doğrudan)",
         )
 
     # ── Alıcı döngü ─────────────────────────────────────────────────────── #
@@ -137,6 +141,10 @@ class RemoteRPiCamera:
                 except Exception as exc:
                     self._log.warning("[RX] JPEG decode hatası (frame atlandı): %s", exc)
                     continue
+
+                # İkinci emniyet katmanı: Client tarafı swap_rb_channels
+                if self._swap_rb:
+                    frame = frame[:, :, ::-1].copy()
 
                 # ── 4) Yayınla (thread-safe) ─────────────────────────────
                 with self._lock:

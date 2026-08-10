@@ -20,6 +20,12 @@ camera_server:
   height: 1080            # CAMERA_HEIGHT_PX ile tutarlı
   fps: 30                 # Hedef FPS (RPi Cam 3 1080p30 rahat destekler)
   jpeg_quality: 80        # 1-100 — daha yüksek: daha net, daha fazla bant genişliği
+  # ⚠ IMX708 + libcamera BILINEN SORUNU:
+  #   swap_rb_channels — renkler (mavi ↔ kırmızı) ters ise TRUE yap.
+  #   true  = tüm format stratejilerinden SONRA manuel B ↔ R kanalı takası (default IMX708)
+  #   false = format stratejisine güven, takas YOK (renkler yine ters ise true çevir)
+  #   Renkler TERS İSE = true, DÜZ İSE = false.
+  swap_rb_channels: true
 
 # ── Stepper motor (DRV8834 — Indexer / Full-step mode) ──────────────────────
 stepper:

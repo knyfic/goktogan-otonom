@@ -9,7 +9,7 @@
 #   simulation  → SimulationBackend  (Gazebo, GPIO yok)
 #   hil         → RemoteRPiBackend   (Ubuntu → Wi-Fi → Raspberry Pi)
 #   real        → LocalRPiBackend    (Raspberry Pi üzerinde, doğrudan GPIO)
-backend: hil
+backend: simulation
 
 # ── Kamera notu ─────────────────────────────────────────────────────────────
 # Kamera çözünürlüğü ve FOV config.py içinde tanımlıdır:
@@ -37,6 +37,11 @@ hil_camera: remote_rpi
 remote_camera:
   host: 192.168.1.21   # Raspberry Pi (payload.remote.host ile AYNI olmalı)
   port: 5701           # RPi camera_server portu (payload 5700 yanında)
+  # ⚠ IMX708 + libcamera BILINEN SORUNU (CLIENT TARAFI — ikinci emniyet katmanı):
+  #   swap_rb_channels — Ubuntu tarafında JPEG decode sonrası B ↔ R kanalı takası.
+  #   Eğer RPi tarafındaki ayara rağmen renkler hala ters ise bunu True yap.
+  #   RENKLER HALA TERS İSE = true, DÜZ İSE = false (default).
+  swap_rb_channels: false
 
 # ── Stepper motor ───────────────────────────────────────────────────────────
 stepper:

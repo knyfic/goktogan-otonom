@@ -81,13 +81,14 @@ FIELD_LENGTH = 100.0
 HEXAGON_SIDE_LENGTH = 2.0
 TRIANGLE_SIDE_LENGTH = 1.0
 
-PAYLOAD_WIDTH = 0.20
+# Yarışma yükü: 10 cm × 10 cm kare. Boyut filtresi bu fiziksel ölçüye göre yapılır.
+PAYLOAD_WIDTH = 0.10
 PAYLOAD_HEIGHT = 0.10
 
 MAX_PICKUP_ATTEMPTS = 5
 
-# Payload arama: beklenen boyutun bu katını aşan tespitler payload değil hedeftir
-# Payload=10cm, Hedef=1m → 10x fark; 3x tolerans marjı güvenli bir eşik
+# Payload arama: beklenen boyutun bu katını aşan tespitler payload değil hedeftir.
+# Payload 10cm kare, hedefler metre ölçeğinde olduğundan 3x lineer tolerans güvenlidir.
 MAX_PAYLOAD_SIZE_FACTOR = 3.0
 
 SEARCH_TIMEOUT = 12.0

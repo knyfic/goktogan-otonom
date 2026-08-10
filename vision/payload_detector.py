@@ -35,109 +35,6 @@ class PayloadDetector:
     def __init__(self, camera: CameraModel):
         self.camera = camera
 
-        # ⚠ Defansif otomatik B↔R takası (3. emniyet katmanı, AutoSwap V3)
-        self._auto_swap: Optional[bool] = None
-        self._calib_count: int = 0
-        self._calib_sum_noswap: int = 0
-        self._calib_sum_swap:   int = 0
-        self._calib_homo_noswap: float = 0.0
-        self._calib_homo_swap:   float = 0.0
-        self._calib_max_noswap:  int = 0
-        self._calib_max_swap:    int = 0
-
-    # ──────────────────────────────────────────────────────────────
-    # Defansif B↔R otomatik kalibrasyon
-    # ──────────────────────────────────────────────────────────────
-
-    def _maybe_auto_swap(self, frame_bgr: np.ndarray) -> np.ndarray:
-        """AutoSwap V3 — TargetDetector ile aynı ÜÇ METRİK (SUM/HOMO/MAXBANT)
-        algoritması; tek renkli ve karışık sahnelerde doğru karar verir.
-        """
-        if self._auto_swap is True:
-            return frame_bgr[:, :, ::-1].copy()
-        if self._auto_swap is False:
-            return frame_bgr
-
-        h, w = frame_bgr.shape[:2]
-        scale = max(1, min(w, h) // 480)
-        small = frame_bgr[::scale, ::scale]
-        small_swap = small[:, :, ::-1].copy()
-
-        def _split(bgr) -> tuple[int, int]:
-            hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-            mb = cv2.inRange(
-                hsv,
-                np.array([95, 70, 55], dtype=np.uint8),
-                np.array([130, 255, 255], dtype=np.uint8),
-            )
-            mrl = cv2.inRange(
-                hsv,
-                np.array([0, 70, 55], dtype=np.uint8),
-                np.array([10, 255, 255], dtype=np.uint8),
-            )
-            mrh = cv2.inRange(
-                hsv,
-                np.array([170, 70, 55], dtype=np.uint8),
-                np.array([179, 255, 255], dtype=np.uint8),
-            )
-            return (
-                int(cv2.countNonZero(mb)),
-                int(cv2.countNonZero(mrl) + cv2.countNonZero(mrh)),
-            )
-
-        b_blue, b_red = _split(small)
-        s_blue, s_red = _split(small_swap)
-        eps = 20
-
-        self._calib_sum_noswap  += (b_blue + b_red)
-        self._calib_sum_swap    += (s_blue + s_red)
-        self._calib_max_noswap  += max(b_blue, b_red)
-        self._calib_max_swap    += max(s_blue, s_red)
-        self._calib_homo_noswap += (max(b_blue, b_red) + eps) / (min(b_blue, b_red) + eps)
-        self._calib_homo_swap   += (max(s_blue, s_red) + eps) / (min(s_blue, s_red) + eps)
-        self._calib_count += 1
-
-        if self._calib_count < self.CALIBRATION_FRAMES:
-            return frame_bgr
-
-        eps_m = 50
-        r_sum  = (self._calib_sum_swap  + eps_m) / (self._calib_sum_noswap  + eps_m)
-        r_homo = (self._calib_homo_swap + eps_m) / (self._calib_homo_noswap + eps_m)
-        r_max  = (self._calib_max_swap  + eps_m) / (self._calib_max_noswap  + eps_m)
-
-        swap_wins = (
-            (1 if r_sum  >= 1.35 else 0)
-            + (1 if r_homo >= 1.35 else 0)
-            + (1 if r_max  >= 1.35 else 0)
-        )
-        any_clear = max(r_sum, r_homo, r_max) >= 2.5
-        self._auto_swap = bool(swap_wins >= 2 or any_clear)
-
-        import logging
-        log = logging.getLogger("PayloadDetector")
-        if self._auto_swap:
-            log.warning(
-                "[AutoSwap-V3][Payload] ⚠ BAYT SIRASI TERS — KALICI B↔R takası AÇILDI. "
-                "SUM=%.1fx HOMO=%.1fx MAXBANT=%.1fx swap_wins=%d/3 clear_win=%s",
-                r_sum, r_homo, r_max, swap_wins, any_clear,
-            )
-        else:
-            log.info(
-                "[AutoSwap-V3][Payload] ✓ Renk kanalları DÜZGÜN — takas YOK. "
-                "SUM=%.1fx HOMO=%.1fx MAXBANT=%.1fx swap_wins=%d/3",
-                r_sum, r_homo, r_max, swap_wins,
-            )
-
-        self._calib_sum_noswap = 0
-        self._calib_sum_swap = 0
-        self._calib_homo_noswap = 0.0
-        self._calib_homo_swap = 0.0
-        self._calib_max_noswap = 0
-        self._calib_max_swap = 0
-        self._calib_count = 0
-
-        return frame_bgr
-
     # ──────────────────────────────────────────────────────────────
     # Ön işleme & renk maskesi
     # ──────────────────────────────────────────────────────────────
@@ -223,33 +120,23 @@ class PayloadDetector:
         return True
 
     # ──────────────────────────────────────────────────────────────
-    # Renk doğrulama (ROI histogramı)
+    # Renk doğrulama (Merkez pikselden)
     # ──────────────────────────────────────────────────────────────
 
     @classmethod
-    def _verify_color_roi(cls, hsv, contour, expected_color) -> bool:
-        """Bounding rect ROI'sindeki HSV ortalaması ile rengi doğrula.
-
-        Kontur doğru renkte değilse (örn. mavi maskeye rağmen yeşil bir
-        nesne yanlışlıkla maskeye girdiyse) tespiti reddeder.
-        """
-        x, y, w, h = cv2.boundingRect(contour)
-        if w <= 2 or h <= 2:
+    def _verify_color_center(cls, hsv, contour, expected_color) -> bool:
+        """Konturun ağırlık merkezindeki pikselin rengini doğrula."""
+        moments = cv2.moments(contour)
+        if moments["m00"] == 0:
             return False
-        roi = hsv[y:y + h, x:x + w]
-        if roi.size == 0:
+        cx = int(moments["m10"] / moments["m00"])
+        cy = int(moments["m01"] / moments["m00"])
+        h, w = hsv.shape[:2]
+        if not (0 <= cx < w and 0 <= cy < h):
             return False
 
-        sat_mask = cv2.inRange(
-            roi,
-            np.array([0, 70, 55], dtype=np.uint8),
-            np.array([179, 255, 255], dtype=np.uint8),
-        )
-        if cv2.countNonZero(sat_mask) < max(1, int(roi.shape[0] * roi.shape[1] * 0.25)):
-            return False
-
-        mean_hsv = cv2.mean(roi, mask=sat_mask)
-        hue, sat, val = int(mean_hsv[0]), int(mean_hsv[1]), int(mean_hsv[2])
+        px = hsv[cy, cx]
+        hue, sat, val = int(px[0]), int(px[1]), int(px[2])
         if sat < 70 or val < 55:
             return False
 
@@ -262,9 +149,6 @@ class PayloadDetector:
     # ──────────────────────────────────────────────────────────────
 
     def detect(self, frame_bgr, altitude_m, color):
-        # 3. emniyet katmanı — Defansif B↔R otomatik kalibrasyon
-        frame_bgr = self._maybe_auto_swap(frame_bgr)
-
         hsv = self._preprocess_for_hsv(frame_bgr)
         mask = self._mask(hsv, color)
         mask = self._clean_mask(mask)
@@ -287,36 +171,28 @@ class PayloadDetector:
             if area < MIN_PAYLOAD_AREA_PX:
                 continue
 
-            if not self._is_valid_rectangle(contour, area):
-                continue
-
+            # Payload için şekil (kare/dikdörtgen) doğrulaması yapmıyoruz.
+            # Görev gereksinimi: doğru renk + fiziksel alana uygun boyut yeterli.
             x, y, w, h = cv2.boundingRect(contour)
             if w <= 0 or h <= 0:
                 continue
 
-            if not self._verify_color_roi(hsv, contour, color):
+            if not self._verify_color_center(hsv, contour, color):
                 continue
-
-            aspect = max(w, h) / max(1.0, min(w, h))
 
             size_error = (
                 abs(w - expected_w) / max(expected_w, 1.0)
                 + abs(h - expected_h) / max(expected_h, 1.0)
             ) / 2.0
-            aspect_error = abs(aspect - expected_aspect) / expected_aspect
 
             size_score = max(0.0, 1.0 - min(1.0, size_error / 1.5))
-            aspect_score = max(0.0, 1.0 - min(1.0, aspect_error / 0.7))
             area_score = min(
                 1.0,
                 area / max(1.0, expected_w * expected_h),
             )
 
-            confidence = (
-                0.40 * size_score
-                + 0.35 * aspect_score
-                + 0.25 * area_score
-            )
+            # Şekil/aspect skoru yok: karar yalnız renk + beklenen fiziksel alan üzerinden.
+            confidence = 0.65 * size_score + 0.35 * area_score
 
             moments = cv2.moments(contour)
             if moments["m00"] == 0:

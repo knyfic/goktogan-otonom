@@ -587,37 +587,9 @@ class MissionStateMachine:
             self._advance_search()
             return
 
-        # İlk olarak normal tespiti deneyelim
+        # Frame, kamera katmanından BGR olarak gelir. Detector içinde B↔R takası
+        # yapmayız; Gazebo dahil tüm kaynaklarda renk sınıflandırması stabil kalır.
         detections = self.target_detector.detect(frame)
-
-        # Eğer tespitler varsa ama renkler kamera merkezinin rengine uymuyorsa
-        # swapped versiyonunu da test et ve daha iyi olanı seç.
-        def _center_hue_is_blue(f):
-            hsv = cv2.cvtColor(f, cv2.COLOR_BGR2HSV)
-            h, s, v = hsv[hsv.shape[0] // 2, hsv.shape[1] // 2]
-            if s < 60 or v < 50:
-                return None
-            return 95 <= h <= 130
-
-        center_blue = _center_hue_is_blue(frame)
-        if detections and center_blue is not None:
-            # If first detection color doesn't match center hue, try swapped
-            first_color_is_blue = detections[0].color == TargetColor.BLUE
-            if first_color_is_blue != center_blue:
-                # Try swapped frame
-                swapped = frame[:, :, ::-1].copy()
-                detections_swapped = self.target_detector.detect(swapped)
-                # Prefer the set whose top detection color matches center hue
-                if detections_swapped:
-                    swapped_first_blue = detections_swapped[0].color == TargetColor.BLUE
-                    if swapped_first_blue == center_blue and (not first_color_is_blue == center_blue):
-                        self.log.info("Renk uyuşmazlığı tespit edildi — swapped versiyon kullanılacak.")
-                        detections = detections_swapped
-                        # Set persistent swap in detector to avoid future confusion
-                        try:
-                            self.target_detector._auto_swap = True
-                        except Exception:
-                            pass
 
         # İkinci hedef ararken birincisini filtrele
         if (self.data.state == MissionState.SEARCHING_SECOND_TARGET
@@ -1208,26 +1180,11 @@ class MissionStateMachine:
         if frame is None:
             return
 
+        # Renk sırası burada değiştirilmez. Beklenen renk, ilk kaydedilen hedefe
+        # göre payload_for_target() ile belirlenir: mavi altıgen→kırmızı, kırmızı üçgen→mavi.
         color = self.payload_for_target(target)
         results = self.payload_detector.detect(frame, pos.relative_altitude, color)
-
-        # Eğer sonuç yoksa, swapped frame ile bir deneme daha yap
-        if not results:
-            swapped = frame[:, :, ::-1].copy()
-            swapped_results = self.payload_detector.detect(swapped, pos.relative_altitude, color)
-            if swapped_results:
-                self.log.info("Payload aramada renk kanalı ters algılandı; swapped frame kullanılıyor.")
-                # Kalıcı olarak payload_detector'ın auto_swap'ını aç
-                try:
-                    self.payload_detector._auto_swap = True
-                except Exception:
-                    pass
-                results = swapped_results
-                frame_for_display = swapped
-            else:
-                frame_for_display = frame
-        else:
-            frame_for_display = frame
+        frame_for_display = frame
 
         # Ekrana kalan süreyi de göster
         remaining = max(0.0, PAYLOAD_SEARCH_TIMEOUT - elapsed)
@@ -2040,8 +1997,8 @@ class MissionStateMachine:
         """
         Payload tespitlerini filtrele ve gerçek payload'a yönlen:
           1. Beklenen boyutun MAX_PAYLOAD_SIZE_FACTOR katından büyükleri at (bunlar hedef).
-          2. Kalanları ALANA GÖRE KÜÇÜKTEN BÜYÜĞE sırala.
-             10cm payload << 1-2m hedef → en küçük alan = gerçek payload.
+          2. Görüntünün dış kenarlarına (köşelerine) çok yakın olanları ele (gürültü).
+          3. Kalanları ALANA GÖRE KÜÇÜKTEN BÜYÜĞE sırala.
         """
         exp_w, exp_h = expected_payload_pixels(
             PAYLOAD_WIDTH, PAYLOAD_HEIGHT, altitude_m, self.position_controller.camera
@@ -2049,41 +2006,48 @@ class MissionStateMachine:
         max_w = exp_w * MAX_PAYLOAD_SIZE_FACTOR
         max_h = exp_h * MAX_PAYLOAD_SIZE_FACTOR
 
+        expected_area = exp_w * exp_h
+        min_area = expected_area * 0.10
+        max_area = expected_area * (MAX_PAYLOAD_SIZE_FACTOR ** 2)
+
+        # Kamera çözünürlüğü (merkeze uzaklık ve köşe/kenar filtresi için)
+        cw, ch = self.camera_model.width_px, self.camera_model.height_px
+        margin_x = cw * 0.15  # %15 kenar marjı
+        margin_y = ch * 0.15
+
         filtered = [
             r for r in results
-            if r.width_px <= max_w and r.height_px <= max_h
+            if (r.width_px <= max_w
+                and r.height_px <= max_h
+                and min_area <= r.area_px <= max_area
+                and margin_x < r.center_x < (cw - margin_x)
+                and margin_y < r.center_y < (ch - margin_y))
         ]
 
         if len(filtered) < len(results):
             self.log.debug(
-                "Payload filtresi: %d/%d tespit boyut eşiğini geçti "
-                "(exp=%.0fx%.0fpx max=%.0fx%.0fpx)",
-                len(filtered), len(results), exp_w, exp_h, max_w, max_h,
+                "Payload filtresi: %d/%d tespit eşikleri geçti (kenar ve boyut)",
+                len(filtered), len(results),
             )
 
-        # Tracker'a verilecek liste — sıralama tracker tarafından yapılır
         return filtered
 
     def _nearest_to_last_known(self, candidates: list) -> object | None:
         """
         Candidate listesinden önceki hizalamadan bilinen payload merkezine
-        en yakın olanı döndür.
-
-        pending_detection (hizalama fazındaki son tespit) payload'ın
-        kameradaki gerçek konumunu tutar. Aynı renkteki büyük hedef
-        genellikle görüntünün kenarında olduğundan merkeze uzak kalır.
-
-        pending_detection yoksa en yüksek confidence'lıyı döndürür (fallback).
+        en yakın olanı döndür. Eğer merkez bilgisi yoksa, kamera merkezine en yakın olanı seçer,
+        böylece ekranın köşelerindeki gürültü / hedefleri almaktan kaçınır.
         """
         if not candidates:
             return None
 
         ref_det = self.data.pending_detection
         if ref_det is None:
-            # Merkez bilgisi yok — fallback: en iyi confidence
-            return candidates[0]
-
-        ref_x, ref_y = ref_det.center_x, ref_det.center_y
+            # Merkez bilgisi yok — fallback: Görüntü merkezini kullan
+            ref_x = self.camera_model.width_px / 2.0
+            ref_y = self.camera_model.height_px / 2.0
+        else:
+            ref_x, ref_y = ref_det.center_x, ref_det.center_y
 
         def dist(c):
             return (c.center_x - ref_x) ** 2 + (c.center_y - ref_y) ** 2

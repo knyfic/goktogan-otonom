@@ -100,6 +100,8 @@ class MissionStateMachine:
         payload: PayloadController,
         logger: logging.Logger,
     ):
+        # pending nav target used when we first ascend to search altitude
+        self._nav_pending_target: tuple[float, float] | None = None
         self.log = logger
         self.nav = navigation
         self.camera = camera
@@ -1015,8 +1017,13 @@ class MissionStateMachine:
     def _do_navigate_to_first(self) -> None:
         """
         İlk hedefin GPS konumuna git.
-        Mevcut irtifada GPS konumuna uç, varınca o irtifada görüntü işlemeyi başlat.
-        İrtifayı düşürme — geniş görüş açısı korumak için mevcut irtifa kullanılır.
+        Davranış (güncellendi):
+          1) Eğer mevcut irtifa < PAYLOAD_SEARCH_ALTITUDE (2m) ise önce bu irtifaya yüksel.
+          2) Yükselme tamamlanınca hedefin GPS konumuna git (o irtifada).
+          3) Varınca hedef merkezleme başlat.
+
+        Bu sayede payload arama 2m'de başlatılacak, hedefe yaklaşıldığında
+        kademeli inişle 1m'ye gelince payload araması başlatılacaktır.
         """
         target = self.data.first_target
         if target is None:
@@ -1024,16 +1031,56 @@ class MissionStateMachine:
             self._goto(MissionState.TASK_2_FAILED)
             return
 
-        # --- Faz 1: GPS'e git (mevcut irtifada) ---
-        self.log.info(
-            "Görev 2: İlk hedef GPS'e gidiliyor (mevcut irtifa): lat=%.7f lon=%.7f",
-            target.latitude, target.longitude,
-        )
         self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
         pos_now = self.nav.position()
-        self.nav.goto_global(target.latitude, target.longitude, pos_now.relative_altitude)
+        self.log.info(
+            "Görev 2: İlk hedefe gitme planı: önce irtifa kontrol, sonra GPS->lat=%.7f lon=%.7f",
+            target.latitude, target.longitude,
+        )
 
-        nav_deadline = time.monotonic() + 90.0
+        # Eğer yeterli irtifada değilsek önce SEARCH altitude'a yüksel
+        if pos_now.relative_altitude < PAYLOAD_SEARCH_ALTITUDE - ALTITUDE_TOLERANCE_M:
+            self.log.info(
+                "Mevcut irtifa %.2fm < %.2fm. Önce %.2fm'ye yükselebilmek için komut veriliyor.",
+                pos_now.relative_altitude, PAYLOAD_SEARCH_ALTITUDE, PAYLOAD_SEARCH_ALTITUDE,
+            )
+            # Set pending nav target so that after ascend we navigate to target
+            self._nav_pending_target = (target.latitude, target.longitude)
+            self._send_altitude(PAYLOAD_SEARCH_ALTITUDE, timeout=30.0)
+            return
+
+        # Eğer _alt_waiting aktif ise yükselme devam ediyor — bekle
+        if self._alt_waiting:
+            res = self._altitude_ok()
+            if res is False:
+                # hala yükseliyor
+                return
+            if res is None:
+                # timeout: fallback -> try navigating anyway
+                self.log.warning("İrtifa yükselme timeout; doğrudan hedefe gitmeye çalışılıyor.")
+                self._reset_altitude_state()
+            else:
+                # başarılı yükseldi — devam
+                self._reset_altitude_state()
+
+        # Eğer bir nav pending target varsa şimdi bu irtifada GPS'e git
+        if self._nav_pending_target is not None:
+            lat, lon = self._nav_pending_target
+            self._nav_pending_target = None
+            self.log.info("Yükselme tamamlandı; hedef GPS'e bu irtifada gidiliyor: lat=%.7f lon=%.7f",
+                          lat, lon)
+            self.nav.goto_global(lat, lon, self.nav.position().relative_altitude)
+        else:
+            # Normal akış: mevcut irtifada GPS'e git
+            self.log.info(
+                "Görev 2: İlk hedef GPS'e gidiliyor (mevcut irtifa): lat=%.7f lon=%.7f",
+                target.latitude, target.longitude,
+            )
+            pos_now = self.nav.position()
+            self.nav.goto_global(target.latitude, target.longitude, pos_now.relative_altitude)
+
+        # Non-blocking bekleme ile hedefe ulaşınca merkezleme başlat
+        nav_deadline = time.monotonic() + 120.0
         while time.monotonic() < nav_deadline:
             pos = self.nav.position()
             dist = haversine_m(pos.latitude, pos.longitude,
@@ -1053,12 +1100,9 @@ class MissionStateMachine:
             return
 
         # GPS konumuna varıldı — irtifayı DÜŞÜRME, mevcut irtifada görüntü işlemeyi başlat.
-        # Yüksek irtifada geniş görüş açısı var; hedef üzerinde hizalanınca
-        # kademeli iniş zaten gerçekleşecek.
         self._reset_altitude_state()
         self.log.info(
-            "GPS konumuna ulaşıldı (irtifa=%.1fm). "
-            "Mevcut irtifada hedef merkezleme başlıyor.",
+            "GPS konumuna ulaşıldı (irtifa=%.1fm). Mevcut irtifada hedef merkezleme başlıyor.",
             self.nav.position().relative_altitude,
         )
         self._align_for_pickup_deadline = time.monotonic() + ALIGN_ON_TARGET_TIMEOUT_S
@@ -1916,12 +1960,19 @@ class MissionStateMachine:
         # 1) Önce aracı home'a getirmek için makul bir süre bekle
         arrival_deadline = time.monotonic() + 300.0  # 5 dakika
         arrived = False
+        last_preview_t = 0.0
+        preview_interval = 0.25  # throttle preview to 4 Hz to reduce CPU/GPU load
         while time.monotonic() < arrival_deadline:
-            self._pending_display = None
-            frame = self.camera.latest()
-            if frame is not None:
-                self._pending_display = self._base_overlay(frame)
-            self._pump_preview()
+            # Preview only at limited rate to avoid stuttering
+            now = time.monotonic()
+            if now - last_preview_t >= preview_interval:
+                self._pending_display = None
+                frame = self.camera.latest()
+                if frame is not None:
+                    self._pending_display = self._base_overlay(frame)
+                self._pump_preview()
+                last_preview_t = now
+
             pos = self.nav.position()
             if (self.nav.home_lat is not None
                     and self.nav.home_lon is not None
@@ -1931,7 +1982,7 @@ class MissionStateMachine:
                 arrived = True
                 self.log.info("RTL: home'a ulaşıldı (%.2fm). Disarm bekleniyor.", pos.relative_altitude)
                 break
-            time.sleep(0.1)
+            time.sleep(0.2)
 
         if not arrived:
             self.log.error("RTL arrival timeout (home'a ulaşılmadı). Görev COMPLETE'a geçiliyor.")
@@ -1947,13 +1998,16 @@ class MissionStateMachine:
                 self._goto(MissionState.COMPLETE)
                 return
 
+            last_preview_t = 0.0
             while time.monotonic() < disarm_deadline:
-                # preview güncelle
-                self._pending_display = None
-                frame = self.camera.latest()
-                if frame is not None:
-                    self._pending_display = self._base_overlay(frame)
-                self._pump_preview()
+                now = time.monotonic()
+                if now - last_preview_t >= preview_interval:
+                    self._pending_display = None
+                    frame = self.camera.latest()
+                    if frame is not None:
+                        self._pending_display = self._base_overlay(frame)
+                    self._pump_preview()
+                    last_preview_t = now
 
                 try:
                     armed = master.motors_armed()

@@ -54,6 +54,7 @@ class RPiCam3:
         fps:    int = 30,
         swap_rb_channels: Optional[bool] = True,
         logger: logging.Logger | None = None,
+        orientation: str = "NORMAL",
     ) -> None:
         self._camera_num = camera_num
         self._width      = width
@@ -65,6 +66,8 @@ class RPiCam3:
         self._frame: Optional[np.ndarray] = None
         self._running    = False
         self._picam: Optional[Picamera2] = None
+        # Orientation normalization for mounting (e.g. FLIP_H, ROTATE_180, etc.)
+        self._orientation = str(orientation).upper() if orientation is not None else 'NORMAL'
 
         # Stratejinin sonucu: capture_array() sonrası uygulanan cvtCode
         #   None              → raw == BGR (dokunma)
@@ -214,6 +217,22 @@ class RPiCam3:
                     frame = frame[:, :, ::-1].copy()   # B ↔ R kanallarını takas et
                 # Not: _forced_swap=None ise Aşama-1'in sonucu neyse odur (OTOMATIK)
                 # _forced_swap=False ise dokunma
+
+                # Orientation normalization (apply mounting correction here)
+                try:
+                    o = self._orientation
+                    if o == 'ROTATE_90':
+                        frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+                    elif o == 'ROTATE_180':
+                        frame = cv2.rotate(frame, cv2.ROTATE_180)
+                    elif o == 'ROTATE_270':
+                        frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    elif o == 'FLIP_H':
+                        frame = cv2.flip(frame, 1)
+                    elif o == 'FLIP_V':
+                        frame = cv2.flip(frame, 0)
+                except Exception:
+                    pass
 
                 with self._lock:
                     self._frame = frame

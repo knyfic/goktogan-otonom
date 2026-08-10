@@ -94,6 +94,7 @@ def main() -> int:
                 fps=int(camera_cfg.get("fps", 30)),
                 swap_rb_channels=cam_swap,
                 logger=logger,
+                orientation=str(camera_cfg.get("orientation", "NORMAL")),
             )
             camera_server = CameraTCPServer(
                 host=cam_host,

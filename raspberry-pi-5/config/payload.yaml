@@ -26,6 +26,9 @@ camera_server:
   #   false = format stratejisine güven, takas YOK (renkler yine ters ise true çevir)
   #   Renkler TERS İSE = true, DÜZ İSE = false.
   swap_rb_channels: true
+  # Kamera montaj yönü düzeltmesi: 'NORMAL' | 'ROTATE_90' | 'ROTATE_180' | 'ROTATE_270' | 'FLIP_H' | 'FLIP_V'
+  # Örneğin: kameranız ters monte edilmişse 'FLIP_H' veya 'ROTATE_180' deneyin.
+  orientation: 'NORMAL'
 
 # ── Stepper motor (DRV8834 — Indexer / Full-step mode) ──────────────────────
 stepper:

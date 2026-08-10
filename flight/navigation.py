@@ -185,52 +185,33 @@ class Navigation:
     def goto_body_offset(self, forward_m: float, right_m: float) -> None:
         """
         Aracın gövde ekseninde ileri/sağ yönünde pozisyon offseti gönderir.
-        MAVLink SET_POSITION_TARGET_LOCAL_NED, BODY_OFFSET_NED frame.
 
-        type_mask açıklaması (bitleri 1 yapmak = o alanı yoksay):
-          bit 0: vx yoksay
-          bit 1: vy yoksay
-          bit 2: vz yoksay
-          bit 3: ax yoksay
-          bit 4: ay yoksay
-          bit 5: az yoksay
-          bit 6: force yoksay
-          bit 7: yaw yoksay
-          bit 8: yaw_rate yoksay
-          bit 9: z yoksay  ← z=0 ile irtifayı korumak için 1 yapıyoruz
-          bit 10: x aktif (0)
-          bit 11: y aktif (0)
-        Sadece x ve y pozisyonu aktif; z yoksayılır (mevcut irtifada kal).
+        MAV_FRAME_BODY_OFFSET_NED (LOCAL_NED) ArduPilot'ta güvenilir değildir:
+        offset, mevcut konuma değil önceki position target'e eklenir ve yerleşik
+        (settled) araçta çoğu zaman hiç hareket üretmez. Bu yüzden burada
+        kanıtlanmış yöntem kullanılır — hizalama döngüsünün kullandığı
+        goto_global yolu:
+
+          body offset → heading ile NED (north/east) → GPS hedefi → goto_global
+
+        İrtifa korunur (mevcut relative_altitude hedef olarak verilir).
         """
-        self._ensure_guided()
-        type_mask = (
-            (1 << 0)   # vx yoksay
-            | (1 << 1) # vy yoksay
-            | (1 << 2) # vz yoksay
-            | (1 << 3) # ax yoksay
-            | (1 << 4) # ay yoksay
-            | (1 << 5) # az yoksay
-            | (1 << 6) # force yoksay
-            | (1 << 7) # yaw yoksay
-            | (1 << 8) # yaw_rate yoksay
-            | (1 << 9) # z yoksay — irtifayı mevcut seviyede tut
-            # bit 10 (x) = 0 → aktif
-            # bit 11 (y) = 0 → aktif
-        )
+        pos = self.position()
+        if pos.latitude == 0.0 and pos.longitude == 0.0:
+            return  # GPS henüz yok — komut gönderilemez
 
-        self.master.mav.set_position_target_local_ned_send(
-            int(time.time() * 1000) & 0xFFFFFFFF,
-            self.system_id,
-            self.component_id,
-            mavutil.mavlink.MAV_FRAME_BODY_OFFSET_NED,
-            type_mask,
-            forward_m,  # x = ileri
-            right_m,    # y = sağ
-            0.0,        # z = yoksayılır
-            0, 0, 0,    # vx, vy, vz
-            0, 0, 0,    # ax, ay, az
-            0, 0,       # yaw, yaw_rate
-        )
+        yaw_rad = math.radians(pos.heading_deg)
+        north_m = forward_m * math.cos(yaw_rad) - right_m * math.sin(yaw_rad)
+        east_m = forward_m * math.sin(yaw_rad) + right_m * math.cos(yaw_rad)
+
+        # NED offset → GPS hedefi (küresel yaklaşık dönüşüm)
+        earth_radius = 6378137.0
+        d_lat = north_m / earth_radius
+        d_lon = east_m / (earth_radius * math.cos(math.radians(pos.latitude)))
+        target_lat = pos.latitude + math.degrees(d_lat)
+        target_lon = pos.longitude + math.degrees(d_lon)
+
+        self.goto_global(target_lat, target_lon, pos.relative_altitude)
 
     def set_relative_altitude(self, altitude_m: float) -> None:
         """

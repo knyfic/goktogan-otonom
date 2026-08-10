@@ -36,12 +36,15 @@ from config import (
     FIELD_LENGTH,
     FIELD_WIDTH,
     ALIGNMENT_DESCENT_STEP_M,
+    CAMERA_TO_MECHANISM_OFFSET_M,
     FINAL_TARGET_ALTITUDE,
     GPS_CANDIDATE_MIN_COUNT,
     MISSION_TIMEOUT_S,
     MAX_PICKUP_ATTEMPTS,
     MAX_PAYLOAD_SIZE_FACTOR,
+    OFFSET_CORRECTION_WAIT_S,
     PAYLOAD_ALIGN_TIMEOUT_S,
+    PAYLOAD_ALIGN_ALTITUDE_M,
     PAYLOAD_CONTACT_ALTITUDE,
     PAYLOAD_DESCENT_STEP_M,
     PAYLOAD_HEIGHT,
@@ -180,6 +183,8 @@ class MissionStateMachine:
         # Payload bulunamazsa bu süre sonunda yukarı çıkıp yeniden merkezle.
         # Geçici frame kayıplarında (1-2 tick) tetiklenmez; sadece timeout dolunca.
         self._payload_search_start: float | None = None
+        self._offset_correction_start: float | None = None
+        self._offset_phase: str | None = None
 
         # ---- Hedef üzerinde hizalama (pickup öncesi) ----
         # ALIGNING_ON_TARGET_FOR_PICKUP state'inde kullanılır
@@ -280,6 +285,8 @@ class MissionStateMachine:
             self._do_ascend_for_payload_retry()
         elif s == MissionState.ALIGNING_PAYLOAD:
             self._do_align_payload()
+        elif s == MissionState.OFFSET_CORRECTION:
+            self._do_offset_correction()
         elif s == MissionState.PICKING_UP_PAYLOAD:
             self._do_pickup()
         elif s == MissionState.ASCENDING_FOR_VERIFICATION:
@@ -1499,6 +1506,17 @@ class MissionStateMachine:
             )
 
         # Hizalandı VEYA timeout → bir sonraki basamağa in
+        # Eğer zaten son hizalama irtifasına (~0.4m) indiysek offset correction'a geç
+        if pos.relative_altitude <= PAYLOAD_ALIGN_ALTITUDE_M + ALTITUDE_TOLERANCE_M:
+            self.log.info(
+                "Payload ~%.1fm'de hizalandı. Kamera-mekanizma offset düzeltmesine "
+                "(%.0fcm ileri) geçiliyor.",
+                PAYLOAD_ALIGN_ALTITUDE_M, CAMERA_TO_MECHANISM_OFFSET_M * 100,
+            )
+            self._offset_correction_start = None
+            self._goto(MissionState.OFFSET_CORRECTION)
+            return
+
         next_alt = max(PAYLOAD_CONTACT_ALTITUDE,
                        pos.relative_altitude - PAYLOAD_DESCENT_STEP_M)
         self._payload_descent_alt = next_alt
@@ -1511,6 +1529,56 @@ class MissionStateMachine:
         )
         self.nav.set_max_speed(ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS)
         self._send_altitude(next_alt, timeout=20.0)
+
+    # ------------------------------------------------------------------ #
+    def _do_offset_correction(self) -> None:
+        """
+        Kamera payload'u 0.4m'de ortaladı. 
+        Kamera ile görev mekanizması arasında CAMERA_TO_MECHANISM_OFFSET_M (8cm)
+        offset var (kamera önde, mekanizma arkada). Dolayısıyla İHA'nın, payload
+        mekanizmasını payload'un üzerine getirmesi için +0.08m (8cm ileri) gitmesi
+        ve ardından yük alım irtifasına (0.0m) inmesi gerekir.
+        """
+        now = time.monotonic()
+        pos = self.nav.position()
+
+        if self._offset_correction_start is None:
+            self._offset_correction_start = now
+            self.log.info(
+                "OFFSET: İleri %.2fm gidiliyor...", CAMERA_TO_MECHANISM_OFFSET_M
+            )
+            # Sadece offset gönderiyoruz, irtifa değişmeyecek
+            self.nav.goto_body_offset(
+                forward_m=CAMERA_TO_MECHANISM_OFFSET_M, right_m=0.0
+            )
+            self._offset_phase = "WAITING_OFFSET"
+            return
+
+        elapsed = now - self._offset_correction_start
+
+        if self._offset_phase == "WAITING_OFFSET":
+            # 8cm için birkaç saniye bekleme güvenli ve yeterlidir.
+            if elapsed < OFFSET_CORRECTION_WAIT_S:
+                return
+
+            # Offset bitti, şimdi inelim
+            self.log.info("OFFSET bitti. Temas irtifasına (0.0m) iniliyor.")
+            self._send_altitude(PAYLOAD_CONTACT_ALTITUDE, timeout=10.0)
+            self._offset_phase = "WAITING_DESCENT"
+            return
+
+        if self._offset_phase == "WAITING_DESCENT":
+            # İrtifaya ulaşmayı kontrol edelim
+            result = self._altitude_ok()
+            if result is False and elapsed < OFFSET_CORRECTION_WAIT_S + 10.0:
+                return  # hala iniyor ve toplam zaman var
+
+            self._reset_altitude_state()
+            self.log.info(
+                "OFFSET VE İNİŞ tamamlandı (%.2fs). Mevcut irtifa: %.2fm. Pickup başlıyor.",
+                elapsed, pos.relative_altitude,
+            )
+            self._goto(MissionState.PICKING_UP_PAYLOAD)
 
     # ------------------------------------------------------------------ #
     def _do_pickup(self) -> None:

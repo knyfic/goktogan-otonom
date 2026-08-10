@@ -63,6 +63,11 @@ VERIFY_FALLBACK_CONFIDENCE = 0.50
 # 10cm'lik yük için kamera çok yakından bakmalı — küçük adımlarla in
 PAYLOAD_DESCENT_STEP_M = 0.4
 
+# Pickup öncesi son yatay hizalama (kamera merkezleme) irtifası (metre).
+# İHA bu irtifada payload'ı ortaladıktan sonra CAMERA_TO_MECHANISM_OFFSET_M
+# kadar ileri gidip yere iner ve mekanizmayı aktive eder.
+PAYLOAD_ALIGN_ALTITUDE_M = 0.4
+
 # Hizalama döngüsü: pickup esnasında piksel tolerans eşiği
 # Normal hizalamadan daha sıkı — yük çok küçük
 PAYLOAD_PIXEL_TOLERANCE_PX = 15.0
@@ -70,6 +75,15 @@ PAYLOAD_PIXEL_TOLERANCE_PX = 15.0
 # Her hizalama basamağında maksimum bekleme süresi (saniye).
 # Bu süre dolunca zorla bir basamak aşağı inilir — daha yakında daha iyi görülür.
 PAYLOAD_ALIGN_TIMEOUT_S = 4.0
+
+# Kamera ile görev mekanizması (mıknatıs/stepper) arasındaki boyuna offset (metre).
+# Kamera İHA burnuna göre mekanizmanın 8cm önündedir; pickup öncesi İHA bu
+# kadar ileri giderek mekanizmayı payload'ın tam üzerine getirir.
+CAMERA_TO_MECHANISM_OFFSET_M = 0.08
+
+# Offset düzeltmesinde 8cm'lik ileri hareketin tamamlanması için verilen
+# maksimum süre (saniye). Bu süre dolunca alçalmaya geçilir.
+OFFSET_CORRECTION_WAIT_S = 2.0
 
 # Görev 2 navigasyon sonrası hedef merkezleme zaman aşımı (sn)
 ALIGN_ON_TARGET_TIMEOUT_S = 5

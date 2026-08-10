@@ -85,3 +85,5 @@ Testler Gazebo veya MAVLink bağlantısı gerektirmez.
 - İlk hedef ve ikinci hedef merkezi veri yapısında tutulur.
 - Hedef konumları önceden world/SDF'den okunmaz; kamera tespitinden sonra mevcut
   MAVLink GPS konumu kaydedilir.
+
+cam DISP0 portu kullanılmıştır.

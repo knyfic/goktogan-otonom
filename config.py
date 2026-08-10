@@ -28,6 +28,12 @@ PAYLOAD_CONTACT_ALTITUDE = 0.0
 # Yük doğrulama için yükselme irtifası
 PAYLOAD_VERIFY_ALTITUDE = 1
 
+# Empirical pixel expectation for 1m altitude (measured in HIL tests).
+# Use these to prefer payload candidates when at PAYLOAD_VERIFY_ALTITUDE.
+# The user measured ~110..120 px width/height at 1m; use midpoint default 115px.
+PAYLOAD_EXPECTED_W_PX_AT_1M = 115.0
+PAYLOAD_EXPECTED_H_PX_AT_1M = 115.0
+
 # Validation irtifa toleransı: bu bantın dışındaki frame'ler sayılmaz.
 # ALTITUDE_TOLERANCE_M (0.20m) yerine daha sıkı tutuyoruz.
 VERIFY_ALT_TOLERANCE = 0.12   # metre

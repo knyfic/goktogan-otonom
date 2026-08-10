@@ -2074,6 +2074,42 @@ class MissionStateMachine:
                 len(filtered), len(results),
             )
 
+        # Eğer irtifa PAYLOAD_VERIFY_ALTITUDE bandındaysa, bilinen 1m beklenen
+        # payload piksel boyutuna göre en uygun adayı seç (area + merkez yakınlığı).
+        try:
+            from config import (
+                PAYLOAD_VERIFY_ALTITUDE,
+                VERIFY_ALT_TOLERANCE,
+                PAYLOAD_EXPECTED_W_PX_AT_1M,
+                PAYLOAD_EXPECTED_H_PX_AT_1M,
+            )
+        except Exception:
+            # Eğer config değerleri yoksa normal filtreyi dön
+            return filtered
+
+        if abs(altitude_m - PAYLOAD_VERIFY_ALTITUDE) <= VERIFY_ALT_TOLERANCE and filtered:
+            expected_area = float(PAYLOAD_EXPECTED_W_PX_AT_1M) * float(PAYLOAD_EXPECTED_H_PX_AT_1M)
+            # referans merkez: görüntü merkezi (approach sırasında hedef ortada olur)
+            ref_x = cw / 2.0
+            ref_y = ch / 2.0
+            # normalize factor for distances: image diagonal
+            diag = (cw * cw + ch * ch) ** 0.5
+
+            def _metric(r):
+                area_err = abs(r.area_px - expected_area) / max(expected_area, 1.0)
+                dx = r.center_x - ref_x
+                dy = r.center_y - ref_y
+                dist_norm = ((dx * dx + dy * dy) ** 0.5) / max(diag, 1.0)
+                # combine — area is primary, center proximity secondary
+                return area_err + 0.5 * dist_norm
+
+            best = min(filtered, key=_metric)
+            self.log.info(
+                "[PAYLOAD PICK] Verify-alt: selecting best candidate by metric: area=%.0f exp=%.0f center=(%.0f,%.0f)",
+                best.area_px, expected_area, best.center_x, best.center_y,
+            )
+            return [best]
+
         return filtered
 
     def _nearest_to_last_known(self, candidates: list) -> object | None:

@@ -587,7 +587,37 @@ class MissionStateMachine:
             self._advance_search()
             return
 
+        # İlk olarak normal tespiti deneyelim
         detections = self.target_detector.detect(frame)
+
+        # Eğer tespitler varsa ama renkler kamera merkezinin rengine uymuyorsa
+        # swapped versiyonunu da test et ve daha iyi olanı seç.
+        def _center_hue_is_blue(f):
+            hsv = cv2.cvtColor(f, cv2.COLOR_BGR2HSV)
+            h, s, v = hsv[hsv.shape[0] // 2, hsv.shape[1] // 2]
+            if s < 60 or v < 50:
+                return None
+            return 95 <= h <= 130
+
+        center_blue = _center_hue_is_blue(frame)
+        if detections and center_blue is not None:
+            # If first detection color doesn't match center hue, try swapped
+            first_color_is_blue = detections[0].color == TargetColor.BLUE
+            if first_color_is_blue != center_blue:
+                # Try swapped frame
+                swapped = frame[:, :, ::-1].copy()
+                detections_swapped = self.target_detector.detect(swapped)
+                # Prefer the set whose top detection color matches center hue
+                if detections_swapped:
+                    swapped_first_blue = detections_swapped[0].color == TargetColor.BLUE
+                    if swapped_first_blue == center_blue and (not first_color_is_blue == center_blue):
+                        self.log.info("Renk uyuşmazlığı tespit edildi — swapped versiyon kullanılacak.")
+                        detections = detections_swapped
+                        # Set persistent swap in detector to avoid future confusion
+                        try:
+                            self.target_detector._auto_swap = True
+                        except Exception:
+                            pass
 
         # İkinci hedef ararken birincisini filtrele
         if (self.data.state == MissionState.SEARCHING_SECOND_TARGET
@@ -1181,10 +1211,28 @@ class MissionStateMachine:
         color = self.payload_for_target(target)
         results = self.payload_detector.detect(frame, pos.relative_altitude, color)
 
+        # Eğer sonuç yoksa, swapped frame ile bir deneme daha yap
+        if not results:
+            swapped = frame[:, :, ::-1].copy()
+            swapped_results = self.payload_detector.detect(swapped, pos.relative_altitude, color)
+            if swapped_results:
+                self.log.info("Payload aramada renk kanalı ters algılandı; swapped frame kullanılıyor.")
+                # Kalıcı olarak payload_detector'ın auto_swap'ını aç
+                try:
+                    self.payload_detector._auto_swap = True
+                except Exception:
+                    pass
+                results = swapped_results
+                frame_for_display = swapped
+            else:
+                frame_for_display = frame
+        else:
+            frame_for_display = frame
+
         # Ekrana kalan süreyi de göster
         remaining = max(0.0, PAYLOAD_SEARCH_TIMEOUT - elapsed)
         self._set_display_payload(
-            frame, results,
+            frame_for_display, results,
             f"PAYLOAD ARA ({color.value}) timeout:{remaining:.0f}s"
         )
 

@@ -17,6 +17,7 @@ from config import (
     CAMERA_HEIGHT_PX,
     CAMERA_TOPIC,
     CAMERA_WIDTH_PX,
+    CAMERA_ORIENTATION,
     ENABLE_LIVE_PREVIEW,
     GAZEBO_MSGS_MODULE,
     GAZEBO_TRANSPORT_MODULE,
@@ -62,6 +63,7 @@ def _build_camera(mode: str, cfg: dict, logger):
             transport_module=GAZEBO_TRANSPORT_MODULE,
             preview=ENABLE_LIVE_PREVIEW,
             window_name=PREVIEW_WINDOW_NAME,
+            orientation=CAMERA_ORIENTATION,
         )
 
     # ── HIL — konfigürasyona göre Gazebo ya da GERÇEK RPi Kamera ───────────
@@ -77,6 +79,7 @@ def _build_camera(mode: str, cfg: dict, logger):
                 transport_module=GAZEBO_TRANSPORT_MODULE,
                 preview=ENABLE_LIVE_PREVIEW,
                 window_name=PREVIEW_WINDOW_NAME,
+                orientation=CAMERA_ORIENTATION,
             )
 
         if hil_cam == "remote_rpi":
@@ -115,6 +118,7 @@ def _build_camera(mode: str, cfg: dict, logger):
             preview=ENABLE_LIVE_PREVIEW,
             window_name=PREVIEW_WINDOW_NAME,
             logger=logger,
+            orientation=CAMERA_ORIENTATION,
         )
 
     raise ValueError(f"Bilinmeyen mod için kamera oluşturulamadı: {mode!r}")

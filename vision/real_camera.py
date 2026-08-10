@@ -44,6 +44,7 @@ class RealCamera:
         preview: bool = False,
         window_name: str = "İHA Kamera",
         logger: logging.Logger | None = None,
+        orientation: str = "NORMAL",
     ) -> None:
         self._log         = logger or logging.getLogger(__name__)
         self._preview     = preview
@@ -51,6 +52,8 @@ class RealCamera:
         self._frame: Optional[np.ndarray] = None
         self._lock        = threading.Lock()
         self._running     = False
+        # Orientation string
+        self._orientation = orientation
 
         self._cap = cv2.VideoCapture(source)
         if not self._cap.isOpened():
@@ -80,6 +83,12 @@ class RealCamera:
             if not ret:
                 self._log.warning("Kamera frame okunamadı.")
                 continue
+            # Orientation düzeltmesini uygula (pipeline başında)
+            try:
+                from vision.camera_utils import apply_camera_orientation
+                frame = apply_camera_orientation(frame, getattr(self, '_orientation', 'NORMAL'))
+            except Exception:
+                pass
             with self._lock:
                 self._frame = frame
 

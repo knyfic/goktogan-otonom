@@ -24,6 +24,7 @@ class GazeboCamera:
         transport_module: str = "gz.transport",
         preview: bool = False,
         window_name: str = "İHA Kamera",
+        orientation: str = "NORMAL",
     ):
         try:
             msgs = importlib.import_module(msgs_module)
@@ -39,6 +40,8 @@ class GazeboCamera:
         self._window_name = window_name
         self._frame: Optional[np.ndarray] = None
         self._lock = threading.Lock()
+        # Orientation string from main; normalize image to vehicle coordinates here
+        self._orientation = orientation
 
         # Pencereyi ana thread'de aç — 1920×1080'i tam göstermek büyük ekran ister,
         # yarım boyutta (960×540) gösterim yeterli ve taşınabilir.
@@ -76,6 +79,14 @@ class GazeboCamera:
 
         # Gazebo RGB → OpenCV BGR
         frame = frame[:, :, ::-1].copy()
+
+        # Kamera montajından kaynaklanan yön düzeltmesini uygula (pipeline başında)
+        try:
+            from vision.camera_utils import apply_camera_orientation
+            frame = apply_camera_orientation(frame, getattr(self, '_orientation', 'NORMAL'))
+        except Exception:
+            # Eğer helper yoksa veya hata olursa ham frame'i kullan
+            pass
 
         with self._lock:
             self._frame = frame

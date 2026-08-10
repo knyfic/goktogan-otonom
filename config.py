@@ -102,6 +102,11 @@ CAMERA_HORIZONTAL_FOV_DEG = 66.0
 # 4:3 sensörde eski değer 60° idi; 16:9'a geçince V-FOV düşer.
 CAMERA_VERTICAL_FOV_DEG = 41.0
 
+# Kamera montaj orientation — görüntüyü pipeline başında normalize etmek için kullanın.
+# Geçerli değerler: 'NORMAL', 'ROTATE_90', 'ROTATE_180', 'ROTATE_270', 'FLIP_H', 'FLIP_V'
+# Varsayılan: 'NORMAL'
+CAMERA_ORIENTATION = 'NORMAL'
+
 # Gerçek kamera kaynağı — yalnızca backend: real modunda kullanılır.
 # Gazebo / HIL modunda bu değer okunmaz.
 # 0 = ilk USB kamera, "/dev/video0" veya RTSP URL de olabilir.

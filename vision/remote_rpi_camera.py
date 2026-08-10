@@ -71,6 +71,8 @@ class RemoteRPiCamera:
         self._swap_rb    = bool(swap_rb_channels)
         self._win        = window_name
         self._log        = logger or logging.getLogger(__name__)
+        # orientation: apply a spatial normalization before any detector sees frames
+        self._orientation = 'NORMAL'
 
         self._lock       = threading.Lock()
         self._frame: Optional[np.ndarray] = None
@@ -88,9 +90,10 @@ class RemoteRPiCamera:
         self._thread.start()
         self._log.info(
             "RemoteRPiCamera başlatıldı (HIL) — hedef %s:%d, arka thread RX, "
-            "swap_rb_channels=%s",
+            "swap_rb_channels=%s, orientation=%s",
             self._host, self._port,
             "True (B↔R TAKASLI)" if self._swap_rb else "False (doğrudan)",
+            self._orientation,
         )
 
     # ── Alıcı döngü ─────────────────────────────────────────────────────── #
@@ -145,6 +148,13 @@ class RemoteRPiCamera:
                 # İkinci emniyet katmanı: Client tarafı swap_rb_channels
                 if self._swap_rb:
                     frame = frame[:, :, ::-1].copy()
+
+                # Orientation düzeltmesini uygula (pipeline başında)
+                try:
+                    from vision.camera_utils import apply_camera_orientation
+                    frame = apply_camera_orientation(frame, self._orientation)
+                except Exception:
+                    pass
 
                 # ── 4) Yayınla (thread-safe) ─────────────────────────────
                 with self._lock:

@@ -1,4 +1,18 @@
+# ── Ortak (Ubuntu + Raspberry Pi 5) ──────────────────────────────────────────
 numpy>=1.26
 opencv-python>=4.9
 pymavlink>=2.4.41
+PyYAML>=6.0
+
+# ── Test ─────────────────────────────────────────────────────────────────────
 pytest>=8.0
+
+# ── Raspberry Pi 5 donanımı (yalnızca ARM platformlarında kurulur) ───────────
+# lgpio — stepper/mıknatıs GPIO (payload/hardware/*). Ubuntu x86_64'te kurulmaz;
+# eksikse sürücüler otomatik stub modda çalışır.
+lgpio>=0.2.2; sys_platform == "linux" and platform_machine in ("aarch64", "armv7l", "armv6l")
+
+# ── Raspberry Pi Camera Module 3 (CSI) — NOT: pip paketi DEĞİLDİR ────────────
+# picamera2, Raspbian OS (Bookworm+) sistem paketi olarak gelir:
+#   sudo apt install python3-picamera2
+# Eksikse vision/rpi_camera.py otomatik stub modda çalışır.

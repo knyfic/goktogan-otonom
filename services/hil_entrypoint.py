@@ -1,27 +1,22 @@
 """
-Raspberry Pi 5 — Payload + Kamera Servisleri Ana Giriş Noktası.
+Raspberry Pi 5 — HIL Payload + Kamera Servisleri Giriş Noktası.
 
-Çalıştırma:
-  cd raspberry-pi-5/
-  python main.py
+Bu script, eski raspberry-pi-5/main.py'nin yerini alır ve TEK config dosyasından
+(payload/config.yaml) okur. HİÇBİR donanım implementasyonu içermez — hepsi ortak
+kaynaklardan gelir:
 
-Gereksinimler (Payload):
-  pip install lgpio PyYAML
-
-Gereksinimler (Kamera — HIL testi için GERÇEK RPi Camera Module 3):
-  apt install python3-picamera2   # Raspbian'da ön kurulu gelir, yoksa bu komut
-  Kamera: CAM / DISP port 0 (CSI 0) — config/payload.yaml camera_server.camera_num
+  payload/backends/local_rpi.py   (TEK gerçek payload backend — REAL ile aynı)
+  payload/hardware/*              (TEK donanım sürücüleri — REAL ile aynı)
+  vision/rpi_camera.py            (TEK gerçek kamera — REAL ile aynı)
 
 Servisler:
   • TCP 5700: Payload komut servisi (Ubuntu → RPi GPIO)
-  • TCP 5701: Kamera akış servisi   (Ubuntu mission → RPi Camera Module 3 JPEG akışı)
-    camera_server.enable: false ise bu servis başlatılmaz (eski HIL uyumluluğu)
+  • TCP 5701: Kamera akış servisi   (Ubuntu mission → RPi Camera Module 3 JPEG)
+    camera_server.enable: false ise kamera servisi başlatılmaz.
 
-MİMARİ NOT (tek source of truth):
-  Payload donanım kodu artık bu klasörde DEĞİL:
-    payload/backends/local_rpi.py   (TEK gerçek backend — REAL ile aynı)
-    payload/hardware/*              (TEK donanım sürücüleri — REAL ile aynı)
-  Bu script yalnızca HIL sunucularını başlatır.
+Çalıştırma (Raspberry Pi'de, repo kökünden):
+  python -m services.hil_entrypoint
+  # veya: bash raspberry-pi-5/run_hil_server.sh
 """
 from __future__ import annotations
 
@@ -33,9 +28,11 @@ from pathlib import Path
 
 import yaml
 
-# Proje kökünü sys.path'e ekle (payload.* ve services.* için)
+# Doğrudan `python services/hil_entrypoint.py` çalıştırılırsa da repo kökü
+# sys.path'te olsun (normal kullanım: `python -m services.hil_entrypoint`).
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(_REPO_ROOT))
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 from payload.backends.local_rpi import LocalRPiBackend
 from services.camera_server import CameraTCPServer
@@ -48,11 +45,11 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
 )
-logger = logging.getLogger("payload_service")
+logger = logging.getLogger("hil_service")
 
 
 def main() -> int:
-    config_path = Path(__file__).parent / "config" / "payload.yaml"
+    config_path = _REPO_ROOT / "payload" / "config.yaml"
     logger.info("Konfigürasyon: %s", config_path)
 
     cfg = yaml.safe_load(config_path.read_text())

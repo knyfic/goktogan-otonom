@@ -1,0 +1,21 @@
+# İHA HIL Payload + Kamera Servisi (Raspberry Pi 5)
+# Kurulum:
+#   sudo cp deploy/iha-payload.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now iha-payload
+#
+# Not: WorkingDirectory, repo'nun Pi üzerindeki yoluna göre düzenlenmeli.
+
+[Unit]
+Description=İHA HIL Payload + Kamera TCP Servisi
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/iha
+ExecStart=/usr/bin/python3 -m services.hil_entrypoint
+Restart=always
+RestartSec=3
+User=pi
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,7 @@
-# Payload sistemi konfigürasyonu
-# Bu dosya Ubuntu (mission) tarafı için referans alınır.
-# Raspberry Pi tarafında raspberry-pi-5/config/payload.yaml kullanılır.
+# Payload sistemi konfigürasyonu — TEK config (Ubuntu + Raspberry Pi 5)
+# Bu dosya hem Ubuntu (mission) hem Raspberry Pi (HIL sunucu / REAL) tarafı
+# tarafından kullanılır. Eski ayrı raspberry-pi-5/config/payload.yaml buna
+# birleştirildi (server + camera_server bölümleri).
 
 # ── Backend seçimi ──────────────────────────────────────────────────────────
 # Bu değeri değiştirerek hangi donanımın kullanılacağını belirle.
@@ -10,6 +11,30 @@
 #   hil         → RemoteRPiBackend   (Ubuntu → Wi-Fi → Raspberry Pi)
 #   real        → LocalRPiBackend    (Raspberry Pi üzerinde, doğrudan GPIO)
 backend: hil
+
+# ── HIL sunucu (yalnızca Raspberry Pi'de services/hil_entrypoint.py okur) ────
+# Ubuntu tarafı bu bölümü OKUMAZ. RPi'de payload TCP (5700) + kamera TCP (5701)
+# sunucularının ayarlarıdır.
+server:
+  host: 0.0.0.0
+  port: 5700
+  max_connections: 1   # Aynı anda yalnızca bir kontrol kaynağı (dokümantasyon)
+
+camera_server:
+  enable: true            # false → kamera servisini başlatma
+  host: 0.0.0.0
+  port: 5701              # Payload TCP (5700) yanında ikinci port
+  camera_num: 0           # 0 = CAM0 (CSI port 0)
+  width: 1920             # CAMERA_WIDTH_PX ile tutarlı
+  height: 1080            # CAMERA_HEIGHT_PX ile tutarlı
+  fps: 30                 # Hedef FPS (RPi Cam 3 1080p30 rahat destekler)
+  jpeg_quality: 80        # 1-100 — daha yüksek: daha net, daha fazla bant genişliği
+  # ⚠ IMX708 + libcamera BILINEN SORUNU:
+  #   swap_rb_channels — renkler (mavi ↔ kırmızı) ters ise TRUE yap.
+  #   Renkler TERS İSE = true, DÜZ İSE = false.
+  swap_rb_channels: true
+  # Kamera montaj yönü düzeltmesi: 'NORMAL' | 'ROTATE_90' | 'ROTATE_180' | 'ROTATE_270' | 'FLIP_H' | 'FLIP_V'
+  orientation: 'ROTATE_180'
 
 # ── Kamera notu ─────────────────────────────────────────────────────────────
 # Kamera çözünürlüğü ve FOV config.py içinde tanımlıdır:

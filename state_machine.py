@@ -57,6 +57,8 @@ from config import (
     PAYLOAD_SERVO_WAIT_S,
     PAYLOAD_VERIFY_ALTITUDE,
     PAYLOAD_WIDTH,
+    PREVIEW_DISPLAY_WIDTH_PX,
+    RTL_PREVIEW_HZ,
     SCAN_LINE_SPACING,
     SEARCH_MARGIN,
     SEARCH_SPEED_MPS,
@@ -318,19 +320,35 @@ class MissionStateMachine:
         Hiçbir state handler doğrudan camera.show() çağırmaz.
         """
         if self._pending_display is not None:
-            disp = self._pending_display
+            disp = self._scale_for_display(self._pending_display)
         else:
             frame = self.camera.latest()
             if frame is None:
                 self.camera.pump()
                 return
-            disp = self._base_overlay(frame)
+            # Önce küçült, sonra HUD çiz — imshow + çizim maliyeti ~4x düşer.
+            disp = self._base_overlay(self._scale_for_display(frame))
 
         # Timeout banner — timeout olunca her frame'de göster
         if self._mission_timeout_triggered:
             disp = self._draw_timeout_banner(disp)
 
         self.camera.show(disp)
+
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _scale_for_display(frame: np.ndarray) -> np.ndarray:
+        """
+        Yalnızca PENCERE gösterimi için frame'i küçültür.
+        Görüntü işleme/tespit TAM çözünürlükte yapılır — bu fonksiyon
+        yalnızca gösterim yolunda çağrılır, hiçbir detektörü etkilemez.
+        """
+        h, w = frame.shape[:2]
+        if w <= PREVIEW_DISPLAY_WIDTH_PX:
+            return frame
+        nw = PREVIEW_DISPLAY_WIDTH_PX
+        nh = max(1, int(round(h * nw / w)))
+        return cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -570,7 +588,9 @@ class MissionStateMachine:
             self._pending_display = None
             frame = self.camera.latest()
             if frame is not None:
-                self._pending_display = self._base_overlay(frame)
+                self._pending_display = self._base_overlay(
+                    self._scale_for_display(frame)
+                )
             self._pump_preview()
             time.sleep(0.1)
         else:
@@ -1095,7 +1115,9 @@ class MissionStateMachine:
             self._pending_display = None
             frame = self.camera.latest()
             if frame is not None:
-                self._pending_display = self._base_overlay(frame)
+                self._pending_display = self._base_overlay(
+                    self._scale_for_display(frame)
+                )
             self._pump_preview()
             if dist < 3.0:
                 break
@@ -2029,15 +2051,18 @@ class MissionStateMachine:
         arrival_deadline = time.monotonic() + 300.0  # 5 dakika
         arrived = False
         last_preview_t = 0.0
-        preview_interval = 0.25  # throttle preview to 4 Hz to reduce CPU/GPU load
+        preview_interval = 1.0 / RTL_PREVIEW_HZ  # akıcı ama ucuz (küçültülmüş gösterim)
         while time.monotonic() < arrival_deadline:
-            # Preview only at limited rate to avoid stuttering
+            # Önizlemeyi RTL_PREVIEW_HZ hızında tazele
             now = time.monotonic()
             if now - last_preview_t >= preview_interval:
                 self._pending_display = None
                 frame = self.camera.latest()
                 if frame is not None:
-                    self._pending_display = self._base_overlay(frame)
+                    # Gösterim için önce küçült → HUD çizimi + imshow ucuz kalır
+                    self._pending_display = self._base_overlay(
+                        self._scale_for_display(frame)
+                    )
                 self._pump_preview()
                 last_preview_t = now
 
@@ -2050,7 +2075,7 @@ class MissionStateMachine:
                 arrived = True
                 self.log.info("RTL: home'a ulaşıldı (%.2fm). Disarm bekleniyor.", pos.relative_altitude)
                 break
-            time.sleep(0.2)
+            time.sleep(0.02)  # kısa uyku — önizleme hızını nicemlemez
 
         if not arrived:
             self.log.error("RTL arrival timeout (home'a ulaşılmadı). Görev COMPLETE'a geçiliyor.")
@@ -2073,7 +2098,9 @@ class MissionStateMachine:
                     self._pending_display = None
                     frame = self.camera.latest()
                     if frame is not None:
-                        self._pending_display = self._base_overlay(frame)
+                        self._pending_display = self._base_overlay(
+                            self._scale_for_display(frame)
+                        )
                     self._pump_preview()
                     last_preview_t = now
 
@@ -2088,7 +2115,7 @@ class MissionStateMachine:
                     self._goto(MissionState.COMPLETE)
                     return
 
-                time.sleep(0.5)
+                time.sleep(0.02)
 
             # Timeout — disarm gerçekleşmedi
             self.log.error("RTL disarm bekleme timeout. COMPLETE'a geçiliyor.")

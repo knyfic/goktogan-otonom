@@ -170,6 +170,16 @@ TARGET_LOCK_DURATION_S = 1.0
 ENABLE_LIVE_PREVIEW = True
 PREVIEW_WINDOW_NAME = "İHA Kamera"
 
+# Canlı önizleme penceresi gösterim genişliği (piksel).
+# Görüntü işleme TAM çözünürlükte (1920×1080) yapılır; YALNIZCA pencere
+# gösterimi bu genişliğe küçültülür → imshow/HUD maliyeti ~4x azalır.
+PREVIEW_DISPLAY_WIDTH_PX = 960
+
+# RTL sırasında önizleme güncelleme hızı (Hz).
+# 4 Hz çok seyrek (pencere takılıyor); 15 Hz akıcı ve küçültülmüş
+# gösterimle CPU/GPU için ucuzdur.
+RTL_PREVIEW_HZ = 15.0
+
 CONTROL_RATE_HZ = 10.0
 CAMERA_TIMEOUT = 3.0
 STATE_TIMEOUT = 120.0

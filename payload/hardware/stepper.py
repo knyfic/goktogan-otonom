@@ -261,7 +261,7 @@ class DRV8834:
     def estimate_duration_s(self, steps: int) -> float:
         """
         Belirtilen adım sayısı için tahmini hareket süresi (saniye).
-        local_backend.py tarafından stepper_duration hesabında kullanılır.
+        local_rpi.py tarafından stepper_duration hesabında kullanılır.
         """
         avg_us = (self._start_us + self._target_us) / 2.0
         return steps * (avg_us + _STEP_HIGH_US) * 1e-6

@@ -21,7 +21,7 @@ Backend seçimi: payload/config.yaml → main.py → bu sınıfa inject edilir.
 Geçiş özeti:
   Simulation → SimulationBackend
   HIL        → RemoteRPiBackend
-  Gerçek     → LocalRPiBackend (raspberry-pi-5/ içinde)
+  Gerçek     → LocalRPiBackend (payload/backends/local_rpi.py — TEK gerçek backend)
 """
 from __future__ import annotations
 

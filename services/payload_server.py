@@ -1,8 +1,12 @@
 """
 TCP Payload Servisi — Ubuntu'dan gelen komutları dinler.
 
+Bu dosya, eski raspberry-pi-5/payload_service/server.py'nin taşınmış halidir.
+Donanım backend'i DEĞİŞMEDİ: services/payload_dispatcher.py üzerinden
+payload/backends/local_rpi.py (interface tabanlı TEK gerçek backend) kullanılır.
+
 Çalışma şekli:
-  - Raspberry Pi boot'ta main.py tarafından başlatılır.
+  - Raspberry Pi boot'ta services/hil_entrypoint.py tarafından başlatılır.
   - Her bağlantı için ayrı thread açılır (maksimum 1 eşzamanlı istemci).
   - Her istek için bağlantı kurulur ve kapatılır (stateless, simple).
   - Her satır bir JSON komuttur (newline terminated).

@@ -1,8 +1,8 @@
 """
 RemoteRPiBackend — Ubuntu → Wi-Fi/TCP → Raspberry Pi 5 (HIL modu).
 
-Ubuntu'daki payload.pickup() çağrısını Raspberry Pi'deki payload_service'e iletir.
-Raspberry Pi lokal GPIO'sunu çalıştırır.
+Ubuntu'daki payload.pickup() çağrısını Raspberry Pi'deki payload servisine iletir.
+Raspberry Pi lokal GPIO'sunu çalıştırır (services/payload_dispatcher.py + LocalRPiBackend).
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from payload.models import (
     PayloadSystemStatus,
 )
 
-# Komut adları — raspberry-pi-5/payload_service/dispatcher.py ile eşleşmeli
+# Komut adları — services/payload_dispatcher.py ile eşleşmeli
 CMD_INITIALIZE       = "INITIALIZE"
 CMD_SEND_PICKUP      = "SEND_PICKUP_COMMAND"
 CMD_FINISH_PICKUP    = "FINISH_PICKUP"

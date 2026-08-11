@@ -1,5 +1,9 @@
 """
-Raspberry Pi Camera Module 3 (CSI / CAM0) sarıcı.
+Raspberry Pi Camera Module 3 (CSI / CAM0) sarıcı — TEK gerçek kamera kaynağı.
+
+Bu sınıf, eski raspberry-pi-5/camera_service/camera.py'nin taşınmış halidir.
+HIL Raspberry Pi camera server'ı (services/camera_server.py) ve REAL uygulaması
+(main.py → backend: real) BİREBİR AYNI bu sınıfı kullanır.
 
 Picamera2 (libcamera tabanlı) ile 1920x1080 BGR frame üretir.
 Ubuntu üzerinde test ederken Picamera2 yoksa uyarı verip stub çalışır.
@@ -15,21 +19,29 @@ Ubuntu üzerinde test ederken Picamera2 yoksa uyarı verip stub çalışır.
   Bu yüzden 4 AŞAMALI bir strateji uygularız; hiçbiri çalışmazsa
   constructor parametresinden verilen `swap_rb_channels` ile
   ZORLAMALI kanal takası yapılır (IMX708 için default=True).
+
+STATE MACHINE ARRAYÜZÜ: latest / show / pump / close_preview
+  GazeboCamera / RemoteRPiCamera ile aynı — görüntü işleme kodu değişmez.
 """
 from __future__ import annotations
 
 import logging
 import threading
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import cv2
 import numpy as np
 
-try:
+if TYPE_CHECKING:
     from picamera2 import Picamera2  # type: ignore
     _PICAMERA2_AVAILABLE = True
-except ImportError:
-    _PICAMERA2_AVAILABLE = False
+else:
+    try:
+        from picamera2 import Picamera2  # type: ignore
+        _PICAMERA2_AVAILABLE = True
+    except ImportError:
+        _PICAMERA2_AVAILABLE = False
+        Picamera2 = None  # type: ignore[assignment]
 
 
 class RPiCam3:
@@ -44,6 +56,8 @@ class RPiCam3:
       swap_rb_channels — None = otomatik strateji sonucu neyse onu kullan
                          True = her halükarda R ↔ B kanallarını takas et (IMX708 default)
                          False = kesinlikle takas yapma (dönüşüm doğru çalışıyorsa)
+      preview          — canlı önizleme penceresi (GazeboCamera ile aynı davranış)
+      window_name      — önizleme penceresi adı
     """
 
     def __init__(
@@ -55,6 +69,8 @@ class RPiCam3:
         swap_rb_channels: Optional[bool] = True,
         logger: logging.Logger | None = None,
         orientation: str = "NORMAL",
+        preview: bool = False,
+        window_name: str = "İHA Kamera",
     ) -> None:
         self._camera_num = camera_num
         self._width      = width
@@ -66,6 +82,8 @@ class RPiCam3:
         self._frame: Optional[np.ndarray] = None
         self._running    = False
         self._picam: Optional[Picamera2] = None
+        self._preview    = bool(preview)
+        self._window_name = window_name
         # Orientation normalization for mounting (e.g. FLIP_H, ROTATE_180, etc.)
         self._orientation = str(orientation).upper() if orientation is not None else 'NORMAL'
 
@@ -82,17 +100,30 @@ class RPiCam3:
                 "picamera2 bulunamadı — RPiCam3 STUB modda. "
                 "Raspberry Pi üzerinde libcamera ve python3-picamera2 kurulmalıdır."
             )
-            return
+        else:
+            self._init_picamera()
 
-        # ══════════════════════════════════════════════════════════════
-        # AŞAMALI FORMAT SEÇİM STRATEJİSİ
-        # ══════════════════════════════════════════════════════════════
+        # Önizleme penceresi — GazeboCamera/RealCamera ile aynı davranış
+        if self._preview:
+            cv2.namedWindow(self._window_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(self._window_name, 1280, 720)
+
+        # Capture thread başlat (yalnızca gerçek donanım modunda)
+        if self._picam is not None:
+            self._running = True
+            self._thread = threading.Thread(target=self._capture_loop, daemon=True)
+            self._thread.start()
+
+    # ── Picamera2 kurulumu (AŞAMALI FORMAT STRATEJİSİ) ──────────────────── #
+    def _init_picamera(self) -> None:
+        """BGR888 → RGB888 → varsayılan format sırasıyla Picamera2'yi kurar."""
+        assert _PICAMERA2_AVAILABLE
 
         # AŞAMA 1 — Doğrudan BGR888 (ideal, dönüşüm maliyeti sıfır)
-        picam = Picamera2(camera_num=camera_num)
+        picam = Picamera2(camera_num=self._camera_num)
         try:
             config = picam.create_video_configuration(
-                main={"size": (width, height), "format": "BGR888"},
+                main={"size": (self._width, self._height), "format": "BGR888"},
             )
             picam.configure(config)
             self._fmt_name = "BGR888"
@@ -107,10 +138,10 @@ class RPiCam3:
 
         # AŞAMA 2 — RGB888 + DONANIM GERÇEKTEN BGR VERİYORSA (cvt yok)
         if self._picam is None:
-            picam = Picamera2(camera_num=camera_num)
+            picam = Picamera2(camera_num=self._camera_num)
             try:
                 config = picam.create_video_configuration(
-                    main={"size": (width, height), "format": "RGB888"},
+                    main={"size": (self._width, self._height), "format": "RGB888"},
                 )
                 picam.configure(config)
                 # IMX708 çoğu sürümde RGB888 adı altında BGR baytları gönderir.
@@ -139,10 +170,10 @@ class RPiCam3:
 
         # AŞAMA 3 — Bütün stratejiler başarısız olduysa XRGB8888 gibi geniş format
         if self._picam is None:
-            picam = Picamera2(camera_num=camera_num)
+            picam = Picamera2(camera_num=self._camera_num)
             try:
                 config = picam.create_video_configuration(
-                    main={"size": (width, height)},  # varsayılan format neyse onu kullan
+                    main={"size": (self._width, self._height)},  # varsayılan format neyse onu kullan
                 )
                 picam.configure(config)
                 self._fmt_name = f"DEFAULT({config['main']['format']})"
@@ -165,7 +196,7 @@ class RPiCam3:
             picam_cf = self._picam.camera_configuration
             if picam_cf is not None and "controls" in picam_cf:
                 picam_cf["controls"]["FrameDurationLimits"] = (
-                    int(1e6 / max(fps, 1)), int(1e6 / max(fps, 1))
+                    int(1e6 / max(self._fps, 1)), int(1e6 / max(self._fps, 1))
                 )
         except Exception:
             self._log.debug(
@@ -176,7 +207,7 @@ class RPiCam3:
         self._log.info(
             "RPi Camera Module 3 açıldı (CAM%d) %dx%d@%d — Picamera2/libcamera "
             "fmt=%s  cvt=%s  swap_rb=%s",
-            camera_num, width, height, fps,
+            self._camera_num, self._width, self._height, self._fps,
             self._fmt_name,
             "yok" if self._cvt_code is None
                 else ("COLOR_RGB2BGR" if self._cvt_code == cv2.COLOR_RGB2BGR
@@ -184,11 +215,6 @@ class RPiCam3:
             "ZORLU(True)" if self._forced_swap is True
                 else ("YOK(False)" if self._forced_swap is False else "OTOMATIK"),
         )
-
-        # Capture thread başlat
-        self._running = True
-        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
-        self._thread.start()
 
     # ── Capture loop ─────────────────────────────────────────────────────── #
     def _capture_loop(self) -> None:
@@ -248,6 +274,34 @@ class RPiCam3:
                     return np.zeros((self._height, self._width, 3), dtype=np.uint8)
                 return None
             return self._frame.copy()
+
+    def show(self, frame: np.ndarray) -> None:
+        """
+        Verilen frame'i canlı pencerede gösterir.
+        GazeboCamera ile aynı davranış — yalnızca ana thread'den çağrılır.
+        """
+        if not self._preview:
+            return
+        cv2.imshow(self._window_name, frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            cv2.destroyWindow(self._window_name)
+            self._preview = False
+
+    def pump(self) -> None:
+        """GUI event loop'u besle (waitKey(1)) — GazeboCamera ile aynı."""
+        if self._preview:
+            cv2.waitKey(1)
+
+    def close_preview(self) -> None:
+        """Kamerayı ve önizleme penceresini kapat (state machine kapanışı)."""
+        self.close()
+        if self._preview:
+            try:
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
+            self._preview = False
 
     def close(self) -> None:
         """Kamerayı kapat, thread'i durdur."""

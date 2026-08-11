@@ -84,7 +84,7 @@ from models import (
 )
 from payload.payload_controller import PayloadController
 from search.coverage_planner import LawnmowerPlanner, local_to_gps
-from vision.camera import GazeboCamera
+from vision.camera import CameraLike
 from vision.geometry import CameraModel, expected_payload_pixels
 from vision.payload_detector import PayloadDetector
 from vision.payload_tracker import PayloadTracker
@@ -101,7 +101,7 @@ class MissionStateMachine:
     def __init__(
         self,
         navigation: Navigation,
-        camera: GazeboCamera,
+        camera: CameraLike,
         payload: PayloadController,
         logger: logging.Logger,
     ):

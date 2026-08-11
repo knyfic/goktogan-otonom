@@ -16,6 +16,12 @@ Servisler:
   • TCP 5700: Payload komut servisi (Ubuntu → RPi GPIO)
   • TCP 5701: Kamera akış servisi   (Ubuntu mission → RPi Camera Module 3 JPEG akışı)
     camera_server.enable: false ise bu servis başlatılmaz (eski HIL uyumluluğu)
+
+MİMARİ NOT (tek source of truth):
+  Payload donanım kodu artık bu klasörde DEĞİL:
+    payload/backends/local_rpi.py   (TEK gerçek backend — REAL ile aynı)
+    payload/hardware/*              (TEK donanım sürücüleri — REAL ile aynı)
+  Bu script yalnızca HIL sunucularını başlatır.
 """
 from __future__ import annotations
 
@@ -27,14 +33,15 @@ from pathlib import Path
 
 import yaml
 
-# raspberry-pi-5/ kök dizini sys.path'e ekle
-sys.path.insert(0, str(Path(__file__).parent))
+# Proje kökünü sys.path'e ekle (payload.* ve services.* için)
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
 
-from camera_service.camera import RPiCam3
-from camera_service.server import CameraTCPServer
-from payload_service.dispatcher import CommandDispatcher
-from payload_service.local_backend import LocalRPiBackend
-from payload_service.server import PayloadTCPServer
+from payload.backends.local_rpi import LocalRPiBackend
+from services.camera_server import CameraTCPServer
+from services.payload_dispatcher import CommandDispatcher
+from services.payload_server import PayloadTCPServer
+from vision.rpi_camera import RPiCam3
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -53,14 +60,14 @@ def main() -> int:
     host = server_cfg.get("host", "0.0.0.0")
     port = server_cfg.get("port", 5700)
 
-    # ── Payload Backend ────────────────────────────────────────────────────
+    # ── Payload Backend (TEK KAYNAK: payload/backends/local_rpi.py) ─────────
     backend = LocalRPiBackend.from_config(
         config_path=str(config_path),
         logger=logger,
     )
     res = backend.initialize()
-    if not res.get("success"):
-        logger.error("Backend initialize başarısız: %s", res.get("message"))
+    if not res.success:
+        logger.error("Backend initialize başarısız: %s", res.message)
         return 1
     logger.info("Payload backend hazır.")
 

@@ -1,10 +1,15 @@
 """
 Raspberry Pi 5 Kamera TCP Akış Sunucusu.
 
-Ubuntu üzerindeki HIL test kodu buraya bağlanır ve Raspberry Pi Camera Module 3'ün
-gerçek JPEG frame'lerini Wi-Fi üzerinden çeker. Görüntü işleme kodunda (state machine,
-target_detector, payload_detector) HİÇBİR DEĞİŞİKLİK YOKTUR — çerçeve formatı (BGR,
-1920x1080) GazeboCamera / RealCamera ile tamamen aynıdır.
+Bu dosya, eski raspberry-pi-5/camera_service/server.py'nin taşınmış halidir.
+Kamera implementasyonu DEĞİŞMEDİ: vision/rpi_camera.py (RPiCam3 — TEK gerçek
+kamera kaynağı, REAL ile birebir aynı kod) kullanılır.
+
+Ubuntu üzerindeki HIL test kodu buraya bağlanır (vision/remote_rpi_camera.py)
+ve Raspberry Pi Camera Module 3'ün gerçek JPEG frame'lerini Wi-Fi üzerinden
+çeker. Görüntü işleme kodunda (state machine, target_detector, payload_detector)
+HİÇBİR DEĞİŞİKLİK YOKTUR — çerçeve formatı (BGR, 1920x1080) GazeboCamera ile
+tamamen aynıdır.
 
 Protokol (tek yönlü — server → client):
   Her frame için:
@@ -24,7 +29,7 @@ import time
 import cv2
 import numpy as np
 
-from .camera import RPiCam3
+from vision.rpi_camera import RPiCam3
 
 # 4B little-endian uint32 paketi
 _LEN_STRUCT = struct.Struct("<I")

@@ -5,7 +5,7 @@ Raspberry Pi tarafında gerçek Raspberry Pi Camera Module 3 (CSI port 0 / CAM0)
 çalışır; JPEG sıkıştırılmış frame'leri TCP üzerinden gönderir.
 
 Bu sınıf Raspberry Pi'deki CameraTCPServer'a bağlanır, akışı çözer ve:
-  - GazeboCamera / RealCamera ile AYNI public API'yi sunar (latest / show / pump / close_preview)
+  - GazeboCamera / RPiCam3 ile AYNI public API'yi sunar (latest / show / pump / close_preview)
   - Frame formatı BGR 1920x1080 → State machine / target_detector / payload_detector
     İÇİN HİÇBİR DEĞİŞİKLİK GEREKMEZ.
 

@@ -127,10 +127,13 @@ CAMERA_VERTICAL_FOV_DEG = 41.0
 # Varsayılan: 'NORMAL'
 CAMERA_ORIENTATION = 'NORMAL'
 
-# Gerçek kamera kaynağı — yalnızca backend: real modunda kullanılır.
-# Gazebo / HIL modunda bu değer okunmaz.
-# 0 = ilk USB kamera, "/dev/video0" veya RTSP URL de olabilir.
-REAL_CAMERA_SOURCE = 0
+# Gerçek kamera — Raspberry Pi Camera Module 3 (CSI), Picamera2 tabanlı.
+# REAL modun TEK gerçek kamera implementasyonu: vision/rpi_camera.py (RPiCam3).
+# Gazebo / HIL modunda bu değerler okunmaz.
+RPI_CAMERA_NUM = 0            # CSI port (0 = CAM0)
+# IMX708 + libcamera BİLİNEN SORUNU: renkler ters ise True (B↔R kanal takası).
+# RPi tarafında renkler düz ise False yapın.
+RPI_CAMERA_SWAP_RB = True
 REAL_CAMERA_FPS    = 30
 
 MIN_TARGET_AREA_PX = 400.0

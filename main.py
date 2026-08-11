@@ -24,7 +24,8 @@ from config import (
     MAVLINK_CONNECTION,
     PREVIEW_WINDOW_NAME,
     REAL_CAMERA_FPS,
-    REAL_CAMERA_SOURCE,
+    RPI_CAMERA_NUM,
+    RPI_CAMERA_SWAP_RB,
 )
 from flight.navigation import Navigation
 from payload.payload_controller import PayloadController
@@ -52,7 +53,7 @@ def _build_camera(mode: str, cfg: dict, logger):
       hil + hil_camera=gazebo     → GazeboCamera (geleneksel HIL)
       hil + hil_camera=remote_rpi → RemoteRPiCamera (GERÇEK RPi Camera Module 3,
                                    Wi-Fi/TCP üzerinden — mekanik hala Gazebo)
-      real                   → RealCamera    (yerel USB/CSI kamera)
+      real                   → RPiCam3   (vision/rpi_camera.py — CSI Camera Module 3)
     """
     # ── Simulation — her zaman Gazebo ──────────────────────────────────────
     if mode == "simulation":
@@ -109,13 +110,16 @@ def _build_camera(mode: str, cfg: dict, logger):
         )
 
     # ── Real — Raspberry Pi üzerinde doğrudan donanım ──────────────────────
+    # TEK gerçek kamera implementasyonu: vision/rpi_camera.py (RPiCam3).
+    # HIL kamera sunucusu (services/camera_server.py) ile BİREBİR aynı sınıf.
     if mode == "real":
-        from vision.real_camera import RealCamera
-        return RealCamera(
-            source=REAL_CAMERA_SOURCE,   # config.py'den
-            width=CAMERA_WIDTH_PX,       # config.py'den — FOV ile tutarlı
-            height=CAMERA_HEIGHT_PX,     # config.py'den
-            fps=REAL_CAMERA_FPS,         # config.py'den
+        from vision.rpi_camera import RPiCam3
+        return RPiCam3(
+            camera_num=RPI_CAMERA_NUM,      # CSI port (0 = CAM0)
+            width=CAMERA_WIDTH_PX,          # config.py'den — FOV ile tutarlı
+            height=CAMERA_HEIGHT_PX,        # config.py'den
+            fps=REAL_CAMERA_FPS,            # config.py'den
+            swap_rb_channels=RPI_CAMERA_SWAP_RB,  # IMX708 B↔R kanal takası
             preview=ENABLE_LIVE_PREVIEW,
             window_name=PREVIEW_WINDOW_NAME,
             logger=logger,

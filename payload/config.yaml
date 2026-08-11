@@ -9,7 +9,7 @@
 #   simulation  → SimulationBackend  (Gazebo, GPIO yok)
 #   hil         → RemoteRPiBackend   (Ubuntu → Wi-Fi → Raspberry Pi)
 #   real        → LocalRPiBackend    (Raspberry Pi üzerinde, doğrudan GPIO)
-backend: simulation
+backend: hil
 
 # ── Kamera notu ─────────────────────────────────────────────────────────────
 # Kamera çözünürlüğü ve FOV config.py içinde tanımlıdır:

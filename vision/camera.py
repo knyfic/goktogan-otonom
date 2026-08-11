@@ -1,9 +1,35 @@
 import importlib
 import threading
-from typing import Optional
+from typing import Optional, Protocol, runtime_checkable
 
 import cv2
 import numpy as np
+
+
+@runtime_checkable
+class CameraLike(Protocol):
+    """
+    State machine'in kameralardan beklediği minimum arayüz.
+
+    GazeboCamera, RemoteRPiCamera ve RPiCam3 bu arayüzü sağlar —
+    görüntü işleme / görev kodu hangi kameranın bağlı olduğunu bilmez.
+    """
+
+    def latest(self) -> Optional[np.ndarray]:
+        """Son BGR frame'in kopyasını döndürür (None = henüz frame yok)."""
+        ...
+
+    def show(self, frame: np.ndarray) -> None:
+        """Frame'i canlı pencerede gösterir."""
+        ...
+
+    def pump(self) -> None:
+        """GUI event loop'unu besler (waitKey)."""
+        ...
+
+    def close_preview(self) -> None:
+        """Kamerayı / pencereyi temiz kapatır."""
+        ...
 
 
 class GazeboCamera:

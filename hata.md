@@ -29,19 +29,9 @@ fish: Job 1, 'python3 main.py' terminated by signal SIGSEGV (Address boundary er
 
 **oneri13**: gorev bitince diretk kendi kendine kapanıyor
 
-
-
 **oneri14**: 1 metre irtifada payloadların kapladıgı pixell alanı hesaplanabilir. bu sayede  aktif olarak bir ayırma algoritması gerekmeden direkt olarak ezbere bildigi alana sahip sekli arar ve bu alandan daha fazla veya az alana sahip yanlıs tespitleri kale almaz.
 
-**oneri15**:Hayır surekli hata yapmaya devam ediyorsun yaptıgın tum degisikleri geri aldım. yine en bastan basladık. tekrar algoritmanın ve yazılım yapması gereken seyi seyi ve hangi sorunu cozdugunu anlatıyorum.
-payload search adımı geldigi zaman eyer kamera aynı anda iki adet aranan renkten obje gorurse ikisininde payload oldugunu dusunuyor ve ne yapacagı konusunda kararsız kalıyor. ornegin hedeflerin cok yakın oldugu bir senaryoda payload ile diğer hedef in rengi aynı olacagı olacagı için hedefi payload sanabilir. bu durumu engellemek icin su sekilde bir algoritma gelistirilmeli.
-payload search basladıktan sonra eger gorntu isleme birden fazla payload tespit ederse bu tespit etmis oldugu payloadlardan hangisi aktif olarak daha az pixel sayısına sahipse yani daha kucukse ona yonelmeli. ardından bu dogru bir sekilde kucuk olan yani gercek olan payloada dogru yonelirken irtifası 1 metreye ulastıgında bu karar vermis oldugu payload ın ekranda ne kadarlık bir alan kapladıgını hesaplamalı ve kaydetmeli. diyer adımda yani payloadı alıp almadıgını kontrol ederkende 1 metre irtifaya cıktıgı icin yine tespit ettigi bu payload ın alanını zaten biliyor olacak. eger yine bir payload oldugunu dusundugu bir sey tespit eder fakat bu tespit ettigi seyin alanı eklenen hata paylı haleden bile daha az veya daha buyukse bunun payload olmadıgı anlısılır ve payload ı basarıılı bir sekilde almıs oldugunu anlar.
-
 **oneri17**: gornut ortalandıkan sonra 2m irtfada direkt yuku bırakmasına gerek yok goruntu islmeyi kapatıp irtifasını 1 metreye dusuru ortalanmıs kkonumdan daha sonra yuku bırakır. bu sekilde daha saglıklı
-
-
-
-**oneri18**: 1m metre yukselip payload ı alıp almadıgnı kontrol ettigi kısımda hata yapıyor payload yerde olmasına ragmen kendisnin payload ı almıs oldugunu sanıyor kodun bu kısmında bir hata var. 
 
 **oneri19**: payload ı validaet etmesi icinde bir timeout olabilir diretk bulamazsa evet aldım dememeemli belki goruntu isleme anlık olarak bir aksaklıga ugramıs olabilir
 

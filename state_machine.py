@@ -37,8 +37,6 @@ from config import (
     FIELD_WIDTH,
     ALIGNMENT_DESCENT_STEP_M,
     CAMERA_TO_MECHANISM_OFFSET_M,
-    FINAL_TARGET_ALTITUDE,
-    GPS_CANDIDATE_MIN_COUNT,
     MISSION_TIMEOUT_S,
     MAX_PICKUP_ATTEMPTS,
     MAX_PAYLOAD_SIZE_FACTOR,
@@ -58,12 +56,16 @@ from config import (
     PAYLOAD_VERIFY_ALTITUDE,
     PAYLOAD_WIDTH,
     PREVIEW_DISPLAY_WIDTH_PX,
+    RTL_ARRIVAL_TIMEOUT_S,
+    RTL_DISARM_TIMEOUT_S,
     RTL_PREVIEW_HZ,
     SCAN_LINE_SPACING,
     SEARCH_MARGIN,
     SEARCH_SPEED_MPS,
+    STATE_TIMEOUT,
     TARGET_APPROACH_ALTITUDE,
     TAKEOFF_ALTITUDE,
+    TAKEOFF_TIMEOUT,
     VERIFY_ALT_TOLERANCE,
     VERIFY_STABILIZE_S,
     VERIFY_BAND_LOW,
@@ -608,7 +610,7 @@ class MissionStateMachine:
     # ------------------------------------------------------------------ #
     def _do_takeoff(self) -> None:
         self.nav.takeoff(TAKEOFF_ALTITUDE)
-        deadline = time.monotonic() + 45.0
+        deadline = time.monotonic() + TAKEOFF_TIMEOUT
         while time.monotonic() < deadline:
             pos = self.nav.position()
             if abs(pos.relative_altitude - TAKEOFF_ALTITUDE) <= 0.4:
@@ -1135,7 +1137,7 @@ class MissionStateMachine:
             self.nav.goto_global(target.latitude, target.longitude, pos_now.relative_altitude)
 
         # Non-blocking bekleme ile hedefe ulaşınca merkezleme başlat
-        nav_deadline = time.monotonic() + 120.0
+        nav_deadline = time.monotonic() + STATE_TIMEOUT
         while time.monotonic() < nav_deadline:
             pos = self.nav.position()
             dist = haversine_m(pos.latitude, pos.longitude,
@@ -2076,7 +2078,7 @@ class MissionStateMachine:
 
     def _do_wait_rtl(self) -> None:
         # 1) Önce aracı home'a getirmek için makul bir süre bekle
-        arrival_deadline = time.monotonic() + 300.0  # 5 dakika
+        arrival_deadline = time.monotonic() + RTL_ARRIVAL_TIMEOUT_S  # home'a varış (5 dk)
         arrived = False
         last_preview_t = 0.0
         preview_interval = 1.0 / RTL_PREVIEW_HZ  # akıcı ama ucuz (küçültülmüş gösterim)
@@ -2111,7 +2113,7 @@ class MissionStateMachine:
             return
 
         # 2) Home'a ulaşıldı — şimdi motorların disarm olmasını bekle
-        disarm_deadline = time.monotonic() + 300.0  # ek 5 dakika
+        disarm_deadline = time.monotonic() + RTL_DISARM_TIMEOUT_S  # ek 5 dakika
         try:
             master = getattr(self.nav, 'master', None)
             if master is None:

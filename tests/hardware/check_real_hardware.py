@@ -105,19 +105,23 @@ def _check_camera() -> bool:
 
     from config import (
         CAMERA_HEIGHT_PX,
-        CAMERA_ORIENTATION,
         CAMERA_WIDTH_PX,
         REAL_CAMERA_FPS,
         RPI_CAMERA_NUM,
     )
     from vision.rpi_camera import RPiCam3
 
+    # Yön döndürmenin TEK kaynağı: payload/config.yaml → camera.orientation
+    # (HIL sunucu + REAL ortak — fiziksel montaj). Bölüm yoksa NORMAL fallback.
+    cam_cfg = hw.load_payload_config().get("camera", {}) or {}
+    orientation = str(cam_cfg.get("orientation", "NORMAL"))
+
     cam = RPiCam3(
         camera_num=RPI_CAMERA_NUM,
         width=CAMERA_WIDTH_PX,
         height=CAMERA_HEIGHT_PX,
         fps=REAL_CAMERA_FPS,
-        orientation=CAMERA_ORIENTATION,
+        orientation=orientation,
     )
     try:
         if cam.is_stub:

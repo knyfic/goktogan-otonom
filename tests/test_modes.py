@@ -64,7 +64,14 @@ def test_merged_config_has_hil_server_sections():
     assert cfg["server"]["port"] == 5700
     assert cfg["camera_server"]["enable"] is True
     assert cfg["camera_server"]["port"] == 5701
-    assert "orientation" in cfg["camera_server"]
+
+    # Gerçek kamera donanımı TEK kaynak: camera bölümü (HIL sunucu + REAL ortak)
+    # Çözünürlük/FPS config.py'de; orientation/jpeg_quality burada.
+    assert cfg["camera"]["orientation"] == "ROTATE_180"
+    assert "jpeg_quality" in cfg["camera"]
+    # camera_server artık yalnızca TCP sunucu ayarları içerir
+    assert "width" not in cfg["camera_server"]
+    assert "orientation" not in cfg["camera_server"]
 
     # HIL kamera seçimi (Ubuntu tarafı) hâlâ duruyor
     assert cfg.get("hil_camera") in ("gazebo", "remote_rpi")

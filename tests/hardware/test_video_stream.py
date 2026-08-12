@@ -113,7 +113,6 @@ def run_stream(
 ) -> tuple[bool, dict]:
     from config import (
         CAMERA_HEIGHT_PX,
-        CAMERA_ORIENTATION,
         CAMERA_WIDTH_PX,
         REAL_CAMERA_FPS,
         RPI_CAMERA_NUM,
@@ -122,6 +121,11 @@ def run_stream(
     from vision.rpi_camera import RPiCam3
 
     log = logger or _log
+    # Yön döndürmenin TEK kaynağı: payload/config.yaml → camera.orientation
+    # (HIL sunucu + REAL ortak — fiziksel montaj). Bölüm yoksa NORMAL fallback.
+    cam_cfg = hw.load_payload_config().get("camera", {}) or {}
+    orientation = str(cam_cfg.get("orientation", "NORMAL"))
+
     receiver: _LoopbackReceiver | None = None
     if loopback:
         receiver = _LoopbackReceiver(port, logger=log)
@@ -133,7 +137,7 @@ def run_stream(
         width=CAMERA_WIDTH_PX,
         height=CAMERA_HEIGHT_PX,
         fps=REAL_CAMERA_FPS,
-        orientation=CAMERA_ORIENTATION,
+        orientation=orientation,
         logger=log,
     )
     if cam.is_stub:

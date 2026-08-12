@@ -20,23 +20,21 @@ server:
   port: 5700
 
 camera_server:
-  enable: true            # false → kamera servisini başlatma
+  enable: true            # false → kamera servisini başlatma (yalnızca HIL)
   host: 0.0.0.0
   port: 5701              # Payload TCP (5700) yanında ikinci port
-  camera_num: 0           # 0 = CAM0 (CSI port 0)
-  width: 1920             # CAMERA_WIDTH_PX ile tutarlı
-  height: 1080            # CAMERA_HEIGHT_PX ile tutarlı
-  fps: 30                 # Hedef FPS (RPi Cam 3 1080p30 rahat destekler)
-  jpeg_quality: 80        # 1-100 — daha yüksek: daha net, daha fazla bant genişliği
-  # Kamera montaj yönü düzeltmesi: 'NORMAL' | 'ROTATE_90' | 'ROTATE_180' | 'ROTATE_270' | 'FLIP_H' | 'FLIP_V'
-  orientation: 'ROTATE_180'
 
-# ── Kamera notu ─────────────────────────────────────────────────────────────
-# Kamera çözünürlüğü ve FOV config.py içinde tanımlıdır:
-#   CAMERA_WIDTH_PX, CAMERA_HEIGHT_PX, CAMERA_HORIZONTAL_FOV_DEG, CAMERA_VERTICAL_FOV_DEG
-# Gerçek kamera kaynağı (USB index/device path) ve FPS de config.py'de:
-#   REAL_CAMERA_SOURCE, REAL_CAMERA_FPS
-# Bu değerleri burada tekrar tanımlamak gereksiz çoğalmaya yol açar.
+# ── Gerçek RPi Camera Module 3 (TEK fiziksel kamera — HIL sunucu + REAL ortak) ─
+# Çözünürlük/FPS/FOV geometriye bağlıdır ve TEK kaynak config.py'dir:
+#   CAMERA_WIDTH_PX, CAMERA_HEIGHT_PX, CAMERA_HORIZONTAL_FOV_DEG,
+#   CAMERA_VERTICAL_FOV_DEG, REAL_CAMERA_FPS, RPI_CAMERA_NUM
+# Burada yalnızca donanım montajı parametreleri tanımlıdır (tekrar yok).
+camera:
+  # Kamera montaj yönü — HIL (RPi sunucu, hil_entrypoint) ve REAL (main.py)
+  # AYNI değeri okur. Gerçek donanımda doğrulanan değer: 'ROTATE_180'.
+  # SIM/Gazebo kamerası farklıdır ve config.py → CAMERA_ORIENTATION kullanır.
+  orientation: 'ROTATE_180'
+  jpeg_quality: 80        # 1-100 — HIL JPEG kalitesi (Wi-Fi bant genişliği)
 
 # ── Remote backend (HIL modu) ───────────────────────────────────────────────
 # backend: hil seçildiğinde bu blok okunur.
@@ -57,6 +55,11 @@ hil_camera: remote_rpi
 remote_camera:
   port: 5701           # RPi camera_server portu (payload 5700 yanında)
   # IP: payload ile aynı Raspberry Pi olduğundan remote.host kullanılır (TEK kaynak).
+  # HIL client (Ubuntu) TCP timeout'ları — RemoteRPiCamera'ya iletilir
+  # (vision/remote_rpi_camera.py parametreleri; config'te yoksa kod default'ları geçerli).
+  connect_timeout_s: 3.0
+  read_timeout_s: 2.0
+  reconnect_wait_s: 1.0
 
 # ── Stepper motor ───────────────────────────────────────────────────────────
 stepper:

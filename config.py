@@ -1,5 +1,3 @@
-from dataclasses import dataclass
-
 # Simulation/HIL MAVLink adresi (Ubuntu → Gazebo/SITL UDP).
 # REAL modda bu değer KULLANILMAZ — bağlantı payload/config.yaml →
 # flight_controller.connection'dan gelir (Cube Orange TELEM2 serial).
@@ -125,15 +123,20 @@ CAMERA_HORIZONTAL_FOV_DEG = 66.0
 # 4:3 sensörde eski değer 60° idi; 16:9'a geçince V-FOV düşer.
 CAMERA_VERTICAL_FOV_DEG = 41.0
 
-# Kamera montaj orientation — görüntüyü pipeline başında normalize etmek için kullanın.
+# Kamera montaj orientation — YALNIZCA GAZEBO/SIM kamerası içindir.
+# Gerçek RPi Camera Module 3'ün montaj yönü payload/config.yaml → camera.orientation
+# altındadır (TEK kaynak — HIL sunucu + REAL ortak; fiziksel kamera ROTATE_180).
 # Geçerli değerler: 'NORMAL', 'ROTATE_90', 'ROTATE_180', 'ROTATE_270', 'FLIP_H', 'FLIP_V'
-# Varsayılan: 'NORMAL'
+# Varsayılan: 'NORMAL' (simülasyon/Gazebo)
 CAMERA_ORIENTATION = 'NORMAL'
 
 # Gerçek kamera — Raspberry Pi Camera Module 3 (CSI), Picamera2 tabanlı.
 # REAL modun TEK gerçek kamera implementasyonu: vision/rpi_camera.py (RPiCam3).
 # Gazebo / HIL modunda bu değerler okunmaz.
 # B↔R kanal takası RPiCam3 içinde SABİT uygulanır (IMX708 — config değil).
+# Kamera çözünürlük/FPS/FOV geometriye bağlıdır ve TEK kaynak burasıdır;
+# payload/config.yaml → camera bölümü yalnızca donanım montajı içerir
+# (orientation, jpeg_quality) — burada tekrar tanımlanmaz.
 RPI_CAMERA_NUM = 0            # CSI port (0 = CAM0)
 REAL_CAMERA_FPS    = 30
 
@@ -192,11 +195,14 @@ PREVIEW_DISPLAY_WIDTH_PX = 960
 # gösterimle CPU/GPU için ucuzdur.
 RTL_PREVIEW_HZ = 15.0
 
-CONTROL_RATE_HZ = 10.0
-CAMERA_TIMEOUT = 3.0
+# Tek bir state işlemi için genel zaman aşımı (state_machine —
+# örn. ilk hedefe navigasyon beklemesi)
 STATE_TIMEOUT = 120.0
+# Kalkış irtifasına ulaşma zaman aşımı (state_machine _do_takeoff)
 TAKEOFF_TIMEOUT = 45.0
-RTL_TIMEOUT = 120.0
+# RTL: home'a varış ve disarm bekleme süreleri (state_machine _do_wait_rtl)
+RTL_ARRIVAL_TIMEOUT_S = 300.0   # home'a varış bekleme (5 dk)
+RTL_DISARM_TIMEOUT_S  = 300.0   # disarm bekleme (ek 5 dk)
 
 # Yarışma görevi maksimum süresi (saniye).
 # Kalkış tamamlandığı anda sayaç başlar.

@@ -34,6 +34,13 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from config import (  # noqa: E402 — _REPO_ROOT sys.path insert'inden sonra
+    CAMERA_HEIGHT_PX,
+    CAMERA_ORIENTATION,
+    CAMERA_WIDTH_PX,
+    REAL_CAMERA_FPS,
+    RPI_CAMERA_NUM,
+)
 from payload.backends.local_rpi import LocalRPiBackend
 from services.camera_server import CameraTCPServer
 from services.payload_dispatcher import CommandDispatcher
@@ -75,29 +82,32 @@ def main() -> int:
     )
 
     # ── (İsteğe bağlı) Kamera Servisi (RPi Camera Module 3) ───────────────
-    camera_cfg = cfg.get("camera_server", {})
-    camera_enabled = bool(camera_cfg.get("enable", False))
+    server_cfg = cfg.get("camera_server", {})
+    camera_enabled = bool(server_cfg.get("enable", False))
+    # Gerçek kamera donanımı (TEK kaynak): config.yaml → camera
+    # Çözünürlük/FPS/CSI port config.py'den gelir; orientation/jpeg_quality buradan.
+    cam_cfg = cfg.get("camera", {}) or {}
     rpi_cam: RPiCam3 | None = None
     camera_server: CameraTCPServer | None = None
     camera_thread: threading.Thread | None = None
 
     if camera_enabled:
-        cam_port = int(camera_cfg.get("port", 5701))
-        cam_host = camera_cfg.get("host", "0.0.0.0")
+        cam_port = int(server_cfg.get("port", 5701))
+        cam_host = server_cfg.get("host", "0.0.0.0")
         try:
             rpi_cam = RPiCam3(
-                camera_num=int(camera_cfg.get("camera_num", 0)),
-                width=int(camera_cfg.get("width", 1920)),
-                height=int(camera_cfg.get("height", 1080)),
-                fps=int(camera_cfg.get("fps", 30)),
+                camera_num=RPI_CAMERA_NUM,
+                width=CAMERA_WIDTH_PX,
+                height=CAMERA_HEIGHT_PX,
+                fps=REAL_CAMERA_FPS,
                 logger=logger,
-                orientation=str(camera_cfg.get("orientation", "NORMAL")),
+                orientation=str(cam_cfg.get("orientation", CAMERA_ORIENTATION)),
             )
             camera_server = CameraTCPServer(
                 host=cam_host,
                 port=cam_port,
                 camera=rpi_cam,
-                jpeg_quality=int(camera_cfg.get("jpeg_quality", 80)),
+                jpeg_quality=int(cam_cfg.get("jpeg_quality", 80)),
                 logger=logger,
             )
             camera_thread = threading.Thread(

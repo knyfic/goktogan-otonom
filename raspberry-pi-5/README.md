@@ -37,8 +37,9 @@ Ubuntu üzerinde (aynı repo, ikinci makine):
 python main.py
 ```
 
-> Kamera montaj yönü ters ise `payload/config.yaml → camera_server.orientation`
-> değerini ayarlayın (örn. 'ROTATE_180'). B↔R kanal takası sabittir —
+> Kamera montaj yönü ters ise `payload/config.yaml → camera.orientation`
+> değerini ayarlayın (örn. 'ROTATE_180') — HIL sunucu ve REAL aynı değeri
+> kullanır (TEK kaynak). B↔R kanal takası sabittir —
 > RPiCam3 içinde IMX708 için otomatik uygulanır; ayrıca ayar gerekmez.
 
 ---
@@ -60,6 +61,55 @@ REAL'de **aynen** kullanılır — fark yalnızca giriş noktası (`main.py`),
 MAVLink adresi (`flight_controller.connection`) ve görüntünün GStreamer ile
 ground station'a yayınlanmasıdır (REAL'de yerel GUI/pencere açılmaz).
 
+### REAL CONFIGURATION (tek dosya: `payload/config.yaml`)
+
+```yaml
+backend: real        # simulation | hil | real
+
+# Cube Orange TELEM2 → Raspberry Pi UART
+flight_controller:
+  connection:
+    device: /dev/serial0
+    baudrate: 921600
+  heartbeat_timeout_s: 10.0
+
+# Ground station'a GStreamer yayını
+video_stream:
+  enabled: true
+  host: 192.168.1.100   # ← Ground Station IP (en sık değişen)
+  port: 5000            # ← UDP port (alıcı komutuyla eşleşmeli)
+  codec: h264
+  bitrate: 2000000      # bps
+  fps: 30
+
+# Gerçek RPi Camera Module 3 — TEK fiziksel kamera (HIL + REAL ortak)
+camera:
+  orientation: 'ROTATE_180'   # fiziksel montaj yönü
+  jpeg_quality: 80
+
+# Kamera çözünürlük/FPS/FOV → config.py (geometriyle tutarlı TEK kaynak):
+#   CAMERA_WIDTH_PX, CAMERA_HEIGHT_PX, REAL_CAMERA_FPS, RPI_CAMERA_NUM,
+#   CAMERA_HORIZONTAL_FOV_DEG, CAMERA_VERTICAL_FOV_DEG
+# SIM/Gazebo kamera yönü → config.py → CAMERA_ORIENTATION ('NORMAL')
+```
+
+Değişiklik rehberi:
+
+| Ne değişti? | Nereden? | Parametre |
+|---|---|---|
+| Ground Station IP | `payload/config.yaml` | `video_stream.host` |
+| GStreamer portu | `payload/config.yaml` | `video_stream.port` |
+| Video bitrate / FPS | `payload/config.yaml` | `video_stream.bitrate` / `video_stream.fps` |
+| Cube Orange UART cihazı | `payload/config.yaml` | `flight_controller.connection.device` |
+| UART baudrate | `payload/config.yaml` | `flight_controller.connection.baudrate` |
+| Heartbeat timeout | `payload/config.yaml` | `flight_controller.heartbeat_timeout_s` |
+| Kamera montaj yönü (REAL+HIL) | `payload/config.yaml` | `camera.orientation` |
+| Kamera çözünürlük / FPS / CSI port | `config.py` | `CAMERA_WIDTH_PX` / `CAMERA_HEIGHT_PX` / `REAL_CAMERA_FPS` / `RPI_CAMERA_NUM` |
+| Görev irtifaları / hızlar / timeout'lar | `config.py` | örn. `TAKEOFF_ALTITUDE`, `MISSION_TIMEOUT_S`, `TAKEOFF_TIMEOUT`, `STATE_TIMEOUT`, `RTL_ARRIVAL_TIMEOUT_S` |
+
+> IP/port/device/baudrate Python kodunda HARD-CODE DEĞİLDİR — hepsi
+> `payload/config.yaml`'dan okunur. Aynı mantıksal parametre tek kaynaktadır.
+
 ### UART (Cube Orange TELEM2 ↔ Raspberry Pi)
 
 ```bash
@@ -78,6 +128,8 @@ sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-good \
                  gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
                  python3-gi
 ```
+
+Ground station (Ubuntu PC) alıcı komutu:
 
 Ground station (Ubuntu PC) alıcı komutu:
 

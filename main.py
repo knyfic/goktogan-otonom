@@ -100,10 +100,15 @@ def _build_camera(mode: str, cfg: dict, logger):
             return RemoteRPiCamera(
                 host=host,
                 port=port,
+                connect_timeout_s=float(rc.get("connect_timeout_s", 3.0)),
+                read_timeout_s=float(rc.get("read_timeout_s", 2.0)),
+                reconnect_wait_s=float(rc.get("reconnect_wait_s", 1.0)),
                 preview=ENABLE_LIVE_PREVIEW,
                 window_name=PREVIEW_WINDOW_NAME,
                 logger=logger,
-                orientation=CAMERA_ORIENTATION,
+                # Yön döndürmenin sahibi RPi kamera sunucusudur (config.yaml →
+                # camera.orientation — ROTATE_180). Ubuntu burada TEKRAR döndürmez.
+                orientation="NORMAL",
             )
 
         raise ValueError(
@@ -119,17 +124,23 @@ def _build_camera(mode: str, cfg: dict, logger):
     #   preview=False → cv2.imshow/namedWindow asla çağrılmaz.
     # Görüntü, state machine'in show() akışı üzerinden GStreamer ile ground
     # station'a yayınlanır (services/video_streamer.py → StreamCamera).
+    #
+    # ORIENTATION TEK KAYNAK: payload/config.yaml → camera.orientation
+    # (fiziksel RPi kamera montajı — HIL sunucu ile aynı değer; doğrulanmış
+    # değer 'ROTATE_180'). Bölüm yoksa geriye dönük uyumluluk için
+    # config.py → CAMERA_ORIENTATION kullanılır.
     if mode == "real":
         from vision.rpi_camera import RPiCam3
+        cam_cfg = cfg.get("camera", {}) or {}
         return RPiCam3(
-            camera_num=RPI_CAMERA_NUM,      # CSI port (0 = CAM0)
+            camera_num=RPI_CAMERA_NUM,      # CSI port (0 = CAM0) — config.py TEK kaynak
             width=CAMERA_WIDTH_PX,          # config.py'den — FOV ile tutarlı
             height=CAMERA_HEIGHT_PX,        # config.py'den
             fps=REAL_CAMERA_FPS,            # config.py'den
             preview=False,                  # REAL: headless — yerel pencere YOK
             window_name=PREVIEW_WINDOW_NAME,
             logger=logger,
-            orientation=CAMERA_ORIENTATION,
+            orientation=str(cam_cfg.get("orientation", CAMERA_ORIENTATION)),
         )
 
     raise ValueError(f"Bilinmeyen mod için kamera oluşturulamadı: {mode!r}")

@@ -52,6 +52,7 @@ class Detection:
     bbox_width_px: float
     bbox_height_px: float
     confidence: float
+    color_purity: float = 0.0  # kontur içi baskın renk oranı (0..1)
 
 
 @dataclass

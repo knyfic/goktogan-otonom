@@ -1,3 +1,4 @@
+import logging
 import time
 from collections import Counter, deque
 from typing import Optional
@@ -10,6 +11,7 @@ from config import (
     MIN_DETECTION_CONFIDENCE,
     MIN_STABLE_DETECTIONS,
     MIN_TARGET_AREA_PX,
+    TARGET_DETECTOR_AUTO_SWAP,
     TARGET_LOCK_DURATION_S,
 )
 from models import Detection, TargetColor
@@ -17,6 +19,22 @@ from models import Detection, TargetColor
 
 _KAPAMA_KERNEL_Buyuk = 7
 _KAPAMA_KERNEL_Kucuk = 3
+
+# ── Tespit sağlamlığı sabitleri (algoritma davranışı korunarak sıkılaştırma) ──
+# Kontur içi baskın renk oranı eşiği. Renk maskesinden gelen konturlarda bile
+# gerçek renk iç-bölgeden doğrulanır; altında kalanlar GÜRÜLTÜ sayılır.
+_MIN_COLOR_PURITY = 0.50
+# Gri fallback yolu (renk maskesi yok) için biraz gevşek eşik — kontur içine
+# arka plan sızabilir.
+_FALLBACK_MIN_COLOR_PURITY = 0.40
+# Köşe sayımı tutarlılığı: 3 epsilon'dan en az 2'si aynı köşe sayısını vermeli.
+# [3,5,6] gibi dağınık oylar şekil kabul edilmez.
+_MIN_VERTEX_AGREEMENT = 2
+# Şekle özgü extent (alan/bbox_alan) bantları: üçgen ≈ 0.50, altıgen ≈ 0.75.
+_TRIANGLE_EXTENT = (0.35, 0.70)
+_HEXAGON_EXTENT = (0.55, 0.95)
+# area_score referansı (büyük hedef alanı)
+_AREA_REF_PX = 15000.0
 
 
 class TargetDetector:
@@ -31,15 +49,15 @@ class TargetDetector:
     """
 
     CALIBRATION_FRAMES = 12   # İlk N frame boyunca renk oranı kalibrasyonu yap
-    CALIBRATION_SWAP_RATIO = 4.0  # (kırmızı_piksel / mavi_piksel) veya tersi ≥ bu ise → takas kararı
 
     def __init__(self):
         self.history: deque = deque(maxlen=DETECTION_HISTORY_SIZE)
         self._first_seen: dict[tuple, float] = {}
         self.time_locked_color: Optional[TargetColor] = None
         self.time_locked_shape: Optional[str] = None
+        self._log = logging.getLogger("TargetDetector")
 
-        # ⚠ Defansif otomatik B ↔ R kanal takası (IMX708 sorunu için 3. emniyet katmanı)
+        # ⚠ Defansif otomatik B ↔ R kanal takası (yalnızca TARGET_DETECTOR_AUTO_SWAP=True ise)
         #   None → kalibrasyon devam ediyor
         #   True → sürekli B ↔ R takası uygula
         #   False → takas YOK (kalibrasyon tamamlandı, düzgün)
@@ -54,35 +72,27 @@ class TargetDetector:
         # MAX bant metriği
         self._calib_max_noswap:  int = 0
         self._calib_max_swap:    int = 0
-        # M4: Çapraz Oran metriği için ayrı ayrı bant toplamları
-        self._calib_band_blue_noswap: int = 0
-        self._calib_band_red_noswap:  int = 0
-        self._calib_band_blue_swap:   int = 0
-        self._calib_band_red_swap:    int = 0
 
     # ──────────────────────────────────────────────────────────────
     # DEFANSİF: B ↔ R kanalları takası gerekiyor mu? Otomatik kalibrasyon
     # ──────────────────────────────────────────────────────────────
 
     def _maybe_auto_swap(self, frame_bgr: np.ndarray) -> np.ndarray:
-        """AutoSwap V3 — İlk CALIBRATION_FRAMES frame'de iki hipotezi (takas vs
-        takasız) ÜÇ METRİK ile karşılaştır, KALICI karar ver:
+        """AutoSwap V3 — yalnızca TARGET_DETECTOR_AUTO_SWAP=True iken aktif.
 
-        (M1) SUM metriği  = mavi_piksel + kırmızı_piksel (toplam anlamlı piksel
-        (M2) HOMOJENLİK = max(baskın_bant, min_bant) / (min(bant) + eps
-                            (tek renkli sahnelerde belirleyici)
-        (M3) MAXBANT    = max(mavi_piksel, kırmızı_piksel)
+        Varsayılan KAPALI: kanal takasının sahibi kamera katmanıdır
+        (RPiCam3 / RemoteRPiCamera → swap_rb_channels). Detektör seviyesi
+        kalibrasyon, saf mavi+kırmızı sahnelerde simetrik olduğundan gerçek
+        bir ters kamerayı ayırt edemez ve karışık renkli sahnelerde
+        YANLIŞLIKLA takas açabilir (sistematik renk inversiyonu).
 
-        Her metrik için (SWAP versiyonu / NOSWAP versiyonu) oranları alınır.
-        Karar: 3 metrikten ≥ 2 tanesi SWAP lehinde ≥ 1.35x ÜSTÜNLÜK göstermiyse
-        VEYA herhangi biri ≥ 2.5x AÇIK üstünlük göstermiyorsa — takas AÇILIR.
-
-        Bu metrik üçlüsü:
-          • Tek renkli (sadece mavi altıgen, sadece kırmızı üçgen) testler
-          • Karışık renkli (iki nesneli GERÇEK yarışma sahneleri
-          • Boş / az renkli / loş ışık sahneleri
-        HEPSİNDE doğru karar verir.
+        Bu metrik üçlüsü yalnızca bayrak açıkken güvenlik ağı olarak çalışır:
+        (M1) SUM = mavi+kırmızı piksel, (M2) HOMO = max/min bant,
+        (M3) MAXBANT = max(mavi, kırmızı). Karar: 3 metrikten ≥2'si
+        ≥1.35x SWAP lehinde VEYA biri ≥2.5x açık üstünlük → takas açılır.
         """
+        if not TARGET_DETECTOR_AUTO_SWAP:
+            return frame_bgr
         h, w = frame_bgr.shape[:2]
 
         if self._auto_swap is True:
@@ -147,17 +157,15 @@ class TargetDetector:
 
         self._auto_swap = bool(swap_wins >= 2 or any_clear)
 
-        import logging
-        log = logging.getLogger("TargetDetector")
         if self._auto_swap:
-            log.warning(
+            self._log.warning(
                 "[AutoSwap-V3] ⚠ BAYT SIRASI TERS (RGB/BGR uyumsuz) — KALICI B↔R takası AÇILDI. "
                 "Metrikler (swap/noswap): SUM=%.1fx  HOMO=%.1fx  MAXBANT=%.1fx  "
                 "swap_wins=%d/3  clear_win_2.5x=%s",
                 r_sum, r_homo, r_max, swap_wins, any_clear,
             )
         else:
-            log.info(
+            self._log.info(
                 "[AutoSwap-V3] ✓ Renk kanalları DÜZGÜN — takas YOK. "
                 "Metrikler (swap/noswap): SUM=%.1fx  HOMO=%.1fx  MAXBANT=%.1fx  "
                 "swap_wins=%d/3",
@@ -250,26 +258,34 @@ class TargetDetector:
         return True
 
     @staticmethod
-    def _count_vertices_robust(contour) -> int:
-        """3 farklı epsilon ile approxPolyDP → çoğunluklu (most-common) sonuç.
+    def _count_vertices_robust(contour) -> tuple[int, int]:
+        """3 farklı epsilon ile approxPolyDP → (köşe_sayısı, tutarlılık).
 
-        Tek epsilon (0.035) kullanmak köşe sayımını çok hassas yapıyordu;
-        0.03 / 0.04 / 0.05 çoğunlukluğu gerçek şekle çok daha yakın olur.
+        Tutarlılık = en çok oy alan köşe sayısının oy miktarı (1..3).
+        [6,6,5] → (6, 2): kabul edilebilir. [5,6,7] → (5, 1): dağınık → reddet.
         """
         perimeter = cv2.arcLength(contour, True)
         if perimeter <= 0:
-            return 0
+            return 0, 0
         votes = []
         for eps in (0.03, 0.04, 0.05):
             approx = cv2.approxPolyDP(contour, eps * perimeter, True)
             votes.append(len(approx))
-        return Counter(votes).most_common(1)[0][0]
+        (count, agreement) = Counter(votes).most_common(1)[0]
+        return count, agreement
 
     @staticmethod
-    def _classify_shape(vertices: int) -> Optional[str]:
-        if vertices == 3:
+    def _classify_shape(count: int, agreement: int) -> Optional[str]:
+        """Köşe sayısı + tutarlılıkla şekil sınıflandırması.
+
+        En az _MIN_VERTEX_AGREEMENT oy tutarlılığı zorunludur — dağınık köşe
+        sayıları (örn. [3,5,6]) gürültüdür, şekil kabul edilmez.
+        """
+        if agreement < _MIN_VERTEX_AGREEMENT:
+            return None
+        if count == 3:
             return "TRIANGLE"
-        if 5 <= vertices <= 7:
+        if 5 <= count <= 7:
             return "HEXAGON"
         return None
 
@@ -306,9 +322,13 @@ class TargetDetector:
     # Yardımcı: kontur listesinden tespit çıkarımı
     # ──────────────────────────────────────────────────────────────
 
-    def _detections_from_contours(
-        self, contours, frame_hsv, mask_hint=None, color_override=None
-    ):
+    def _detections_from_contours(self, contours, frame_hsv, purity_min=_MIN_COLOR_PURITY):
+        """Kontur listesinden güvenilir tespitler üretir.
+
+        Renk, konturun İÇİNDEKİ gerçek HSV piksel dağılımından (color purity)
+        belirlenir — maskeden çıktı diye rengi varsaymaz (false positive kaynağı).
+        Şekil; köşe sayısı tutarlılığı + extent (alan/bbox) ile doğrulanır.
+        """
         detections = []
         for contour in contours:
             area = cv2.contourArea(contour)
@@ -316,41 +336,70 @@ class TargetDetector:
                 continue
 
             if not self._is_valid_shape(contour, area):
+                self._log.debug("REJECT: invalid shape (solidity/aspect) area=%.0f", area)
                 continue
 
-            vertices = self._count_vertices_robust(contour)
-            shape = self._classify_shape(vertices)
+            x, y, w, h = cv2.boundingRect(contour)
+            if w <= 2 or h <= 2:
+                continue
+
+            count, agreement = self._count_vertices_robust(contour)
+            shape = self._classify_shape(count, agreement)
             if shape is None:
+                self._log.debug(
+                    "REJECT: unstable vertex count votes=(%d,%d) area=%.0f",
+                    count, agreement, area,
+                )
                 continue
 
-            expected_vertices = 6 if shape == "HEXAGON" else 3
-            shape_score = max(0.0, 1.0 - abs(vertices - expected_vertices) / 4.0)
-            area_score = min(1.0, area / 15000.0)
-
-            if color_override is not None:
-                color = color_override
+            # Şekle özgü extent doğrulaması (üçgen ≈ 0.50, altıgen ≈ 0.75)
+            extent = float(area) / float(w * h)
+            if shape == "TRIANGLE":
+                expected_vertices, expected_extent = 3, 0.50
+                ext_lo, ext_hi = _TRIANGLE_EXTENT
             else:
-                color = self._classify_color_from_mask(frame_hsv, contour)
-                if color is None:
-                    # Fallback modda renk maskesi olmadan kontur gelmiş olabilir;
-                    # bu durumda atla (renksiz şekil = muhtemelen gürültü)
-                    if mask_hint == "color":
-                        continue
-                    # Gri modda renk kararı contour bounding rect'ten yapılır
-                    color = self._classify_color_from_roi(frame_hsv, contour)
-                    if color is None:
-                        continue
+                expected_vertices, expected_extent = 6, 0.75
+                ext_lo, ext_hi = _HEXAGON_EXTENT
+            if not (ext_lo <= extent <= ext_hi):
+                self._log.debug(
+                    "REJECT: extent out of range shape=%s extent=%.2f area=%.0f",
+                    shape, extent, area,
+                )
+                continue
+
+            # Renk: kontur içi gerçek piksel dağılımı (color purity)
+            color_info = self._color_purity_from_contour(frame_hsv, contour, purity_min)
+            if color_info is None:
+                self._log.debug(
+                    "REJECT: color purity too low area=%.0f", area,
+                )
+                continue
+            color, purity = color_info
+
+            vertex_score = 1.0 - min(1.0, abs(count - expected_vertices) / 2.0)
+            extent_score = 1.0 - min(1.0, abs(extent - expected_extent) / 0.25)
+            shape_score = 0.7 * vertex_score + 0.3 * extent_score
+            area_score = min(1.0, area / _AREA_REF_PX)
+            confidence = 0.45 * shape_score + 0.20 * area_score + 0.35 * purity
+            if confidence < MIN_DETECTION_CONFIDENCE:
+                self._log.debug(
+                    "REJECT: confidence too low %.2f shape=%s purity=%.2f area=%.0f",
+                    confidence, shape, purity, area,
+                )
+                continue
 
             moments = cv2.moments(contour)
             if moments["m00"] == 0:
                 continue
             cx = moments["m10"] / moments["m00"]
             cy = moments["m01"] / moments["m00"]
-            x, y, w, h = cv2.boundingRect(contour)
 
-            confidence = 0.65 * shape_score + 0.35 * area_score
-            if confidence < MIN_DETECTION_CONFIDENCE:
-                continue
+            self._log.debug(
+                "DETECT %s %s conf=%.2f purity=%.2f vertices=%d area=%.0f "
+                "solidity/aspect ok extent=%.2f center=(%.0f,%.0f)",
+                color.value, shape, confidence, purity, count, area,
+                extent, cx, cy,
+            )
 
             detections.append(
                 Detection(
@@ -362,105 +411,71 @@ class TargetDetector:
                     bbox_width_px=w,
                     bbox_height_px=h,
                     confidence=confidence,
+                    color_purity=purity,
                 )
             )
         return detections
 
     @staticmethod
-    def _classify_color_from_mask(hsv, contour):
-        """Konturun merkez pikselinden HSV ile renk kararını doğrula."""
-        moments = cv2.moments(contour)
-        if moments["m00"] == 0:
-            return None
-        cx = int(moments["m10"] / moments["m00"])
-        cy = int(moments["m01"] / moments["m00"])
-        h, w = hsv.shape[:2]
-        if not (0 <= cx < w and 0 <= cy < h):
-            return None
+    def _color_purity_from_contour(hsv, contour, purity_min: float):
+        """Kontur içindeki canlı piksellerden baskın renk ve oranını döndürür.
 
-        px = hsv[cy, cx]
-        hue, sat, val = int(px[0]), int(px[1]), int(px[2])
-        if sat < 70 or val < 60:
-            return None
-        if 95 <= hue <= 130:
-            return TargetColor.BLUE
-        if (hue <= 10 or hue >= 170):
-            return TargetColor.RED
-        return None
+        BGR maskesinden gelen konturlarda bile rengi körlemesine kabul etmek
+        yerine, konturun İÇİNDEKİ piksellerin ne kadarı gerçekten mavi/kırmızı
+        olduğuna bakar. Baskın renk oranı purity_min altındaysa None (gürültü).
 
-    @classmethod
-    def _classify_color_from_roi(cls, hsv, contour):
-        """Bounding rect içindeki HSV histogramı ile renk sınıflandırması."""
+        Returns: (TargetColor, purity_ratio) veya None.
+        """
         x, y, w, h = cv2.boundingRect(contour)
         if w <= 2 or h <= 2:
             return None
-        roi = hsv[y:y + h, x:x + w]
-        if roi.size == 0:
+
+        contour_mask = np.zeros((h, w), dtype=np.uint8)
+        shifted = contour - np.array([x, y])
+        cv2.drawContours(contour_mask, [shifted], -1, 255, -1)
+
+        crop = hsv[y:y + h, x:x + w]
+        interior = crop[contour_mask == 255]
+        if interior.size == 0:
             return None
-        mask = cv2.inRange(
-            roi,
-            np.array([0, 70, 60], dtype=np.uint8),
-            np.array([179, 255, 255], dtype=np.uint8),
-        )
-        if cv2.countNonZero(mask) == 0:
+
+        hue = interior[:, 0]
+        sat = interior[:, 1]
+        val = interior[:, 2]
+        vivid = (sat >= 70) & (val >= 60)
+        n = int(vivid.sum())
+        if n == 0:
             return None
-        mean_hsv = cv2.mean(roi, mask=mask)
-        hue, sat, val = int(mean_hsv[0]), int(mean_hsv[1]), int(mean_hsv[2])
-        if sat < 70 or val < 60:
+
+        blue = vivid & (hue >= 95) & (hue <= 130)
+        red = vivid & ((hue <= 10) | (hue >= 170))
+        blue_ratio = int(blue.sum()) / n
+        red_ratio = int(red.sum()) / n
+
+        # Baskın renk: eşiğin üstünde OLMALI ve diğer renge açıkça üstün olmalı
+        # (≥1.3x). 50/50 veya yakın karışık blob'lar kabul edilmez.
+        if blue_ratio >= red_ratio:
+            if blue_ratio < purity_min or blue_ratio < red_ratio * 1.3:
+                return None
+            return TargetColor.BLUE, blue_ratio
+        if red_ratio < purity_min or red_ratio < blue_ratio * 1.3:
             return None
-        if 95 <= hue <= 130:
-            return TargetColor.BLUE
-        if hue <= 10 or hue >= 170:
-            return TargetColor.RED
-        return None
+        return TargetColor.RED, red_ratio
 
     # ──────────────────────────────────────────────────────────────
     # Ana detect() metodu
     # ──────────────────────────────────────────────────────────────
 
-    def _detect_noswap(self, frame_bgr):
-        """Detect helper that assumes given frame is correctly BGR (does NOT call _maybe_auto_swap)."""
-        hsv = self._preprocess_for_hsv(frame_bgr)
-        all_detections = []
-
-        for color in (TargetColor.BLUE, TargetColor.RED):
-            mask = self._color_mask(hsv, color)
-            mask = self._clean_mask(mask)
-
-            contours, _ = cv2.findContours(
-                mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-            )
-
-            dets = self._detections_from_contours(
-                contours, hsv, mask_hint="color", color_override=color
-            )
-            all_detections.extend(dets)
-
-        if all_detections:
-            return sorted(all_detections, key=lambda d: d.confidence, reverse=True)
-
-        fallback_contours = self._fallback_contours(frame_bgr)
-        fallback_dets = self._detections_from_contours(
-            fallback_contours, hsv, mask_hint="gray"
-        )
-        return sorted(fallback_dets, key=lambda d: d.confidence, reverse=True)
-
     def detect(self, frame_bgr):
-        # If calibration hasn't decided, try a quick dual-pass heuristic to decide swap
-        if self._auto_swap is None:
-            # run noswap and swapped detectors and compare best confidences
-            det_n = self._detect_noswap(frame_bgr)
-            det_s = self._detect_noswap(frame_bgr[:, :, ::-1].copy())
-            best_n = det_n[0].confidence if det_n else 0.0
-            best_s = det_s[0].confidence if det_s else 0.0
-            # Prefer the view with significantly higher top confidence
-            if best_s > max(0.0, best_n * 1.10) and best_s >= 0.35:
-                self._auto_swap = True
-            elif best_n > max(0.0, best_s * 1.10) and best_n >= 0.35:
-                self._auto_swap = False
-            # else leave as None and fall back to metric-based decision in _maybe_auto_swap
+        """Ana tespit girişi (API korunur).
 
-        # 3. emniyet katmanı — Defansif B↔R kanalı otomatik kalibrasyon
+        Akış:
+          1. _maybe_auto_swap — yalnızca TARGET_DETECTOR_AUTO_SWAP=True iken
+             kanal takası uygular (varsayılan kapalı — kamera katmanı sahibidir).
+          2. LAB-CLAHE → HSV → mavi/kırmızı maskeler → konturlar →
+             _detections_from_contours (renk purity + şekil doğrulaması).
+          3. Renk tespiti yoksa gri fallback (adaptive threshold).
+        """
         frame_bgr = self._maybe_auto_swap(frame_bgr)
 
         hsv = self._preprocess_for_hsv(frame_bgr)
@@ -474,17 +489,14 @@ class TargetDetector:
                 mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
 
-            dets = self._detections_from_contours(
-                contours, hsv, mask_hint="color", color_override=color
-            )
-            all_detections.extend(dets)
+            all_detections.extend(self._detections_from_contours(contours, hsv))
 
         if all_detections:
             return sorted(all_detections, key=lambda d: d.confidence, reverse=True)
 
         fallback_contours = self._fallback_contours(frame_bgr)
         fallback_dets = self._detections_from_contours(
-            fallback_contours, hsv, mask_hint="gray"
+            fallback_contours, hsv, purity_min=_FALLBACK_MIN_COLOR_PURITY
         )
         return sorted(fallback_dets, key=lambda d: d.confidence, reverse=True)
 
@@ -592,6 +604,16 @@ class TargetDetector:
                     if same_type
                     else detections[0]
                 )
+
+        # Tip değişimi guard'ı: history'yi farklı tiple kirletme.
+        # Salınım (A,B,A,B,...) hiçbir zaman stabilize olamaz; gerçek tip
+        # değişimi ise yeni tipin MIN_STABLE_DETECTIONS ardışık frame'ini
+        # gerektirir (kilitli modda zaten tip filtresi var — bu yol yalnızca
+        # kilitsiz aramada çalışır).
+        if self.history:
+            last = self.history[-1]
+            if (candidate.color, candidate.shape) != (last.color, last.shape):
+                self.history.clear()
 
         self.history.append(candidate)
 

@@ -142,6 +142,14 @@ DETECTION_HISTORY_SIZE = 5
 MIN_STABLE_DETECTIONS = 3
 MIN_DETECTION_CONFIDENCE = 0.60
 
+# Detektör seviyesinde B↔R kanal takası (yalnızca acil durum ağı).
+# Varsayılan KAPALI: kanal takasının sahibi kamera katmanıdır
+# (RPiCam3 / RemoteRPiCamera → swap_rb_channels config).
+# Kameradan BGR doğru geliyorsa (önizlemede renkler doğruysa) bu bayrak
+# False kalmalıdır; True yapılırsa TargetDetector kendi V3 metrik
+# kalibrasyonuyla takas kararı verir (gürültülü sahnede yanlış tetiklenebilir).
+TARGET_DETECTOR_AUTO_SWAP = False
+
 SCAN_LINE_SPACING = 8.0
 SEARCH_MARGIN = 2.0
 

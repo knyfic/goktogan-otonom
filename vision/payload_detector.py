@@ -17,6 +17,7 @@ class PayloadDetection:
     height_px: float
     area_px: float
     confidence: float
+    color_purity: float = 0.0  # kontur içi beklenen renk oranı (0..1)
 
 
 class PayloadDetector:
@@ -124,25 +125,45 @@ class PayloadDetector:
     # ──────────────────────────────────────────────────────────────
 
     @classmethod
-    def _verify_color_center(cls, hsv, contour, expected_color) -> bool:
-        """Konturun ağırlık merkezindeki pikselin rengini doğrula."""
-        moments = cv2.moments(contour)
-        if moments["m00"] == 0:
-            return False
-        cx = int(moments["m10"] / moments["m00"])
-        cy = int(moments["m01"] / moments["m00"])
-        h, w = hsv.shape[:2]
-        if not (0 <= cx < w and 0 <= cy < h):
-            return False
+    def _color_purity_from_contour(cls, hsv, contour, expected_color, purity_min=0.40):
+        """Kontur içindeki canlı piksellerden beklenen renk oranını döndürür.
 
-        px = hsv[cy, cx]
-        hue, sat, val = int(px[0]), int(px[1]), int(px[2])
-        if sat < 70 or val < 55:
-            return False
+        Tek piksel (merkez) kontrolü yerine konturun İÇ bölgesindeki gerçek
+        piksel dağılımına bakar — maske sızıntısı/CLAHE artefaktı ile oluşan
+        gürültü konturları burada elenir.
+
+        Returns: (purity_ratio) veya None (gürültü / yetersiz renk).
+        """
+        x, y, w, h = cv2.boundingRect(contour)
+        if w <= 2 or h <= 2:
+            return None
+
+        contour_mask = np.zeros((h, w), dtype=np.uint8)
+        shifted = contour - np.array([x, y])
+        cv2.drawContours(contour_mask, [shifted], -1, 255, -1)
+
+        crop = hsv[y:y + h, x:x + w]
+        interior = crop[contour_mask == 255]
+        if interior.size == 0:
+            return None
+
+        hue = interior[:, 0]
+        sat = interior[:, 1]
+        val = interior[:, 2]
+        vivid = (sat >= 70) & (val >= 55)
+        n = int(vivid.sum())
+        if n == 0:
+            return None
 
         if expected_color == TargetColor.BLUE:
-            return 95 <= hue <= 130
-        return hue <= 10 or hue >= 170
+            matched = vivid & (hue >= 95) & (hue <= 130)
+        else:
+            matched = vivid & ((hue <= 10) | (hue >= 170))
+
+        purity = int(matched.sum()) / n
+        if purity < purity_min:
+            return None
+        return purity
 
     # ──────────────────────────────────────────────────────────────
     # Ana detect() metodu
@@ -177,7 +198,9 @@ class PayloadDetector:
             if w <= 0 or h <= 0:
                 continue
 
-            if not self._verify_color_center(hsv, contour, color):
+            # Renk: kontur içi gerçek piksel dağılımı (maske sızıntısına karşı)
+            purity = self._color_purity_from_contour(hsv, contour, color)
+            if purity is None:
                 continue
 
             size_error = (
@@ -191,8 +214,8 @@ class PayloadDetector:
                 area / max(1.0, expected_w * expected_h),
             )
 
-            # Şekil/aspect skoru yok: karar yalnız renk + beklenen fiziksel alan üzerinden.
-            confidence = 0.65 * size_score + 0.35 * area_score
+            # Karar: boyut (beklenen fiziksel alan) + renk purity.
+            confidence = 0.45 * size_score + 0.20 * area_score + 0.35 * purity
 
             moments = cv2.moments(contour)
             if moments["m00"] == 0:
@@ -207,6 +230,7 @@ class PayloadDetector:
                     height_px=float(h),
                     area_px=float(area),
                     confidence=float(confidence),
+                    color_purity=float(purity),
                 )
             )
 

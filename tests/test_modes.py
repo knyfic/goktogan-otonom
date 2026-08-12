@@ -64,7 +64,6 @@ def test_merged_config_has_hil_server_sections():
     assert cfg["server"]["port"] == 5700
     assert cfg["camera_server"]["enable"] is True
     assert cfg["camera_server"]["port"] == 5701
-    assert "swap_rb_channels" in cfg["camera_server"]
     assert "orientation" in cfg["camera_server"]
 
     # HIL kamera seçimi (Ubuntu tarafı) hâlâ duruyor

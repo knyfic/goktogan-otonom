@@ -16,9 +16,9 @@ Ubuntu üzerinde test ederken Picamera2 yoksa uyarı verip stub çalışır.
     • format="RGB888" istendiği halde ham veri BGR888 gelir
     • İkisi de tamamen karışık gelir
 
-  Bu yüzden 4 AŞAMALI bir strateji uygularız; hiçbiri çalışmazsa
-  constructor parametresinden verilen `swap_rb_channels` ile
-  ZORLAMALI kanal takası yapılır (IMX708 için default=True).
+  Bu yüzden 4 AŞAMALI bir format stratejisi uygularız ve en sonda
+  B ↔ R kanal takasını SABİT olarak uygularız (config değil — saha
+  testleriyle doğrulanan tek doğru davranış; çıktı her zaman BGR).
 
 STATE MACHINE ARRAYÜZÜ: latest / show / pump / close_preview
   GazeboCamera / RemoteRPiCamera ile aynı — görüntü işleme kodu değişmez.
@@ -52,10 +52,14 @@ class RPiCam3:
     Frame formatı: BGR (OpenCV / state machine ile uyumlu).
     Arka thread'de sürekli capture eder, latest() en son frame'i döndürür.
 
+    RENK KANALI (sabit davranış — config değil):
+      Picamera2 + IMX708 (Cam Module 3) + libcamera kombinasyonu FORMAT ADI
+      İLE GERÇEK BYTE SIRASINI UYUŞTURMAYABİLİR (örn. BGR888 istenince RGB
+      gelir). Saha testleriyle doğrulanan tek doğru davranış uygulanır:
+      format stratejisinden sonra B ↔ R kanal takası HER ZAMAN yapılır ve
+      sonuç BGR olur (state machine / OpenCV uyumlu).
+
     Parametreler:
-      swap_rb_channels — None = otomatik strateji sonucu neyse onu kullan
-                         True = her halükarda R ↔ B kanallarını takas et (IMX708 default)
-                         False = kesinlikle takas yapma (dönüşüm doğru çalışıyorsa)
       preview          — canlı önizleme penceresi (GazeboCamera ile aynı davranış)
       window_name      — önizleme penceresi adı
     """
@@ -66,7 +70,6 @@ class RPiCam3:
         width:  int = 1920,
         height: int = 1080,
         fps:    int = 30,
-        swap_rb_channels: Optional[bool] = True,
         logger: logging.Logger | None = None,
         orientation: str = "NORMAL",
         preview: bool = False,
@@ -76,7 +79,6 @@ class RPiCam3:
         self._width      = width
         self._height     = height
         self._fps        = fps
-        self._forced_swap = swap_rb_channels   # None / True / False
         self._log        = logger or logging.getLogger(__name__)
         self._lock       = threading.Lock()
         self._frame: Optional[np.ndarray] = None
@@ -90,8 +92,6 @@ class RPiCam3:
         # Stratejinin sonucu: capture_array() sonrası uygulanan cvtCode
         #   None              → raw == BGR (dokunma)
         #   cv2.COLOR_RGB2BGR → raw == RGB → BGR takası
-        #   cv2.COLOR_BGR2RGB → raw zaten BGR idi ama tekrar takas edildi (ters döndü)
-        # En sonda _force_swap (True ise) ekstra `[:, :, ::-1]` uygular
         self._fmt_name:   str                        = "STUB"
         self._cvt_code:   Optional[int]              = None
 
@@ -136,7 +136,8 @@ class RPiCam3:
             self._log.info("[Aşama 1 FAIL] BGR888 desteklenmiyor: %s", exc1)
             self._picam = None
 
-        # AŞAMA 2 — RGB888 + DONANIM GERÇEKTEN BGR VERİYORSA (cvt yok)
+        # AŞAMA 2 — RGB888: IMX708 çoğu sürümde RGB888 adı altında BGR baytları
+        # gönderir → cvt yok; B↔R takası capture döngüsünde sabit uygulanır.
         if self._picam is None:
             picam = Picamera2(camera_num=self._camera_num)
             try:
@@ -144,25 +145,12 @@ class RPiCam3:
                     main={"size": (self._width, self._height), "format": "RGB888"},
                 )
                 picam.configure(config)
-                # IMX708 çoğu sürümde RGB888 adı altında BGR baytları gönderir.
-                # Eğer _forced_swap=False ise buna inanıyoruz demektir.
-                if self._forced_swap is False:
-                    self._fmt_name = "RGB888(cvt=RGB2BGR)"
-                    self._cvt_code = cv2.COLOR_RGB2BGR
-                    self._log.info(
-                        "[Aşama 2 OK] RGB888 seçildi, swap_rb_channels=False → "
-                        "gerçekten RGB geliyor varsayılıyor → COLOR_RGB2BGR uygulanacak."
-                    )
-                else:
-                    # forced_swap=None veya True — IMX708 davranışını varsay:
-                    # format adı RGB888 ama ham baytlar BGR → cvt yok, sonraki
-                    # adımda global swap uygulanır
-                    self._fmt_name = "RGB888(IMX708-stub-cvt=YOK)"
-                    self._cvt_code = None
-                    self._log.info(
-                        "[Aşama 2 OK] RGB888 seçildi, IMX708 varsayımıyla "
-                        "baytlar BGR kabul edildi (cvt yok). Zorlamalı swap sonrası BGR çıkacak."
-                    )
+                self._fmt_name = "RGB888(IMX708-cvt=YOK)"
+                self._cvt_code = None
+                self._log.info(
+                    "[Aşama 2 OK] RGB888 seçildi, IMX708 varsayımıyla "
+                    "baytlar BGR kabul edildi (cvt yok). Sabit B↔R takası sonrası BGR çıkacak."
+                )
                 self._picam = picam
             except Exception as exc2:
                 self._log.warning("[Aşama 2 FAIL] RGB888 de desteklenmiyor: %s", exc2)
@@ -206,14 +194,12 @@ class RPiCam3:
         self._picam.start()
         self._log.info(
             "RPi Camera Module 3 açıldı (CAM%d) %dx%d@%d — Picamera2/libcamera "
-            "fmt=%s  cvt=%s  swap_rb=%s",
+            "fmt=%s  cvt=%s",
             self._camera_num, self._width, self._height, self._fps,
             self._fmt_name,
             "yok" if self._cvt_code is None
                 else ("COLOR_RGB2BGR" if self._cvt_code == cv2.COLOR_RGB2BGR
                       else f"cv2.code={self._cvt_code}"),
-            "ZORLU(True)" if self._forced_swap is True
-                else ("YOK(False)" if self._forced_swap is False else "OTOMATIK"),
         )
 
     # ── Capture loop ─────────────────────────────────────────────────────── #
@@ -236,13 +222,10 @@ class RPiCam3:
                 else:
                     frame = cv2.cvtColor(raw, self._cvt_code)
 
-                # Aşama-2: Zorlamalı R↔B takası (forced_swap)
-                #   IMX708 + libcamera sürüm kombinasyonuna göre
-                #   yukarıdaki adımda renkler yine de ters kalmış olabilir.
-                if self._forced_swap is True:
-                    frame = frame[:, :, ::-1].copy()   # B ↔ R kanallarını takas et
-                # Not: _forced_swap=None ise Aşama-1'in sonucu neyse odur (OTOMATIK)
-                # _forced_swap=False ise dokunma
+                # Aşama-2: IMX708 + libcamera sürüm kombinasyonunda format adı
+                # ile gerçek byte sırası uyuşmayabilir → B ↔ R kanal takası SABİT
+                # uygulanır (saha testleriyle doğrulanan tek doğru davranış).
+                frame = frame[:, :, ::-1].copy()   # B ↔ R kanallarını takas et
 
                 # Orientation normalization (apply mounting correction here)
                 try:

@@ -37,9 +37,9 @@ Ubuntu üzerinde (aynı repo, ikinci makine):
 python main.py
 ```
 
-> Kamerada renkler ters ise `payload/config.yaml → camera_server.swap_rb_channels`
-> (RPi tarafı) veya `remote_camera.swap_rb_channels` (Ubuntu tarafı) değerlerini
-> ayarlayın. Kamera montaj yönü için `orientation` kullanılır.
+> Kamera montaj yönü ters ise `payload/config.yaml → camera_server.orientation`
+> değerini ayarlayın (örn. 'ROTATE_180'). B↔R kanal takası sabittir —
+> RPiCam3 içinde IMX708 için otomatik uygulanır; ayrıca ayar gerekmez.
 
 ---
 

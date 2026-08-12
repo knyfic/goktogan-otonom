@@ -10,7 +10,7 @@
 #   simulation  → SimulationBackend  (Gazebo, GPIO yok)
 #   hil         → RemoteRPiBackend   (Ubuntu → Wi-Fi → Raspberry Pi)
 #   real        → LocalRPiBackend    (Raspberry Pi üzerinde, doğrudan GPIO)
-backend: simulation
+backend: hil
 
 # ── HIL sunucu (yalnızca Raspberry Pi'de services/hil_entrypoint.py okur) ────
 # Ubuntu tarafı bu bölümü OKUMAZ. RPi'de payload TCP (5700) + kamera TCP (5701)
@@ -18,7 +18,6 @@ backend: simulation
 server:
   host: 0.0.0.0
   port: 5700
-  max_connections: 1   # Aynı anda yalnızca bir kontrol kaynağı (dokümantasyon)
 
 camera_server:
   enable: true            # false → kamera servisini başlatma
@@ -29,10 +28,6 @@ camera_server:
   height: 1080            # CAMERA_HEIGHT_PX ile tutarlı
   fps: 30                 # Hedef FPS (RPi Cam 3 1080p30 rahat destekler)
   jpeg_quality: 80        # 1-100 — daha yüksek: daha net, daha fazla bant genişliği
-  # ⚠ IMX708 + libcamera BILINEN SORUNU:
-  #   swap_rb_channels — renkler (mavi ↔ kırmızı) ters ise TRUE yap.
-  #   Renkler TERS İSE = true, DÜZ İSE = false.
-  swap_rb_channels: true
   # Kamera montaj yönü düzeltmesi: 'NORMAL' | 'ROTATE_90' | 'ROTATE_180' | 'ROTATE_270' | 'FLIP_H' | 'FLIP_V'
   orientation: 'ROTATE_180'
 
@@ -60,13 +55,8 @@ remote:
 # remote_camera:  hil_camera: remote_rpi iken Ubuntu'nun bağlanacağı RPi adresi
 hil_camera: remote_rpi
 remote_camera:
-  host: 192.168.1.21   # Raspberry Pi (payload.remote.host ile AYNI olmalı)
   port: 5701           # RPi camera_server portu (payload 5700 yanında)
-  # ⚠ IMX708 + libcamera BILINEN SORUNU (CLIENT TARAFI — ikinci emniyet katmanı):
-  #   swap_rb_channels — Ubuntu tarafında JPEG decode sonrası B ↔ R kanalı takası.
-  #   Eğer RPi tarafındaki ayara rağmen renkler hala ters ise bunu True yap.
-  #   RENKLER HALA TERS İSE = true, DÜZ İSE = false (default).
-  swap_rb_channels: false
+  # IP: payload ile aynı Raspberry Pi olduğundan remote.host kullanılır (TEK kaynak).
 
 # ── Stepper motor ───────────────────────────────────────────────────────────
 stepper:

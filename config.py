@@ -130,10 +130,8 @@ CAMERA_ORIENTATION = 'NORMAL'
 # Gerçek kamera — Raspberry Pi Camera Module 3 (CSI), Picamera2 tabanlı.
 # REAL modun TEK gerçek kamera implementasyonu: vision/rpi_camera.py (RPiCam3).
 # Gazebo / HIL modunda bu değerler okunmaz.
+# B↔R kanal takası RPiCam3 içinde SABİT uygulanır (IMX708 — config değil).
 RPI_CAMERA_NUM = 0            # CSI port (0 = CAM0)
-# IMX708 + libcamera BİLİNEN SORUNU: renkler ters ise True (B↔R kanal takası).
-# RPi tarafında renkler düz ise False yapın.
-RPI_CAMERA_SWAP_RB = True
 REAL_CAMERA_FPS    = 30
 
 MIN_TARGET_AREA_PX = 400.0
@@ -144,7 +142,7 @@ MIN_DETECTION_CONFIDENCE = 0.60
 
 # Detektör seviyesinde B↔R kanal takası (yalnızca acil durum ağı).
 # Varsayılan KAPALI: kanal takasının sahibi kamera katmanıdır
-# (RPiCam3 / RemoteRPiCamera → swap_rb_channels config).
+# (RPiCam3 — IMX708 için sabit B↔R takası).
 # Kameradan BGR doğru geliyorsa (önizlemede renkler doğruysa) bu bayrak
 # False kalmalıdır; True yapılırsa TargetDetector kendi V3 metrik
 # kalibrasyonuyla takas kararı verir (gürültülü sahnede yanlış tetiklenebilir).

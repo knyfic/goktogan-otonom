@@ -56,8 +56,8 @@ print("\n" + "="*65)
 print("=== GRUP A: TEK NESNELI / TEK RENKLI SAHNELER (simetrik) ===")
 print("="*65)
 print("⚠ Not: Tek renkli sahnelerde iki versiyon (orijinal/swap) simetrik")
-print("  oldugu icin AutoSwap tek basina karar veremez. Bu durumda")
-print("  katman 1/2 (config uzerinden swap_rb_channels) kullanilmali.")
+print("  oldugu icin AutoSwap tek basina karar veremez.")
+print("  Kanal takasi artik RPiCam3 icinde sabittir (config degil).")
 print()
 
 # --- A1: Normal tek renkli (mavi) ---
@@ -125,14 +125,13 @@ print(f"     Detay: {[(d.color.value, d.shape, round(d.confidence,2)) for d in r
 
 
 print("\n\n" + "="*65)
-print("=== 3 KATMANLI COZUM OZETI ===")
+print("=== RENK KANALI COZUM OZETI ===")
 print("="*65)
-print("  Katman 1 [RPi config/payload.yaml]:      swap_rb_channels: true  ")
-print("       → IMX708 sensörü için VARSAYILAN etkin.")
-print("  Katman 2 [Ubuntu payload/config.yaml]:   swap_rb_channels: false ")
-print("       → 1. katmana ragmen hala ters ise true yap.")
-print("  Katman 3 [AutoSwap V3]                   İlk 12 frame'de otomatik kalibrasyon")
-print("       → Karisik renkli (gercek) sahnelerde %100 basarili.")
+print("  Katman 1 [RPiCam3]:  B↔R kanal takasi SABIT (IMX708) — config degil")
+print("       → RPi tarafinda cikti her zaman BGR.")
+print("  Katman 2 [Ubuntu]:   RemoteRPiCamera JPEG decode → BGR (takas YOK).")
+print("  Katman 3 [AutoSwap V3] Yalnizca TARGET_DETECTOR_AUTO_SWAP=True ise aktiftir.")
+print("       → Varsayilan KAPALI (kanal takasi kamera katmaninin isi).")
 print()
 
 

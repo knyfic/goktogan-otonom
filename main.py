@@ -25,7 +25,6 @@ from config import (
     PREVIEW_WINDOW_NAME,
     REAL_CAMERA_FPS,
     RPI_CAMERA_NUM,
-    RPI_CAMERA_SWAP_RB,
 )
 from flight.navigation import Navigation
 from payload.payload_controller import PayloadController
@@ -85,20 +84,21 @@ def _build_camera(mode: str, cfg: dict, logger):
 
         if hil_cam == "remote_rpi":
             from vision.remote_rpi_camera import RemoteRPiCamera
+            # Kamera IP'si: payload ile aynı RPi (remote.host — TEK kaynak).
+            # Port kamera servisine özeldir (remote_camera.port → 5701).
+            remote = cfg.get("remote", {})
             rc = cfg.get("remote_camera", {})
-            host = rc.get("host", cfg.get("remote", {}).get("host", "192.168.1.21"))
+            host = remote.get("host")
             port = int(rc.get("port", 5701))
-            swap = bool(rc.get("swap_rb_channels", False))
             logger.info(
                 "HIL → GERÇEK Raspberry Pi Camera Module 3 akışı: "
-                "TCP üzerinden %s:%d bekleniyor... swap_rb=%s",
-                host, port, swap,
+                "TCP üzerinden %s:%d bekleniyor...",
+                host, port,
             )
             return RemoteRPiCamera(
                 host=host,
                 port=port,
                 preview=ENABLE_LIVE_PREVIEW,
-                swap_rb_channels=swap,
                 window_name=PREVIEW_WINDOW_NAME,
                 logger=logger,
                 orientation=CAMERA_ORIENTATION,
@@ -119,7 +119,6 @@ def _build_camera(mode: str, cfg: dict, logger):
             width=CAMERA_WIDTH_PX,          # config.py'den — FOV ile tutarlı
             height=CAMERA_HEIGHT_PX,        # config.py'den
             fps=REAL_CAMERA_FPS,            # config.py'den
-            swap_rb_channels=RPI_CAMERA_SWAP_RB,  # IMX708 B↔R kanal takası
             preview=ENABLE_LIVE_PREVIEW,
             window_name=PREVIEW_WINDOW_NAME,
             logger=logger,

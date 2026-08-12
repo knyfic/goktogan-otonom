@@ -84,19 +84,12 @@ def main() -> int:
     if camera_enabled:
         cam_port = int(camera_cfg.get("port", 5701))
         cam_host = camera_cfg.get("host", "0.0.0.0")
-        # swap_rb_channels: YAML'da yoksa None (otomatik strateji), yoksa True/False
-        swap_raw = camera_cfg.get("swap_rb_channels", None)
-        if swap_raw is None:
-            cam_swap: bool | None = None
-        else:
-            cam_swap = bool(swap_raw)
         try:
             rpi_cam = RPiCam3(
                 camera_num=int(camera_cfg.get("camera_num", 0)),
                 width=int(camera_cfg.get("width", 1920)),
                 height=int(camera_cfg.get("height", 1080)),
                 fps=int(camera_cfg.get("fps", 30)),
-                swap_rb_channels=cam_swap,
                 logger=logger,
                 orientation=str(camera_cfg.get("orientation", "NORMAL")),
             )

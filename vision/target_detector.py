@@ -81,7 +81,7 @@ class TargetDetector:
         """AutoSwap V3 — yalnızca TARGET_DETECTOR_AUTO_SWAP=True iken aktif.
 
         Varsayılan KAPALI: kanal takasının sahibi kamera katmanıdır
-        (RPiCam3 / RemoteRPiCamera → swap_rb_channels). Detektör seviyesi
+        (RPiCam3 — IMX708 için sabit B↔R takası). Detektör seviyesi
         kalibrasyon, saf mavi+kırmızı sahnelerde simetrik olduğundan gerçek
         bir ters kamerayı ayırt edemez ve karışık renkli sahnelerde
         YANLIŞLIKLA takas açabilir (sistematik renk inversiyonu).

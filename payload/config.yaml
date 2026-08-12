@@ -124,3 +124,27 @@ payload_color_map:
 # Raspberry Pi 5'te /dev/gpiochip0 varsayılandır.
 gpio:
   chip: 0
+
+# ── Gerçek uçuş (yalnızca backend: real) — Cube Orange bağlantısı ────────────
+# Cube Orange TELEM2 → Raspberry Pi GPIO UART (serial/MAVLink).
+# simulation/hil modlarında bu bölüm OKUNMAZ (MAVLINK_CONNECTION — config.py
+# kullanılır). device/baudrate kod içinde hard-code değildir.
+flight_controller:
+  connection:
+    device: /dev/serial0    # TELEM2 → RPi UART (raspi-config ile etkinleştirilmiş)
+    baudrate: 921600
+  # MAVLink telemetri kaybında RTL'ye geçme süresi (saniye).
+  # 0/None → watchdog devre dışı. BİRİNCİL güvenlik katmanı Cube Orange'ın
+  # kendi ArduPilot failsafe ayarlarıdır; bu sadece ikincil bir izleyicidir.
+  heartbeat_timeout_s: 10.0
+
+# ── Video akışı (yalnızca backend: real) — GStreamer → Ground Station ────────
+# GStreamer görüntüyü izletmek içindir; uçuş kontrolü/görev için KRİTİK
+# dependency DEĞİLDİR — stream kopsa bile görev devam eder.
+video_stream:
+  enabled: true
+  host: 192.168.1.100      # Ground station IP (kod içinde hard-code YOK)
+  port: 5000
+  codec: h264
+  bitrate: 2000000         # bps — 960x540 HUD frame için 1.5-2 Mbps idealdir
+  fps: 30                  # yayın FPS tavanı (encoder yükünü sınırlar, duplike frame'leri birleştirir)

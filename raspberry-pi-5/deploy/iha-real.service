@@ -1,0 +1,27 @@
+# İHA REAL Mission (Raspberry Pi 5 — Cube Orange MAVLink + Kamera + Payload + Video)
+# Kurulum:
+#   sudo cp deploy/iha-real.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now iha-real
+#
+# Ön koşullar:
+#   - payload/config.yaml → backend: real
+#   - flight_controller.connection.device/baudrate gerçek UART'a ayarlı
+#   - video_stream.enabled → ground station IP/port (isteğe bağlı)
+#   - kullanıcı dialout grubunda (serial erişimi): sudo usermod -aG dialout pi
+# Not: WorkingDirectory, repo'nun Pi üzerindeki yoluna göre düzenlenmeli.
+
+[Unit]
+Description=İHA REAL Mission (Cube Orange MAVLink + Kamera + Payload + GStreamer)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/iha
+ExecStart=/usr/bin/python3 main.py
+Restart=always
+RestartSec=5
+User=pi
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

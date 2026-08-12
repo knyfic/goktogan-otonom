@@ -104,7 +104,12 @@ class MissionStateMachine:
         camera: CameraLike,
         payload: PayloadController,
         logger: logging.Logger,
+        heartbeat_timeout_s: float | None = None,
     ):
+        # MAVLink heartbeat watchdog — yalnızca REAL modda main.py bağlar.
+        # None → devre dışı (simulation/hil davranışı değişmez).
+        self._heartbeat_timeout_s = heartbeat_timeout_s
+        self._heartbeat_triggered = False
         # pending nav target used when we first ascend to search altitude
         self._nav_pending_target: tuple[float, float] | None = None
         self.log = logger
@@ -225,6 +230,29 @@ class MissionStateMachine:
             time.sleep(0.02)                      # ~50 Hz
 
     def _tick(self) -> None:
+        # ── MAVLink heartbeat watchdog (yalnızca REAL mod) ────────────────
+        # Bağlantı koparsa görevin YENİ adımları engellenir ve mevcut RTL
+        # abstraction'ı (rtl_controller) üzerinden dönüş başlatılır.
+        # RTL/COMPLETE'te çalışmaz — Cube Orange zaten kendi ArduPilot
+        # failsafe'ini yürütür (birincil güvenlik katmanı).
+        # Not: Bağlantı gerçekten kopmuşsa nav.rtl() komutunun ulaşacağı
+        # garanti edilemez; bu durumda FC'nin kendi failsafe ayarları devrededir.
+        if (
+            self._heartbeat_timeout_s is not None
+            and not self._heartbeat_triggered
+            and self.data.state not in (MissionState.RTL, MissionState.COMPLETE)
+        ):
+            if not self.nav.heartbeat_ok(self._heartbeat_timeout_s):
+                self._heartbeat_triggered = True
+                self.log.error(
+                    "MAVLINK BAĞLANTI KAYBI: %.1f sn içinde telemetri alınamadı. "
+                    "Yeni görev adımları durduruluyor → RTL başlatılıyor.",
+                    self.nav.last_message_age_s,
+                )
+                self.data.mission_failed = True
+                self._do_start_rtl()
+                return
+
         # ── Görev zamanlayıcısı watchdog ─────────────────────────────────
         # Her tick'te kontrol edilir. Timer başlamışsa ve süre dolmuşsa
         # hangi state'te olursa olsun RTL'ye geçilir.

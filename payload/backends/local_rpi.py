@@ -72,10 +72,15 @@ class LocalRPiBackend(PayloadBackend):
         cls,
         config_path: str,
         logger: logging.Logger | None = None,
+        steps: int | None = None,
     ) -> "LocalRPiBackend":
         """
         payload/config.yaml'dan stepper ve magnet parametrelerini oku,
         backend nesnesini oluştur.
+
+        steps: opsiyonel override — donanım testleri (tests/hardware/) küçük
+        adım sayısıyla güvenli mini pickup döngüsü çalıştırır. None ise
+        config'teki steps_for_travel (11429) kullanılır (üretim davranışı).
         """
         log = logger or logging.getLogger(__name__)
         cfg = yaml.safe_load(Path(config_path).read_text())
@@ -108,7 +113,8 @@ class LocalRPiBackend(PayloadBackend):
             logger=log,
         )
 
-        steps = sc.get("steps_for_travel", 10000)
+        if steps is None:
+            steps = sc.get("steps_for_travel", 10000)
         # Stepper aşağı hareket süresi: ortalama delay ile tahmin
         avg_us = (sc.get("start_delay_us", 1500) + sc.get("target_delay_us", 1200)) / 2
         stepper_duration = steps * (avg_us + 10) * 1e-6   # +10µs HIGH pulse

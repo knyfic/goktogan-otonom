@@ -9,14 +9,24 @@ from models import VehiclePosition
 class Navigation:
     """ArduPilot MAVLink adapter. DISARM operasyonu içermez."""
 
-    def __init__(self, connection_string: str):
-        self.master = mavutil.mavlink_connection(connection_string)
+    def __init__(self, connection_string: str, baud: int | None = None):
+        # Serial bağlantı (Cube Orange TELEM2 → RPi UART) için baudrate gerekir;
+        # UDP/TCP bağlantılarında (simülasyon/HIL) kullanılmaz ve iletilmez.
+        if baud is not None:
+            self.master = mavutil.mavlink_connection(connection_string, baud=baud)
+        else:
+            self.master = mavutil.mavlink_connection(connection_string)
         self.master.wait_heartbeat(timeout=30)
         self.system_id = self.master.target_system
         self.component_id = self.master.target_component
         self._position = VehiclePosition()
         self.home_lat = None
         self.home_lon = None
+        # Heartbeat watchdog zamanı: son alınan telemetri (monotonic).
+        # _update_position() her GLOBAL_POSITION_INT'te tazelenir — bu mesaj
+        # uçuş sırasında ~10 Hz akar; link ölürse yaş büyür ve heartbeat_ok()
+        # False döner. Mesaj tüketmez (alma buffer'ını kirletmez).
+        self._last_message_s = time.monotonic()
 
     # ------------------------------------------------------------------ #
     #  Pozisyon
@@ -43,6 +53,8 @@ class Navigation:
         self._position.longitude = msg.lon / 1e7
         self._position.relative_altitude = msg.relative_alt / 1000.0
         self._position.heading_deg = msg.hdg / 100.0
+        # Bağlantı canlılık işareti — GLOBAL_POSITION_INT uçuşta sürekli akar.
+        self._last_message_s = time.monotonic()
 
         if self.home_lat is None and self._position.latitude != 0.0:
             self.home_lat = self._position.latitude
@@ -78,6 +90,28 @@ class Navigation:
                 self._update_position(msg)
                 return self._position
         return self._position
+
+    # ------------------------------------------------------------------ #
+    #  Bağlantı canlılığı (heartbeat watchdog — yalnızca REAL mod)
+    # ------------------------------------------------------------------ #
+
+    @property
+    def last_message_age_s(self) -> float:
+        """Son alınan MAVLink telemetrisinden bu yana geçen süre (saniye)."""
+        return time.monotonic() - self._last_message_s
+
+    def heartbeat_ok(self, timeout_s: float) -> bool:
+        """
+        MAVLink bağlantısı canlı mı? (non-blocking, mesaj tüketmez)
+
+        Uçuş sırasında GLOBAL_POSITION_INT ~10 Hz akar; _update_position()
+        her mesajda _last_message_s'i tazeler. timeout_s içinde hiç mesaj
+        gelmediyse bağlantının koptuğu varsayılır.
+
+        Not: Ham HEARTBEAT paketi değil, telemetri akışı takip edilir — görev
+        sırasında bağlantı sağlığının en güvenilir göstergesidir.
+        """
+        return self.last_message_age_s <= timeout_s
 
     # ------------------------------------------------------------------ #
     #  Mod & Arm

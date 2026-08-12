@@ -16,3 +16,9 @@ lgpio>=0.2.2; sys_platform == "linux" and platform_machine in ("aarch64", "armv7
 # picamera2, Raspbian OS (Bookworm+) sistem paketi olarak gelir:
 #   sudo apt install python3-picamera2
 # Eksikse vision/rpi_camera.py otomatik stub modda çalışır.
+
+# ── GStreamer (yalnızca backend: real — ground station video yayını) ─────────
+# pip paketi DEĞİLDİR; Raspbian/Ubuntu sistem paketi olarak kurulur:
+#   sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-good \
+#                    gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly python3-gi
+# Eksikse services/video_streamer.py akışı devre dışı bırakır — görev çalışır.

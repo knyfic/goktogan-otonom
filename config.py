@@ -1,5 +1,8 @@
 from dataclasses import dataclass
 
+# Simulation/HIL MAVLink adresi (Ubuntu → Gazebo/SITL UDP).
+# REAL modda bu değer KULLANILMAZ — bağlantı payload/config.yaml →
+# flight_controller.connection'dan gelir (Cube Orange TELEM2 serial).
 MAVLINK_CONNECTION = "udp:127.0.0.1:14550"
 
 CAMERA_TOPIC = "/world/iris_runway/model/iris_with_gimbal/model/gimbal/link/pitch_link/sensor/camera/image"

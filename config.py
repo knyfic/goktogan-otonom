@@ -15,6 +15,11 @@ TARGET_APPROACH_ALTITUDE = 4.0
 PAYLOAD_RELEASE_ALTITUDE = 2.0
 # Hizalama tamamlandıktan sonra sabit iniş ile yükün bırakılacağı irtifa
 PAYLOAD_DROP_ALTITUDE = 1.0
+# Yük bırakma: PAYLOAD_DROP_ALTITUDE'a inildikten sonra görüntüye göre EK
+# bir hizalama denemesi süresi (saniye). 0 → devre dışı (eski davranış: sabit
+# iniş sonrası doğrudan bırak). >0 → bu süre boyunca hedef yeniden ortalama
+# denenir; 1m'de tespit edilemez veya süre dolarsa mevcut konumdan bırakılır.
+PAYLOAD_DROP_ALIGN_TIMEOUT_S = 5.0
 # Görev 2: küçük yükler yüksekten görülmez — arama bu irtifada başlar
 PAYLOAD_SEARCH_ALTITUDE = 2.0
 # Her kademede: yatay ortala → bu kadar metre in → tekrar ortala ...

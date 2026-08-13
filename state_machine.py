@@ -48,6 +48,7 @@ from config import (
     PAYLOAD_HEIGHT,
     PAYLOAD_PIXEL_TOLERANCE_PX,
     PIXEL_ALIGNMENT_TOLERANCE_PX,
+    PAYLOAD_DROP_ALIGN_TIMEOUT_S,
     PAYLOAD_DROP_ALTITUDE,
     PAYLOAD_RELEASE_ALTITUDE,
     PAYLOAD_SEARCH_ALTITUDE,
@@ -145,8 +146,10 @@ class MissionStateMachine:
         self._alt_waiting: bool = False
 
         # ---- Hedef hizalama fazı ----
-        self._align_phase: str = "HORIZONTAL"  # "HORIZONTAL" | "DESCENDING"
+        self._align_phase: str = "HORIZONTAL"  # "HORIZONTAL" | "DESCENDING" | "DROPPING" | "DROP_ALIGN"
         self._last_align_status_log_t: float = 0.0  # periyodik durum logu
+        # 1m'de opsiyonel ek hizalama (PAYLOAD_DROP_ALIGN_TIMEOUT_S) bitiş zamanı
+        self._drop_align_deadline: float | None = None
 
         # ---- Hedef ilk görüldüğünde kaydedilen kaba GPS ----
         # Hedef kadrajdan çıksa bile bu konuma dönebiliriz.
@@ -762,11 +765,60 @@ class MissionStateMachine:
         self._goto(MissionState.ALIGNING_TARGET)
 
     # ------------------------------------------------------------------ #
+    def _enter_drop_align(self) -> None:
+        """
+        1m (PAYLOAD_DROP_ALTITUDE) inişi tamamlanınca çağrılır — opsiyonel
+        görüntü tabanlı ek hizalama fazı başlatır (PAYLOAD_DROP_ALIGN_TIMEOUT_S).
+        Süre 0 ise bu metot çağrılmaz (eski davranış: doğrudan bırakma).
+        """
+        self._align_phase = "DROP_ALIGN"
+        self._drop_align_deadline = time.monotonic() + PAYLOAD_DROP_ALIGN_TIMEOUT_S
+        self._no_detection_count = 0
+        self.log.info(
+            "%.1fm'de ek görüntü hizalaması: %.1f sn süre tanındı "
+            "(tespit olmazsa mevcut konumdan bırakılır).",
+            PAYLOAD_DROP_ALTITUDE, PAYLOAD_DROP_ALIGN_TIMEOUT_S,
+        )
+
+    def _drop_align_tick(self, frame: np.ndarray, detection) -> bool:
+        """
+        DROP_ALIGN fazı ilerlemesi (non-blocking).
+        True → bırakma yapılabilir (hizalı VEYA süre doldu).
+        False → bekle (tespit yok / düzeltme komutu gönderildi).
+        """
+        if self._drop_align_deadline is None:
+            return True
+        if time.monotonic() > self._drop_align_deadline:
+            self.log.info(
+                "Ek hizalama süresi doldu (%.1f sn) — mevcut konumdan bırakılıyor.",
+                PAYLOAD_DROP_ALIGN_TIMEOUT_S,
+            )
+            return True
+        if detection is None:
+            return False
+        now = time.monotonic()
+        if now - self._last_align_cmd_t < ALIGN_CMD_INTERVAL_S:
+            return False
+        pos = self.nav.position()
+        aligned = self.position_controller.align_detection(
+            detection.center_x,
+            detection.center_y,
+            frame.shape[1],
+            frame.shape[0],
+            pos.relative_altitude,
+        )
+        self._last_align_cmd_t = now
+        if aligned:
+            self.log.info("1m ek hizalama tamamlandı — yük bırakılıyor.")
+            return True
+        return False
+
+    # ------------------------------------------------------------------ #
     def _do_align_target(self) -> None:
         """
         Kademeli yük bırakma yaklaşımı:
           yatay ortala → 2m in → yatay ortala → 2m in → ... → 2m'de son ortalama
-          → GPS kaydı → yük bırakma.
+          → GPS kaydı → 1m sabit iniş → (opsiyonel) 1m'de ek hizalama → yük bırakma.
         """
         frame = self.camera.latest()
         if frame is None:
@@ -808,14 +860,26 @@ class MissionStateMachine:
             result = self._altitude_ok()
             if result is False:
                 return  # hâlâ iniyor
-            # İrtifaya ulaşıldı veya timeout — yükü bırak
+            # İrtifaya ulaşıldı veya timeout
             self._reset_altitude_state()
             self.log.info(
-                "Sabit iniş tamamlandı (%.1fm). Yük bırakılıyor.",
+                "Sabit iniş tamamlandı (%.1fm).",
                 self.nav.position().relative_altitude,
             )
+            # Opsiyonel: 1m'de görüntüye göre bir kez daha hizala (timeout'lu).
+            # 1m'de şekil tespit edilemezse süre sonunda yine de bırakılır.
+            if PAYLOAD_DROP_ALIGN_TIMEOUT_S > 0:
+                self._enter_drop_align()
+                return
             self._align_phase = "HORIZONTAL"
             self._goto(MissionState.TARGET_ALIGNED)
+            return
+
+        # ---------- DROP_ALIGN fazı: 1m'de opsiyonel ek hizalama ----------
+        if self._align_phase == "DROP_ALIGN":
+            if self._drop_align_tick(frame, self.data.pending_detection):
+                self._align_phase = "HORIZONTAL"
+                self._goto(MissionState.TARGET_ALIGNED)
             return
 
         # ---------- DESCENDING fazı ----------
@@ -1950,7 +2014,7 @@ class MissionStateMachine:
         """
         Alınan yükü 2. hedefin merkezine kademeli iniş + yatay hizalama ile bırak.
         Görüntü işleme: second_target'ın renk + şeklini ara.
-        _align_phase: HORIZONTAL | DESCENDING | RELEASING
+        _align_phase: HORIZONTAL | DESCENDING | DROPPING | DROP_ALIGN | RELEASING
         """
         frame = self.camera.latest()
         pos = self.nav.position()
@@ -1986,10 +2050,31 @@ class MissionStateMachine:
                 return
             self._reset_altitude_state()
             self.log.info(
-                "Geri yük bırakma: sabit iniş tamamlandı (%.1fm) → yük bırakılıyor.",
+                "Geri yük bırakma: sabit iniş tamamlandı (%.1fm).",
                 self.nav.position().relative_altitude,
             )
+            # Opsiyonel: 1m'de 2. hedefe göre ek hizalama (timeout'lu)
+            if PAYLOAD_DROP_ALIGN_TIMEOUT_S > 0:
+                self._enter_drop_align()
+                return
             self._align_phase = "RELEASING"
+            return
+
+        # --- DROP_ALIGN: 1m'de opsiyonel ek hizalama (2. hedef renk+şekil) ---
+        if self._align_phase == "DROP_ALIGN":
+            if frame is None:
+                return
+            detections = self.target_detector.detect(frame)
+            target_obj = self.data.second_target
+            if target_obj is not None:
+                detections = [
+                    d for d in detections
+                    if d.color == target_obj.color
+                    and d.shape == target_obj.shape.value
+                ]
+            best = detections[0] if detections else None
+            if self._drop_align_tick(frame, best):
+                self._align_phase = "RELEASING"
             return
 
         # --- DESCENDING ---

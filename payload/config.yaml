@@ -149,5 +149,7 @@ video_stream:
   host: 192.168.1.100      # Ground station IP (kod içinde hard-code YOK)
   port: 5000
   codec: h264
+  preset: veryfast         # x264 hız/kalite dengesi: ultrafast…faster önerilir.
+                           # Karıncalanma görürsen 'faster'/'medium' veya bitrate'i artır.
   bitrate: 2000000         # bps — 960x540 HUD frame için 1.5-2 Mbps idealdir
   fps: 30                  # yayın FPS tavanı (encoder yükünü sınırlar, duplike frame'leri birleştirir)

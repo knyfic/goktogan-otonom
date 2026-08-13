@@ -100,6 +100,7 @@ Değişiklik rehberi:
 | Ground Station IP | `payload/config.yaml` | `video_stream.host` |
 | GStreamer portu | `payload/config.yaml` | `video_stream.port` |
 | Video bitrate / FPS | `payload/config.yaml` | `video_stream.bitrate` / `video_stream.fps` |
+| Video encode preset | `payload/config.yaml` | `video_stream.preset` (`ultrafast`…`veryfast` önerilir) |
 | Cube Orange UART cihazı | `payload/config.yaml` | `flight_controller.connection.device` |
 | UART baudrate | `payload/config.yaml` | `flight_controller.connection.baudrate` |
 | Heartbeat timeout | `payload/config.yaml` | `flight_controller.heartbeat_timeout_s` |
@@ -142,6 +143,15 @@ gst-launch-1.0 udpsrc port=5000 caps="application/x-rtp,media=video,encoding-nam
 > Yayınlanan frame, görev ekranının (HUD) birebir aynısıdır: 960x540,
 > ~1.5-2 Mbps, `tune=zerolatency` + leaky queue (encoder yavaşsa frame
 > düşer, görev asla bloklanmaz). GStreamer'ın kopması uçuşu durdurmaz.
+
+**Görüntü kalitesi ayarı (tuning):**
+
+| Sorun | Çözüm |
+|---|---|
+| Karıncalanma / bloklaşma (sahne değişince) | `video_stream.preset` → `faster`/`medium` veya `video_stream.bitrate` ↑ |
+| Kare kaybı / donma | `video_stream.fps` ↓ (30→25) veya `video_stream.bitrate` ↑ |
+| Ağ burst → bozulma | Kod içi sabit: `vbv-buf-capacity` (bitrate/2) bit patlamalarını sınırlar |
+| Gecikme hissi (stale frame) | Kod içi sabit: `queue leaky=upstream` — canlı yayında EN YENİ frame kazanır |
 
 ### İlk donanım testi (GÜVENLİ — uçuş komutu yok)
 

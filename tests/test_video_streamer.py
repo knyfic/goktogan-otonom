@@ -55,6 +55,30 @@ def test_video_streamer_unknown_codec_disabled():
     s.stop()
 
 
+def test_video_streamer_preset_normalization():
+    """Geçersiz preset → veryfast fallback; geçerli preset korunur."""
+    s = VideoStreamer(host="127.0.0.1", port=5000, bitrate=2_000_000, fps=30,
+                      preset="BOGUS", logger=_log)
+    assert s._preset == "veryfast"
+    s2 = VideoStreamer(host="127.0.0.1", port=5000, bitrate=2_000_000, fps=30,
+                       preset="faster", logger=_log)
+    assert s2._preset == "faster"
+
+
+def test_video_streamer_optimized_pipeline_builds():
+    """Optimize edilmiş pipeline (veryfast + vbv + leaky=upstream) kurulabiliyor.
+    GStreamer yoksa enabled=False kalır — asla raise etmez."""
+    s = VideoStreamer(host="127.0.0.1", port=5000, bitrate=2_000_000, fps=30,
+                      preset="veryfast", logger=_log)
+    s.start()
+    s.push(np.zeros((540, 960, 3), dtype=np.uint8))
+    # GStreamer kuruluysa pipeline kurulur ve frame push edilir
+    if s.enabled:
+        assert s.pushed_frames >= 1
+        assert s.error_count == 0
+    s.stop()
+
+
 def test_video_streamer_stats_properties():
     """pushed/dropped/error sayaçları — kapalıyken push no-op ve sayaçlar 0."""
     s = VideoStreamer(host="127.0.0.1", port=5000, bitrate=2_000_000, fps=30, logger=_log)

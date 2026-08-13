@@ -50,6 +50,7 @@ class VideoStreamer:
         bitrate: int = 2_000_000,
         codec: str = "h264",
         fps: int = 30,
+        preset: str = "veryfast",
         logger: logging.Logger | None = None,
     ) -> None:
         self._host = host
@@ -57,6 +58,7 @@ class VideoStreamer:
         self._bitrate = max(int(bitrate), 100_000)
         self._codec = str(codec).lower()
         self._fps = max(int(fps), 1)
+        self._preset = self._normalize_preset(preset)
         self._log = logger or logging.getLogger(__name__)
 
         self._gst = None          # gi.repository.Gst — start() içinde lazy yüklenir
@@ -68,6 +70,22 @@ class VideoStreamer:
         self._pushed_count = 0
         self._drop_count = 0
         self._error_count = 0
+
+    # ------------------------------------------------------------------ #
+    #  Yardımcılar
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _normalize_preset(preset: str) -> str:
+        """Geçersiz x264 preset'i → veryfast'e düş (kalite/CPU dengesi)."""
+        allowed = {
+            "ultrafast", "superfast", "veryfast", "faster", "fast",
+            "medium", "slow", "slower", "veryslow", "placebo",
+        }
+        p = str(preset).lower()
+        if p not in allowed:
+            return "veryfast"
+        return p
 
     # ------------------------------------------------------------------ #
     #  Yaşam döngüsü
@@ -188,22 +206,36 @@ class VideoStreamer:
     # ------------------------------------------------------------------ #
 
     def _build_pipeline(self, width: int, height: int) -> None:
-        """appsrc → videoconvert → leaky queue → x264enc → rtph264pay → udpsink."""
+        """appsrc → videoconvert → leaky queue → x264enc → rtph264pay → udpsink.
+
+        Kalite/kararlılık ayarları (HIL/REAL testlerinden):
+          • speed-preset=veryfast  — ultrafast çok verimsizdi; aynı bitrate'de
+            karıncalanma/mosquito noise yaratıyordu. veryfast ile CPU hâlâ rahat,
+            kalite belirgin iyi. (video_stream.preset ile değiştirilebilir)
+          • vbv-maxrate/vbv-bufsize — bitrate patlamalarını sınırlar: sahne
+            değişiminde ani yüksek bit üretimi → ağ kaybı → ekranda bozulma olmaz.
+          • queue leaky=upstream    — canlı yayında EN YENİ frame kazanır:
+            encoder geri kalırsa ESKİ frame'ler düşer, görüntü güncel kalır
+            (leaky=downstream eskiyi tutuyor, gecikme/büzüşme hissi yaratıyordu).
+          • tune=zerolatency korunur — gecikme hâlâ milisaniye seviyesinde.
+        """
         Gst = self._gst
         if Gst is None:
             return
         try:
             # x264enc bitrate birimi kbps'tir (config bps'tir)
             bitrate_kbps = max(self._bitrate // 1000, 100)
+            vbv_buf_kbps = max(bitrate_kbps // 2, 100)
             launch = (
                 f"appsrc name=src is-live=true format=time do-timestamp=true "
-                f"max-buffers=1 block=false "
+                f"max-buffers=2 block=false "
                 f'caps="video/x-raw,format=BGR,width={width},height={height},'
                 f"framerate={self._fps}/1\" "
                 f"! videoconvert ! video/x-raw,format=I420 "
-                f"! queue max-size-buffers=1 leaky=downstream "
-                f"! x264enc tune=zerolatency speed-preset=ultrafast "
+                f"! queue max-size-buffers=2 leaky=upstream "
+                f"! x264enc tune=zerolatency speed-preset={self._preset} "
                 f"bitrate={bitrate_kbps} bframes=0 key-int-max=30 "
+                f"vbv-buf-capacity={vbv_buf_kbps} "
                 f"! rtph264pay config-interval=1 pt=96 "
                 f"! udpsink host={self._host} port={self._port} sync=false"
             )
@@ -222,8 +254,9 @@ class VideoStreamer:
             self._enabled = True
             self._log.info(
                 "GStreamer yayın başladı: udp://%s:%d — %dx%d@%d h264 %.0f kbps "
-                "(zerolatency, leaky queue)",
+                "(zerolatency, preset=%s, leaky=upstream, vbv=%d)",
                 self._host, self._port, width, height, self._fps, bitrate_kbps,
+                self._preset, vbv_buf_kbps,
             )
         except Exception as exc:
             self._log.warning(

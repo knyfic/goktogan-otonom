@@ -244,6 +244,7 @@ def main():
                     bitrate=int(vs.get("bitrate", 2_000_000)),
                     codec=str(vs.get("codec", "h264")),
                     fps=int(vs.get("fps", 30)),
+                    preset=str(vs.get("preset", "veryfast")),
                     logger=logger,
                 )
                 streamer.start()      # başarısızsa enabled=False — uçuş devam

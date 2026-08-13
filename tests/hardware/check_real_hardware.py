@@ -60,17 +60,32 @@ def _check_mavlink(device: str, baud: int) -> bool:
 
     try:
         ok_uart = hw.report(True, "UART opened", f"{device} @ {baud}")
+        # MAVLink2 anlaşması: pymavlink MAVLink2 frame alınca mavlink20=True yapar
+        mav2 = bool(getattr(getattr(master, "mav", None), "mavlink20", False))
         ok_hb = hw.report(
             True, "Cube heartbeat received",
-            f"sysid={hb.get_srcSystem()} compid={hb.get_srcComponent()}",
+            f"sysid={hb.get_srcSystem()} compid={hb.get_srcComponent()} "
+            f"mavlink2={'EVET' if mav2 else 'HAYIR'}",
         )
 
         pos = hw.recv_telemetry(master, "GLOBAL_POSITION_INT", timeout_s=5.0)
         if pos is None:
-            ok_gps = hw.report(
-                False, "GPS telemetry received",
-                "5s içinde GLOBAL_POSITION_INT yok — GPS kilidi yok veya uçuş yok",
-            )
+            # GPS neden yok? — ham GPS verisini de dene (fix_type ayrımı)
+            gps = hw.recv_telemetry(master, "GPS_RAW_INT", timeout_s=2.0)
+            if gps is not None:
+                fix = gps.fix_type
+                sats = gps.satellites_visible
+                detail = (
+                    f"GPS modülü bağlı (fix_type={fix}, uydu={sats}) ama "
+                    "GLOBAL_POSITION_INT yok — GPS FIX bekleniyor (içerideysen "
+                    "uydu görünmez)."
+                )
+            else:
+                detail = (
+                    "GPS_RAW_INT de yok — GPS modülü bağlı değil veya kilit yok. "
+                    "GPS kablosu/bağlantısını ve MP GPS ekranını kontrol et."
+                )
+            ok_gps = hw.report(False, "GPS telemetry received", detail)
         else:
             lat = pos.lat / 1e7
             lon = pos.lon / 1e7

@@ -22,11 +22,11 @@ def _mock_master():
 # ── 1) Bağlantı kurulumu ───────────────────────────────────────────────────── #
 @patch("flight.navigation.mavutil")
 def test_serial_connection_passes_baud(mavutil_mock):
-    """REAL: serial cihaz + baudrate mavutil'a birlikte iletilmeli."""
+    """REAL: serial cihaz + baudrate + MAVLink2 (force_mavlink2) iletilmeli."""
     mavutil_mock.mavlink_connection.return_value = _mock_master()
     Navigation("/dev/serial0", baud=921600)
     mavutil_mock.mavlink_connection.assert_called_once_with(
-        "/dev/serial0", baud=921600
+        "/dev/serial0", baud=921600, force_mavlink2=True
     )
 
 

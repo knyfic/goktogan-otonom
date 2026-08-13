@@ -13,7 +13,11 @@ class Navigation:
         # Serial bağlantı (Cube Orange TELEM2 → RPi UART) için baudrate gerekir;
         # UDP/TCP bağlantılarında (simülasyon/HIL) kullanılmaz ve iletilmez.
         if baud is not None:
-            self.master = mavutil.mavlink_connection(connection_string, baud=baud)
+            # Serial (Cube Orange TELEM2): MAVLink 2 sabit — ArduPilot tarafında
+            # SERIAL2_PROTOCOL=2 (MAVLink2) + SERIAL2_BAUD=921 (921600) olmalı.
+            self.master = mavutil.mavlink_connection(
+                connection_string, baud=baud, force_mavlink2=True
+            )
         else:
             self.master = mavutil.mavlink_connection(connection_string)
         self.master.wait_heartbeat(timeout=30)

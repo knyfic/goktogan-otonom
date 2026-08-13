@@ -82,7 +82,9 @@ def open_mavlink(device: str, baud: int, timeout_s: float = 10.0):
     """
     from pymavlink import mavutil
 
-    master = mavutil.mavlink_connection(device, baud=baud)
+    master = mavutil.mavlink_connection(
+        device, baud=baud, force_mavlink2=True
+    )
     try:
         hb = master.recv_match(type="HEARTBEAT", blocking=True, timeout=timeout_s)
         if hb is None:

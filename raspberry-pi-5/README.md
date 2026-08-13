@@ -167,6 +167,12 @@ MAVLink connection → heartbeat
 
 ARM / TAKEOFF / GOTO / RTL komutları ilk test aşamasına dahil EDİLMEZ.
 
+> Not: ArduPilot telemetri stream'lerini (SRx_*) yalnızca GCS algıladığında
+> başlatır. Testler ve ana uygulama bağlantı açılışında GCS heartbeat gönderir
+> (uçuş komutu değil, MAVLink el sıkışması). Yine de yalnızca HEARTBEAT
+> geliyorsa Mission Planner'dan `SR2_POSITION`, `SR2_EXTRA1`, `SR2_EXTRA2`
+> değerlerinin 0 olmadığını ve `SERIAL2_PROTOCOL=2` olduğunu doğrula.
+
 ### ArduPilot failsafe (BİRİNCİL güvenlik katmanı)
 
 Raspberry Pi tarafındaki heartbeat watchdog ikincildir. Cube Orange üzerinde

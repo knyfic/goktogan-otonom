@@ -1,4 +1,5 @@
 import math
+import threading
 import time
 
 from pymavlink import mavutil
@@ -18,7 +19,7 @@ class Navigation:
             # Serial (Cube Orange TELEM2): MAVLink 2 sabit — ArduPilot tarafında
             # SERIAL2_PROTOCOL=2 (MAVLink2) + SERIAL2_BAUD=921 (921600) olmalı.
             self.master = mavutil.mavlink_connection(
-                connection_string, baud=baud, force_mavlink2=True
+                connection_string, baud=baud, force_mavlink2=True, write=True
             )
         else:
             self.master = mavutil.mavlink_connection(connection_string)
@@ -30,6 +31,29 @@ class Navigation:
                 self.master.port.rtscts = True
             except Exception:
                 pass
+
+        # ArduPilot telemetri stream'lerini (SRx_*) yalnızca GCS algıladığında
+        # başlatır. Serial bağlantıda her sn GCS heartbeat gönderilir — aksi
+        # halde yalnızca 1 Hz HEARTBEAT gelir, pozisyon/telemetri gelmez.
+        # (Uçuş komutu değildir; MAVLink el sıkışmasıdır.)
+        if baud is not None:
+            self._hb_stop = threading.Event()
+
+            def _hb_loop() -> None:
+                while not self._hb_stop.is_set():
+                    try:
+                        self.master.mav.heartbeat_send(
+                            mavutil.mavlink.MAV_TYPE_GCS,
+                            mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                            0, 0, 0,
+                        )
+                    except Exception:
+                        pass
+                    self._hb_stop.wait(1.0)
+
+            self._hb_thread = threading.Thread(target=_hb_loop, daemon=True)
+            self._hb_thread.start()
+
         self.master.wait_heartbeat(timeout=30)
         self.system_id = self.master.target_system
         self.component_id = self.master.target_component

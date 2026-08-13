@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -74,26 +75,53 @@ def check_serial_device(device: str) -> tuple[bool, str]:
     return True, f"{device} mevcut ve erişilebilir"
 
 
+def send_gcs_heartbeat(master) -> None:
+    """
+    GCS heartbeat gönderir — ArduPilot link'i "GCS bağlı" sayar ve SRx_*
+    telemetri akışını başlatır. UÇUŞ KOMUTU DEĞİLDİR; yalnızca MAVLink
+    el sıkışmasıdır (READ-ONLY testlerde güvenli).
+    """
+    from pymavlink import mavutil
+
+    try:
+        master.mav.heartbeat_send(
+            mavutil.mavlink.MAV_TYPE_GCS,
+            mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+            0, 0, 0,
+        )
+    except Exception:
+        pass
+
+
 def open_mavlink(
     device: str, baud: int, timeout_s: float = 10.0, flow_control: bool = False
 ):
     """
     MAVLink bağlantısı açar ve HEARTBEAT bekler (READ-ONLY).
 
-    HİÇBİR KOMUT GÖNDERMEZ. Heartbeat gelmezse TimeoutError fırlatır.
+    HİÇBİR UÇUŞ KOMUTU GÖNDERMEZ. Heartbeat gelmezse TimeoutError fırlatır.
     flow_control=True → TELEM2 RTS/CTS bağlıysa Pi tarafında rtscts açılır
     (921600'de FC TX kilitlenmesini önler).
+
+    ÖNEMLİ: Bağlantı açılır açılmaz GCS heartbeat gönderilir — ArduPilot
+    telemetri stream'lerini (SRx_*) yalnızca GCS algıladığında başlatır.
+    Heartbeat gönderilmezse yalnızca 1 Hz HEARTBEAT gelir (telemetri yok).
     """
     from pymavlink import mavutil
 
     master = mavutil.mavlink_connection(
-        device, baud=baud, force_mavlink2=True
+        device, baud=baud, force_mavlink2=True, write=True
     )
     if flow_control:
         try:
             master.port.rtscts = True
         except Exception:
             pass
+
+    # GCS algılansın — FC stream başlatsın (2 kez, kısa aralıkla)
+    send_gcs_heartbeat(master)
+    time.sleep(0.4)
+    send_gcs_heartbeat(master)
     try:
         hb = master.recv_match(type="HEARTBEAT", blocking=True, timeout=timeout_s)
         if hb is None:

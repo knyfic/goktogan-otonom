@@ -22,11 +22,11 @@ def _mock_master():
 # ── 1) Bağlantı kurulumu ───────────────────────────────────────────────────── #
 @patch("flight.navigation.mavutil")
 def test_serial_connection_passes_baud(mavutil_mock):
-    """REAL: serial cihaz + baudrate + MAVLink2 (force_mavlink2) iletilmeli."""
+    """REAL: serial cihaz + baudrate + MAVLink2 + write iletilmeli."""
     mavutil_mock.mavlink_connection.return_value = _mock_master()
     Navigation("/dev/serial0", baud=921600)
     mavutil_mock.mavlink_connection.assert_called_once_with(
-        "/dev/serial0", baud=921600, force_mavlink2=True
+        "/dev/serial0", baud=921600, force_mavlink2=True, write=True
     )
 
 
@@ -37,6 +37,26 @@ def test_serial_connection_flow_control(mavutil_mock):
     mavutil_mock.mavlink_connection.return_value = master
     Navigation("/dev/serial0", baud=921600, flow_control=True)
     assert master.port.rtscts is True
+
+
+@patch("flight.navigation.mavutil")
+def test_serial_connection_sends_gcs_heartbeats(mavutil_mock):
+    """Serial bağlantıda GCS heartbeat thread'i çalışır — ArduPilot stream
+    başlatsın diye (uçuş komutu değil, MAVLink el sıkışması)."""
+    import time
+
+    master = _mock_master()
+    mavutil_mock.mavlink_connection.return_value = master
+    nav = Navigation("/dev/serial0", baud=921600)
+
+    assert nav._hb_thread is not None
+    assert nav._hb_thread.daemon is True
+    # ~1.5 sn içinde en az bir heartbeat gönderilmiş olmalı (1 sn periyot)
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and master.mav.heartbeat_send.call_count == 0:
+        time.sleep(0.1)
+    assert master.mav.heartbeat_send.call_count >= 1
+    nav._hb_stop.set()
 
 
 @patch("flight.navigation.mavutil")

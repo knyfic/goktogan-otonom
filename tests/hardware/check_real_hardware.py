@@ -70,7 +70,13 @@ def _check_mavlink(device: str, baud: int, flow_control: bool = False) -> bool:
             f"mavlink2={'EVET' if mav2 else 'HAYIR'}",
         )
 
-        pos = hw.recv_telemetry(master, "GLOBAL_POSITION_INT", timeout_s=5.0)
+        # GPS bekleme döngüsü: her sn GCS heartbeat ile link aktif tutulur
+        # (uçuş komutu değil — MAVLink el sıkışması). FC stream başlatır.
+        pos = None
+        gps_deadline = time.monotonic() + 5.0
+        while time.monotonic() < gps_deadline and pos is None:
+            hw.send_gcs_heartbeat(master)
+            pos = hw.recv_telemetry(master, "GLOBAL_POSITION_INT", timeout_s=1.0)
         if pos is None:
             # GPS neden yok? — ham GPS verisini de dene (fix_type ayrımı)
             gps = hw.recv_telemetry(master, "GPS_RAW_INT", timeout_s=2.0)

@@ -8,6 +8,10 @@ BU TEST HİÇBİR UÇUŞ KOMUTU GÖNDERMEZ:
   ✗ arm / takeoff / goto / land / rtl / set_mode / command_long
   ✓ yalnızca TELEMETRİ OKUR: heartbeat, GPS, altitude, flight mode, battery
 
+NOT: ArduPilot telemetri stream'lerini yalnızca GCS algıladığında başlatır —
+bu test bağlantı açılırken ve toplama sırasında GCS HEARTBEAT gönderir
+(MAVLink el sıkışması, UÇUŞ KOMUTU DEĞİLDİR).
+
 pytest olarak da çalışır — Raspberry Pi dışında otomatik SKIP:
   python -m pytest tests/hardware/test_mavlink_connection.py -v
 """
@@ -38,22 +42,28 @@ _FORBIDDEN = ("command_long_send", "set_mode", "arducopter_arm", "motors_armed_w
 def _collect_telemetry(master, duration_s: float, timeout_s: float, initial_mode):
     """Heartbeat + GPS + altitude + mode + battery toplar. READ-ONLY.
 
-    Aynı bağlantı üzerinden toplanır (yeniden açma YOK — FC stream'i
-    yeni bağlantıda tekrar ramp-up beklemek zorunda kalmaz).
-    Mesaj gelmezse bayt/parse istatistiği de döndürür: link ölü mü
-    (bayt yok) yoksa taşma/bozulma mı (bayt var, parse hata)?
+    • Aynı bağlantı üzerinden (yeniden açma YOK).
+    • Her ~1 sn GCS heartbeat gönderilir — ArduPilot link'i aktif tutar
+      (uçuş komutu DEĞİL, MAVLink el sıkışması).
+    • Gelen TÜM mesaj tipleri sayılır (histogram) — FC gerçekte ne gönderiyor
+      görülsün diye.
     """
-    types = ("GLOBAL_POSITION_INT", "HEARTBEAT", "SYS_STATUS", "GPS_RAW_INT")
     samples = []
     mav = getattr(master, "mav", None)
     bytes_before = int(getattr(mav, "total_bytes_received", 0))
     errors_before = int(getattr(mav, "total_errors", 0))
     deadline = time.monotonic() + duration_s
+    last_hb_t = 0.0
     while time.monotonic() < deadline:
-        msg = hw.recv_telemetry(master, types, timeout_s=1.0)
+        now = time.monotonic()
+        if now - last_hb_t >= 1.0:
+            hw.send_gcs_heartbeat(master)
+            last_hb_t = now
+        msg = master.recv_match(blocking=True, timeout=1.0)  # tüm tipler
         if msg is not None:
             samples.append(msg)
 
+    type_counts: dict[str, int] = {}
     stats = {
         "gps": 0,
         "alt_min": None,
@@ -62,9 +72,11 @@ def _collect_telemetry(master, duration_s: float, timeout_s: float, initial_mode
         "battery_pct": None,
         "bytes_received": int(getattr(mav, "total_bytes_received", 0)) - bytes_before,
         "parse_errors": int(getattr(mav, "total_errors", 0)) - errors_before,
+        "type_counts": type_counts,
     }
     for m in samples:
         t = m.get_type()
+        type_counts[t] = type_counts.get(t, 0) + 1
         if t == "GLOBAL_POSITION_INT":
             stats["gps"] += 1
             alt = m.relative_alt / 1000.0
@@ -118,20 +130,38 @@ def run_check(
     else:
         print("[SKIP] Battery  (SYS_STATUS gelmedi)")
 
-    # Teşhis: 0 mesaj geldiyse neden? — bayt mı gelmiyor, yoksa parse mı edilemiyor?
+    # Teşhis: 0 mesaj geldiyse neden? — bayt mı gelmiyor, yoksa yalnızca
+    # HEARTBEAT mı geliyor (FC stream başlatmıyor)?
     if stats["gps"] == 0:
         if stats["bytes_received"] == 0:
             print(
-                "[DIAG] Hiç bayt gelmedi — FC göndermiyor/kilitli: SERIAL2_OPTIONS "
-                "flow control (bit 4) ve SR2_* stream hızlarını kontrol et; Mission "
-                "Planner ile TELEM2'ye 921600'de bağlanıp telemetri akıp akmadığını dene."
+                "[DIAG] Hiç bayt gelmedi — FC göndermiyor/kilitli: SERIAL2_PROTOCOL "
+                "(2=MAVLink2), SERIAL2_OPTIONS flow control eşleşmesi ve baud "
+                "kontrol et; Mission Planner ile TELEM2'ye 921600'de bağlanıp "
+                "telemetri akıp akmadığını dene."
+            )
+        elif stats["parse_errors"] > 0:
+            print(
+                f"[DIAG] {stats['bytes_received']} bayt geldi, {stats['parse_errors']} "
+                "parse hatası — hat/taşma sorunu (düşük kaliteli kablo, hatalı "
+                "toprak bağlantısı). Daha düşük baud ile karşılaştır."
             )
         else:
             print(
-                f"[DIAG] {stats['bytes_received']} bayt geldi ama parse edilemedi "
-                f"({stats['parse_errors']} hata) — RX taşması/hatlı UART: daha düşük "
-                f"baud dene (--baud 115200) veya flow control eşleştir."
+                f"[DIAG] {stats['bytes_received']} bayt, 0 hata — yalnızca HEARTBEAT "
+                "geliyor: FC telemetri stream'i başlatmıyor. Bu test artık GCS "
+                "heartbeat gönderiyor; yine de gelmiyorsa Mission Planner'da SR2_* "
+                "stream hızlarını kontrol et (SR2_POSITION>0, SR2_EXTRA1>0, "
+                "SR2_EXTRA2>0) ve SERIAL2_PROTOCOL=2 olduğunu doğrula."
             )
+        if stats["type_counts"]:
+            print(
+                "  Gelen tipler: " + ", ".join(
+                    f"{k}={v}" for k, v in sorted(stats["type_counts"].items())
+                )
+            )
+        else:
+            print("  Gelen tip: hiçbiri")
 
     ok = stats["gps"] > 0 and stats["mode"] is not None
     print()

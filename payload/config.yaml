@@ -134,7 +134,7 @@ gpio:
 # kullanılır). device/baudrate kod içinde hard-code değildir.
 flight_controller:
   connection:
-    device: /dev/serial0    # TELEM2 → RPi UART (raspi-config ile etkinleştirilmiş)
+    device: /dev/ttyAMA0    # TELEM2 → RPi UART (raspi-config ile etkinleştirilmiş)
     baudrate: 921600
     # TELEM2 RTS/CTS bağlıysa FC'deki akış kontrolü (SERIAL2_OPTIONS bit 4) ile
     # EŞLEŞTİR. 921600'de akış kontrolsüz RX taşması olur → heartbeat sonrası

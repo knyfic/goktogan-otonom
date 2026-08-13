@@ -193,7 +193,7 @@ PREVIEW_WINDOW_NAME = "İHA Kamera"
 # Canlı önizleme penceresi gösterim genişliği (piksel).
 # Görüntü işleme TAM çözünürlükte (1920×1080) yapılır; YALNIZCA pencere
 # gösterimi bu genişliğe küçültülür → imshow/HUD maliyeti ~4x azalır.
-PREVIEW_DISPLAY_WIDTH_PX = 960
+PREVIEW_DISPLAY_WIDTH_PX = 480
 
 # RTL sırasında önizleme güncelleme hızı (Hz).
 # 4 Hz çok seyrek (pencere takılıyor); 15 Hz akıcı ve küçültülmüş

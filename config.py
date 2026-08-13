@@ -145,6 +145,30 @@ CAMERA_ORIENTATION = 'NORMAL'
 RPI_CAMERA_NUM = 0            # CSI port (0 = CAM0)
 REAL_CAMERA_FPS    = 30
 
+# ── Vision ROI ────────────────────────────────────────────────────────────────
+# Payload/görev mekanizması kameranın DİKEY görüş alanının alt bölümünü kapatıyor.
+# Fiziksel ölçümler (aynı doğrultuda): toplam görüş ≈ 11.5 birim,
+# mekanizmanın kapattığı ≈ 4 birim → aktif oran ≈ 7.5/11.5 ≈ 0.65217.
+#
+# KAMERA FRAME'I DEĞİŞMEZ (1920x1080 capture + display + stream). Yalnızca
+# VISION pipeline'ı bu ROI'yi işler; alt bölge (mekanizma) yok sayılır.
+# FOV/calibration DEĞİŞMEZ: crop piksellerin açısını değiştirmez, bu yüzden
+# meters_per_pixel tam frame geometrisiyle hesaplanmaya devam eder.
+VISION_VIEW_TOTAL_LENGTH = 11.5          # dikey görüş alanı (fiziksel birim)
+VISION_BLOCKED_MECHANISM_LENGTH = 4.0    # mekanizmanın kapattığı alt bölüm
+VISION_ACTIVE_RATIO = (
+    (VISION_VIEW_TOTAL_LENGTH - VISION_BLOCKED_MECHANISM_LENGTH)
+    / VISION_VIEW_TOTAL_LENGTH
+)                                        # ≈ 0.65217
+VISION_ROI_X = 0                         # ROI üstten başlar
+VISION_ROI_Y = 0
+VISION_ROI_WIDTH = CAMERA_WIDTH_PX       # 1920 — genişlik değişmez
+# 1080 × 0.65217 ≈ 704.35 → 704 px
+VISION_ROI_HEIGHT = round(CAMERA_HEIGHT_PX * VISION_ACTIVE_RATIO)
+# VISION merkezi: full-frame merkezi (960,540) DEĞİL, aktif alanın merkezi
+VISION_CENTER_X = VISION_ROI_X + VISION_ROI_WIDTH / 2.0    # 960.0
+VISION_CENTER_Y = VISION_ROI_Y + VISION_ROI_HEIGHT / 2.0   # ≈ 352.0
+
 MIN_TARGET_AREA_PX = 400.0
 MIN_PAYLOAD_AREA_PX = 40.0
 DETECTION_HISTORY_SIZE = 5

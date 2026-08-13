@@ -108,7 +108,6 @@ Değişiklik rehberi:
 | Kamera montaj yönü (REAL+HIL) | `payload/config.yaml` | `camera.orientation` |
 | Kamera çözünürlük / FPS / CSI port | `config.py` | `CAMERA_WIDTH_PX` / `CAMERA_HEIGHT_PX` / `REAL_CAMERA_FPS` / `RPI_CAMERA_NUM` |
 | 1m'de ek hizalama süresi | `config.py` | `PAYLOAD_DROP_ALIGN_TIMEOUT_S` (0 = kapalı, varsayılan 5 sn) |
-| Vision ROI (mekanizma engeli) | `config.py` | `VISION_VIEW_TOTAL_LENGTH` / `VISION_BLOCKED_MECHANISM_LENGTH` → ROI ≈ 704 px, merkez (960,352) |
 | Görev irtifaları / hızlar / timeout'lar | `config.py` | örn. `TAKEOFF_ALTITUDE`, `MISSION_TIMEOUT_S`, `TAKEOFF_TIMEOUT`, `STATE_TIMEOUT`, `RTL_ARRIVAL_TIMEOUT_S` |
 
 > IP/port/device/baudrate Python kodunda HARD-CODE DEĞİLDİR — hepsi

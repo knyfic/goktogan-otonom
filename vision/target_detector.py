@@ -531,21 +531,19 @@ class TargetDetector:
         self._first_seen.clear()
 
     @staticmethod
-    def draw_detections(frame_bgr, detections, roi_y: int = 0):
-        """
-        Tespitleri frame üzerine çizer.
-        roi_y: tespitler ROI koordinat sistemindeyse full-frame Y ofseti
-        (ROI_Y). Merkez marker'ı burada çizilmez — HUD tarafından VISION
-        merkezine çizilir (vision/alignment referansı tek yerdendir).
-        """
+    def draw_detections(frame_bgr, detections):
         out = frame_bgr.copy()
+        h, w = out.shape[:2]
+        cx, cy = w // 2, h // 2
+        cv2.drawMarker(out, (cx, cy), (255, 255, 255), cv2.MARKER_CROSS, 20, 2)
 
         for det in detections:
             color_bgr = (255, 80, 0) if det.color.value == "BLUE" else (0, 60, 255)
             tx = int(det.center_x)
-            ty = int(det.center_y) + roi_y
+            ty = int(det.center_y)
 
             cv2.circle(out, (tx, ty), 6, color_bgr, -1)
+            cv2.line(out, (cx, cy), (tx, ty), color_bgr, 1)
 
             bw = int(det.bbox_width_px)
             bh = int(det.bbox_height_px)

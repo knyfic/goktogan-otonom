@@ -73,6 +73,12 @@ from config import (
     VERIFY_BAND_HIGH,
     VERIFY_FALLBACK_CONFIDENCE,
     VERTICAL_SPEED_MPS,
+    VISION_CENTER_X,
+    VISION_CENTER_Y,
+    VISION_ROI_HEIGHT,
+    VISION_ROI_WIDTH,
+    VISION_ROI_X,
+    VISION_ROI_Y,
 )
 from flight.navigation import Navigation, haversine_m
 from flight.position_controller import PositionController
@@ -369,6 +375,20 @@ class MissionStateMachine:
         self.camera.show(disp)
 
     # ------------------------------------------------------------------ #
+    def _vision_roi(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Full frame'in VISION aktif bölgesi — alt mekanizma alanı yok sayılır.
+        Detector'lar yalnızca bu ROI'yi görür; dönen koordinatlar ROI yereldir
+        (üstten başlar). Full-frame koordinatı = ROI koordinatı + (VISION_ROI_X,
+        VISION_ROI_Y). Şu an ROI (0,0) olduğundan fark yoktur ama abstraction
+        gelecekteki ROI kaydırmalarına hazırdır.
+        """
+        return frame[
+            VISION_ROI_Y:VISION_ROI_Y + VISION_ROI_HEIGHT,
+            VISION_ROI_X:VISION_ROI_X + VISION_ROI_WIDTH,
+        ]
+
+    # ------------------------------------------------------------------ #
     @staticmethod
     def _scale_for_display(frame: np.ndarray) -> np.ndarray:
         """
@@ -429,10 +449,21 @@ class MissionStateMachine:
                         (10, y2), cv2.FONT_HERSHEY_SIMPLEX, font_scale2, line2_color,
                         thickness2, cv2.LINE_AA)
 
-        # Merkez artı işareti
-        cx, cy = w // 2, h // 2
+        # VISION ROI sınırı (alt sınır net görünsün) + VISION merkez marker'ı.
+        # Full-frame koordinatları gösterim ölçeğine çevrilir (w, CAMERA_WIDTH_PX bazlı).
+        scale = w / float(CAMERA_WIDTH_PX)
+        roi_bottom = int((VISION_ROI_Y + VISION_ROI_HEIGHT) * scale)
+        vcx = int(VISION_CENTER_X * scale)
+        vcy = int(VISION_CENTER_Y * scale)
         marker_size = int(24 * ui_scale)
-        cv2.drawMarker(out, (cx, cy), (255, 255, 255),
+        # ROI alt sınırı — sarı çizgi (vision buraya kadar görür)
+        cv2.line(out, (0, roi_bottom), (w, roi_bottom), (0, 255, 255),
+                 max(1, int(ui_scale)), cv2.LINE_AA)
+        cv2.putText(out, "VISION ROI", (8, roi_bottom - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5 * ui_scale, (0, 255, 255),
+                    max(1, int(ui_scale)), cv2.LINE_AA)
+        # VISION merkez marker'ı (full-frame optik merkez (960,540) DEĞİL)
+        cv2.drawMarker(out, (vcx, vcy), (255, 255, 255),
                        cv2.MARKER_CROSS, marker_size, max(1, int(ui_scale)), cv2.LINE_AA)
         return out
 
@@ -498,8 +529,9 @@ class MissionStateMachine:
         return self._draw_hud(frame, l1, l2)
 
     def _set_display_detections(self, frame: np.ndarray, detections: list) -> None:
-        """Tespit overlay hazırla ve _pending_display'e koy."""
-        disp = TargetDetector.draw_detections(frame, detections)
+        """Tespit overlay hazırla ve _pending_display'e koy.
+        Tespitler ROI koordinat sistemindedir → full frame'e VISION_ROI_Y eklenir."""
+        disp = TargetDetector.draw_detections(frame, detections, roi_y=VISION_ROI_Y)
         det_str = "  ".join(
             f"{d.color.value[0]}{d.shape[0]} {d.confidence:.2f}"
             for d in detections[:3]
@@ -515,9 +547,10 @@ class MissionStateMachine:
         font_scale = 0.50 * ui_scale
         thickness  = max(1, int(ui_scale))
         for r in results:
-            tx, ty = int(r.center_x), int(r.center_y)
+            # ROI yerel koordinat → full frame koordinatı (+VISION_ROI_X/Y)
+            tx, ty = int(r.center_x) + VISION_ROI_X, int(r.center_y) + VISION_ROI_Y
             cv2.circle(disp, (tx, ty), int(10 * ui_scale), (0, 255, 255), max(1, int(2 * ui_scale)), cv2.LINE_AA)
-            cv2.line(disp, (w // 2, h // 2), (tx, ty), (0, 200, 200), thickness, cv2.LINE_AA)
+            cv2.line(disp, (int(VISION_CENTER_X), int(VISION_CENTER_Y)), (tx, ty), (0, 200, 200), thickness, cv2.LINE_AA)
             bw = int(r.width_px)
             bh = int(r.height_px)
             cv2.rectangle(disp, (tx - bw // 2, ty - bh // 2),
@@ -651,7 +684,8 @@ class MissionStateMachine:
 
         # Frame, kamera katmanından BGR olarak gelir. Detector içinde B↔R takası
         # yapmayız; Gazebo dahil tüm kaynaklarda renk sınıflandırması stabil kalır.
-        detections = self.target_detector.detect(frame)
+        # VISION ROI: alt mekanizma alanı yok sayılır (yalnızca üst bölge işlenir).
+        detections = self.target_detector.detect(self._vision_roi(frame))
 
         # İkinci hedef ararken birincisini filtrele
         if (self.data.state == MissionState.SEARCHING_SECOND_TARGET
@@ -803,8 +837,8 @@ class MissionStateMachine:
         aligned = self.position_controller.align_detection(
             detection.center_x,
             detection.center_y,
-            frame.shape[1],
-            frame.shape[0],
+            VISION_ROI_WIDTH,
+            VISION_ROI_HEIGHT,
             pos.relative_altitude,
         )
         self._last_align_cmd_t = now
@@ -842,7 +876,9 @@ class MissionStateMachine:
                 self._locked_shape or "-",
             )
 
-        detections = self._filter_active_detections(self.target_detector.detect(frame))
+        detections = self._filter_active_detections(
+            self.target_detector.detect(self._vision_roi(frame))
+        )
         self._set_display_detections(frame, detections)
 
         if detections:
@@ -917,14 +953,14 @@ class MissionStateMachine:
         aligned = self.position_controller.align_detection(
             detection.center_x,
             detection.center_y,
-            frame.shape[1],
-            frame.shape[0],
+            VISION_ROI_WIDTH,
+            VISION_ROI_HEIGHT,
             pos.relative_altitude,
         )
         self._last_align_cmd_t = now
 
-        dx = detection.center_x - frame.shape[1] / 2
-        dy = detection.center_y - frame.shape[0] / 2
+        dx = detection.center_x - VISION_CENTER_X
+        dy = detection.center_y - VISION_CENTER_Y
         heading = self.nav.position().heading_deg
         self.log.info(
             "ALIGN HORIZONTAL: merkez=(%.0f,%.0f) dx=%.0f dy=%.0f heading=%.0f° → hizalı=%s",
@@ -1267,8 +1303,8 @@ class MissionStateMachine:
             self._goto(MissionState.TASK_2_FAILED)
             return
 
-        # Hedef şeklini kamerada ara (hedefin rengi + şekli)
-        detections = self.target_detector.detect(frame)
+        # Hedef şeklini kamerada ara (hedefin rengi + şekli) — VISION ROI içinde
+        detections = self.target_detector.detect(self._vision_roi(frame))
         target_detections = [
             d for d in detections
             if d.color == target.color and d.shape == target.shape.value
@@ -1286,7 +1322,7 @@ class MissionStateMachine:
 
         aligned = self.position_controller.align_detection(
             best.center_x, best.center_y,
-            frame.shape[1], frame.shape[0],
+            VISION_ROI_WIDTH, VISION_ROI_HEIGHT,
             pos.relative_altitude,
         )
         self._last_align_cmd_t = now
@@ -1350,7 +1386,9 @@ class MissionStateMachine:
         # Renk sırası burada değiştirilmez. Beklenen renk, ilk kaydedilen hedefe
         # göre payload_for_target() ile belirlenir: mavi altıgen→kırmızı, kırmızı üçgen→mavi.
         color = self.payload_for_target(target)
-        results = self.payload_detector.detect(frame, pos.relative_altitude, color)
+        results = self.payload_detector.detect(
+            self._vision_roi(frame), pos.relative_altitude, color
+        )
         frame_for_display = frame
 
         # Ekrana kalan süreyi de göster
@@ -1361,7 +1399,7 @@ class MissionStateMachine:
         )
 
         if not results:
-            self.payload_tracker.update([], frame.shape)
+            self.payload_tracker.update([], (VISION_ROI_HEIGHT, VISION_ROI_WIDTH))
             return
 
         # Boyut filtresi: hedef boyutundaki renk tespitlerini at
@@ -1369,11 +1407,13 @@ class MissionStateMachine:
 
         if not filtered:
             self.log.debug("Payload araması: tüm tespitler boyut filtresinde reddedildi.")
-            self.payload_tracker.update([], frame.shape)
+            self.payload_tracker.update([], (VISION_ROI_HEIGHT, VISION_ROI_WIDTH))
             return
 
         # Tracker ile en güvenilir candidate'ı seç
-        best = self.payload_tracker.update(filtered, frame.shape)
+        best = self.payload_tracker.update(
+            filtered, (VISION_ROI_HEIGHT, VISION_ROI_WIDTH)
+        )
         if best is None:
             return
 
@@ -1464,7 +1504,7 @@ class MissionStateMachine:
                 if target_obj is not None:
                     color = self.payload_for_target(target_obj)
                     results = self.payload_detector.detect(
-                        frame, pos.relative_altitude, color
+                        self._vision_roi(frame), pos.relative_altitude, color
                     )
                     results = self._filter_payload_results(results, pos.relative_altitude)
                     self._set_display_payload(
@@ -1530,12 +1570,16 @@ class MissionStateMachine:
             return
 
         color = self.payload_for_target(target)
-        results = self.payload_detector.detect(frame, pos.relative_altitude, color)
+        results = self.payload_detector.detect(
+            self._vision_roi(frame), pos.relative_altitude, color
+        )
         # Boyut filtresi: hedef boyutundaki tespitleri at
         filtered = self._filter_payload_results(results, pos.relative_altitude)
 
         # Tracker: frame'ler arası tutarlı candidate seç
-        best = self.payload_tracker.update(filtered, frame.shape)
+        best = self.payload_tracker.update(
+            filtered, (VISION_ROI_HEIGHT, VISION_ROI_WIDTH)
+        )
 
         # Güncellenen etiket: irtifa ve sonraki hedef
         next_step = max(
@@ -1581,7 +1625,8 @@ class MissionStateMachine:
             return
 
         cx, cy = detection.center_x, detection.center_y
-        fw, fh = frame.shape[1], frame.shape[0]
+        # VISION ROI boyutları — merkez (960, ~352) referans alınır
+        fw, fh = VISION_ROI_WIDTH, VISION_ROI_HEIGHT
         dx = abs(cx - fw / 2)
         dy = abs(cy - fh / 2)
 
@@ -1827,7 +1872,9 @@ class MissionStateMachine:
 
         color = self.payload_for_target(target)
         pos   = self.nav.position()
-        raw   = self.payload_detector.detect(frame, pos.relative_altitude, color)
+        raw   = self.payload_detector.detect(
+            self._vision_roi(frame), pos.relative_altitude, color
+        )
         candidates = self._filter_payload_results(raw, pos.relative_altitude)
 
         # Validation'da confidence sıralaması yerine önceki hizalamadan bilinen
@@ -2064,7 +2111,7 @@ class MissionStateMachine:
         if self._align_phase == "DROP_ALIGN":
             if frame is None:
                 return
-            detections = self.target_detector.detect(frame)
+            detections = self.target_detector.detect(self._vision_roi(frame))
             target_obj = self.data.second_target
             if target_obj is not None:
                 detections = [
@@ -2098,7 +2145,7 @@ class MissionStateMachine:
             return
 
         target_obj = self.data.second_target
-        detections = self.target_detector.detect(frame)
+        detections = self.target_detector.detect(self._vision_roi(frame))
         if target_obj is not None:
             # Yalnızca 2. hedefe ait renk + şekli ara
             detections = [
@@ -2128,7 +2175,7 @@ class MissionStateMachine:
 
         aligned = self.position_controller.align_detection(
             best.center_x, best.center_y,
-            frame.shape[1], frame.shape[0],
+            VISION_ROI_WIDTH, VISION_ROI_HEIGHT,
             pos.relative_altitude,
         )
         self._last_align_cmd_t = now
@@ -2318,8 +2365,9 @@ class MissionStateMachine:
         min_area = expected_area * 0.10
         max_area = expected_area * (MAX_PAYLOAD_SIZE_FACTOR ** 2)
 
-        # Kamera çözünürlüğü (merkeze uzaklık ve köşe/kenar filtresi için)
-        cw, ch = self.camera_model.width_px, self.camera_model.height_px
+        # VISION ROI boyutları (merkeze uzaklık ve köşe/kenar filtresi için).
+        # Tespitler ROI koordinat sistemindedir → marjlar ROI'ye göre.
+        cw, ch = VISION_ROI_WIDTH, VISION_ROI_HEIGHT
         margin_x = cw * 0.15  # %15 kenar marjı
         margin_y = ch * 0.15
 
@@ -2353,9 +2401,9 @@ class MissionStateMachine:
 
         if abs(altitude_m - PAYLOAD_VERIFY_ALTITUDE) <= VERIFY_ALT_TOLERANCE and filtered:
             expected_area = float(PAYLOAD_EXPECTED_W_PX_AT_1M) * float(PAYLOAD_EXPECTED_H_PX_AT_1M)
-            # referans merkez: görüntü merkezi (approach sırasında hedef ortada olur)
-            ref_x = cw / 2.0
-            ref_y = ch / 2.0
+            # referans merkez: VISION merkezi (ROI koordinat sisteminde)
+            ref_x = VISION_CENTER_X
+            ref_y = VISION_CENTER_Y
             # normalize factor for distances: image diagonal
             diag = (cw * cw + ch * ch) ** 0.5
 
@@ -2387,9 +2435,9 @@ class MissionStateMachine:
 
         ref_det = self.data.pending_detection
         if ref_det is None:
-            # Merkez bilgisi yok — fallback: Görüntü merkezini kullan
-            ref_x = self.camera_model.width_px / 2.0
-            ref_y = self.camera_model.height_px / 2.0
+            # Merkez bilgisi yok — fallback: VISION merkezini kullan
+            ref_x = VISION_CENTER_X
+            ref_y = VISION_CENTER_Y
         else:
             ref_x, ref_y = ref_det.center_x, ref_det.center_y
 

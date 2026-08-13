@@ -32,9 +32,10 @@ def test_build_navigation_real_uses_config_serial(mavutil_mock):
     mavutil_mock.mavlink_connection.return_value = master
 
     cfg = _load_config()
+    conn = cfg["flight_controller"]["connection"]
     nav = _build_navigation("real", cfg, logging.getLogger("t"))
     mavutil_mock.mavlink_connection.assert_called_once_with(
-        "/dev/serial0", baud=921600, force_mavlink2=True, write=True
+        conn["device"], baud=conn["baudrate"], force_mavlink2=True, write=True
     )
     assert nav.system_id == 1
     nav._hb_stop.set()

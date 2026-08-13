@@ -114,9 +114,11 @@ def run_stream(
     from config import (
         CAMERA_HEIGHT_PX,
         CAMERA_WIDTH_PX,
+        PREVIEW_DISPLAY_WIDTH_PX,
         REAL_CAMERA_FPS,
         RPI_CAMERA_NUM,
     )
+    import cv2
     from services.video_streamer import VideoStreamer
     from vision.rpi_camera import RPiCam3
 
@@ -125,6 +127,19 @@ def run_stream(
     # (HIL sunucu + REAL ortak — fiziksel montaj). Bölüm yoksa NORMAL fallback.
     cam_cfg = hw.load_payload_config().get("camera", {}) or {}
     orientation = str(cam_cfg.get("orientation", "NORMAL"))
+
+    # Yayın çözünürlüğü: mission ile aynı — kamera TAM (1920x1080) çeker,
+    # gösterim/stream PREVIEW_DISPLAY_WIDTH_PX (960) genişliğe küçültülür
+    # (yarısı = 960x540). state_machine._scale_for_display ile birebir aynı.
+    stream_w = PREVIEW_DISPLAY_WIDTH_PX
+    stream_h = max(1, int(round(CAMERA_HEIGHT_PX * stream_w / CAMERA_WIDTH_PX)))
+
+    def _scale_for_stream(frame):
+        h, w = frame.shape[:2]
+        if w <= stream_w:
+            return frame
+        nh = max(1, int(round(h * stream_w / w)))
+        return cv2.resize(frame, (stream_w, nh), interpolation=cv2.INTER_AREA)
 
     receiver: _LoopbackReceiver | None = None
     if loopback:
@@ -155,7 +170,7 @@ def run_stream(
 
     try:
         print(
-            f"Yayın: {host}:{port}  {CAMERA_WIDTH_PX}x{CAMERA_HEIGHT_PX} "
+            f"Yayın: {host}:{port}  {stream_w}x{stream_h} (kamera {CAMERA_WIDTH_PX}x{CAMERA_HEIGHT_PX} → yarısı) "
             f"h264 {bitrate // 1000} kbps  fps-cap={fps}"
         )
         t0 = time.monotonic()
@@ -163,7 +178,8 @@ def run_stream(
         while time.monotonic() < loop_until:
             frame = cam.latest()
             if frame is not None:
-                streamer.push(frame)
+                # Mission ile aynı: stream'e yalnızca küçültülmüş frame gider
+                streamer.push(_scale_for_stream(frame))
             time.sleep(0.01)
         wall_s = time.monotonic() - t0
         cpu_after = os.times()
@@ -184,6 +200,8 @@ def run_stream(
             "cpu_s": cpu_s,
             "cpu_pct_single_core": cpu_pct,
             "received": receiver.count if receiver else None,
+            "stream_w": stream_w,
+            "stream_h": stream_h,
         }
 
         print(f"  süre:           {wall_s:.1f}s")

@@ -34,7 +34,7 @@ def test_build_navigation_real_uses_config_serial(mavutil_mock):
     cfg = _load_config()
     nav = _build_navigation("real", cfg, logging.getLogger("t"))
     mavutil_mock.mavlink_connection.assert_called_once_with(
-        "/dev/serial0", baud=921600
+        "/dev/serial0", baud=921600, force_mavlink2=True
     )
     assert nav.system_id == 1
 

@@ -9,7 +9,9 @@ from models import VehiclePosition
 class Navigation:
     """ArduPilot MAVLink adapter. DISARM operasyonu içermez."""
 
-    def __init__(self, connection_string: str, baud: int | None = None):
+    def __init__(
+        self, connection_string: str, baud: int | None = None, flow_control: bool = False
+    ):
         # Serial bağlantı (Cube Orange TELEM2 → RPi UART) için baudrate gerekir;
         # UDP/TCP bağlantılarında (simülasyon/HIL) kullanılmaz ve iletilmez.
         if baud is not None:
@@ -20,6 +22,14 @@ class Navigation:
             )
         else:
             self.master = mavutil.mavlink_connection(connection_string)
+
+        # TELEM2 RTS/CTS bağlıysa ve config'te flow_control: true ise Pi tarafında
+        # donanım akış kontrolünü aç — FC'nin TX'i 921600'de kilitlenmesin.
+        if baud is not None and flow_control:
+            try:
+                self.master.port.rtscts = True
+            except Exception:
+                pass
         self.master.wait_heartbeat(timeout=30)
         self.system_id = self.master.target_system
         self.component_id = self.master.target_component

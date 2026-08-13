@@ -74,17 +74,26 @@ def check_serial_device(device: str) -> tuple[bool, str]:
     return True, f"{device} mevcut ve erişilebilir"
 
 
-def open_mavlink(device: str, baud: int, timeout_s: float = 10.0):
+def open_mavlink(
+    device: str, baud: int, timeout_s: float = 10.0, flow_control: bool = False
+):
     """
     MAVLink bağlantısı açar ve HEARTBEAT bekler (READ-ONLY).
 
     HİÇBİR KOMUT GÖNDERMEZ. Heartbeat gelmezse TimeoutError fırlatır.
+    flow_control=True → TELEM2 RTS/CTS bağlıysa Pi tarafında rtscts açılır
+    (921600'de FC TX kilitlenmesini önler).
     """
     from pymavlink import mavutil
 
     master = mavutil.mavlink_connection(
         device, baud=baud, force_mavlink2=True
     )
+    if flow_control:
+        try:
+            master.port.rtscts = True
+        except Exception:
+            pass
     try:
         hb = master.recv_match(type="HEARTBEAT", blocking=True, timeout=timeout_s)
         if hb is None:

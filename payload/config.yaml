@@ -134,8 +134,12 @@ gpio:
 # kullanılır). device/baudrate kod içinde hard-code değildir.
 flight_controller:
   connection:
-    device: /dev/ttyAMA0    # TELEM2 → RPi UART (raspi-config ile etkinleştirilmiş)
+    device: /dev/serial0    # TELEM2 → RPi UART (raspi-config ile etkinleştirilmiş)
     baudrate: 921600
+    # TELEM2 RTS/CTS bağlıysa FC'deki akış kontrolü (SERIAL2_OPTIONS bit 4) ile
+    # EŞLEŞTİR. 921600'de akış kontrolsüz RX taşması olur → heartbeat sonrası
+    # sessizlik görülür (link açılıyor ama telemetri gelmiyor).
+    flow_control: true
   # MAVLink telemetri kaybında RTL'ye geçme süresi (saniye).
   # 0/None → watchdog devre dışı. BİRİNCİL güvenlik katmanı Cube Orange'ın
   # kendi ArduPilot failsafe ayarlarıdır; bu sadece ikincil bir izleyicidir.

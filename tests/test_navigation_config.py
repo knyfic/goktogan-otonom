@@ -31,6 +31,15 @@ def test_serial_connection_passes_baud(mavutil_mock):
 
 
 @patch("flight.navigation.mavutil")
+def test_serial_connection_flow_control(mavutil_mock):
+    """flow_control=True → serial portta rtscts açılır (TELEM2 RTS/CTS)."""
+    master = _mock_master()
+    mavutil_mock.mavlink_connection.return_value = master
+    Navigation("/dev/serial0", baud=921600, flow_control=True)
+    assert master.port.rtscts is True
+
+
+@patch("flight.navigation.mavutil")
 def test_udp_connection_without_baud(mavutil_mock):
     """SIM/HIL: baud yok → eski davranış korunur (tek argüman)."""
     mavutil_mock.mavlink_connection.return_value = _mock_master()

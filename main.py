@@ -161,11 +161,13 @@ def _build_navigation(mode: str, cfg: dict, logger):
         conn = fc.get("connection", {}) or {}
         device = conn.get("device")
         baud = conn.get("baudrate")
+        flow_control = bool(conn.get("flow_control", False))
         if device:
             logger.info(
-                "REAL → Cube Orange MAVLink: device=%s baud=%s", device, baud,
+                "REAL → Cube Orange MAVLink: device=%s baud=%s flow_control=%s",
+                device, baud, flow_control,
             )
-            return Navigation(device, baud=baud)
+            return Navigation(device, baud=baud, flow_control=flow_control)
         logger.warning(
             "flight_controller.connection.device tanımlı değil — "
             "MAVLINK_CONNECTION fallback: %s", MAVLINK_CONNECTION,

@@ -103,6 +103,7 @@ Değişiklik rehberi:
 | Video encode preset | `payload/config.yaml` | `video_stream.preset` (`ultrafast`…`veryfast` önerilir) |
 | Cube Orange UART cihazı | `payload/config.yaml` | `flight_controller.connection.device` |
 | UART baudrate | `payload/config.yaml` | `flight_controller.connection.baudrate` |
+| UART flow control (RTS/CTS) | `payload/config.yaml` | `flight_controller.connection.flow_control` |
 | Heartbeat timeout | `payload/config.yaml` | `flight_controller.heartbeat_timeout_s` |
 | Kamera montaj yönü (REAL+HIL) | `payload/config.yaml` | `camera.orientation` |
 | Kamera çözünürlük / FPS / CSI port | `config.py` | `CAMERA_WIDTH_PX` / `CAMERA_HEIGHT_PX` / `REAL_CAMERA_FPS` / `RPI_CAMERA_NUM` |

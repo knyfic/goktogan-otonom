@@ -50,9 +50,11 @@ def _check_serial(device: str) -> bool:
     return hw.report(ok, f"{device} exists + accessible", detail)
 
 
-def _check_mavlink(device: str, baud: int) -> bool:
+def _check_mavlink(device: str, baud: int, flow_control: bool = False) -> bool:
     try:
-        master, hb = hw.open_mavlink(device, baud, timeout_s=10.0)
+        master, hb = hw.open_mavlink(
+            device, baud, timeout_s=10.0, flow_control=flow_control
+        )
     except TimeoutError as exc:
         return hw.report(False, "UART opened", str(exc))
     except Exception as exc:
@@ -236,8 +238,9 @@ def main() -> int:
         fc = cfg.get("flight_controller", {}).get("connection", {}) or {}
         device = fc.get("device", "/dev/serial0")
         baud = fc.get("baudrate", 921600)
+        flow_control = bool(fc.get("flow_control", False))
         results.append(_check_serial(device))
-        results.append(_check_mavlink(device, baud))
+        results.append(_check_mavlink(device, baud, flow_control))
 
     if args.no_camera:
         print("[SKIP] Kamera kontrolü (--no-camera)")

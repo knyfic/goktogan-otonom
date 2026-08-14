@@ -11,19 +11,19 @@ GAZEBO_TRANSPORT_MODULE = "gz.transport"
 TAKEOFF_ALTITUDE = 8.0
 TARGET_APPROACH_ALTITUDE = 4.0
 
-# Yük bırakma: görüntü işleme ile hizalanılan irtifa
-PAYLOAD_RELEASE_ALTITUDE = 2.0
-# Hizalama tamamlandıktan sonra sabit iniş ile yükün bırakılacağı irtifa
+# Yük bırakma: görüntü işleme ile HASSAS hizalanılan irtifa.
+# Kadraj kırpma sonrası (1920x704) görüş daraldığı için 1m gibi alçak irtifada
+# hizalama yapılamıyor → son hizalama 2.5m'de yapılır.
+PAYLOAD_RELEASE_ALTITUDE = 3
+# Hizalama + offset düzeltmesi sonrası DİK iniş ile inilen ve yükün bırakıldığı irtifa
 PAYLOAD_DROP_ALTITUDE = 1.0
-# Yük bırakma: PAYLOAD_DROP_ALTITUDE'a inildikten sonra görüntüye göre EK
-# bir hizalama denemesi süresi (saniye). 0 → devre dışı (eski davranış: sabit
-# iniş sonrası doğrudan bırak). >0 → bu süre boyunca hedef yeniden ortalama
-# denenir; 1m'de tespit edilemez veya süre dolarsa mevcut konumdan bırakılır.
-PAYLOAD_DROP_ALIGN_TIMEOUT_S = 5.0
+# 1m'de görüntüye göre EK hizalama denemesi (saniye). 0 → devre dışı:
+# yeni akış 2.5m'de hizalama + offset düzeltmesi yapar, sonra dik iner ve bırakır.
+PAYLOAD_DROP_ALIGN_TIMEOUT_S = 0.0
 # Görev 2: küçük yükler yüksekten görülmez — arama bu irtifada başlar
-PAYLOAD_SEARCH_ALTITUDE = 2.0
+PAYLOAD_SEARCH_ALTITUDE = 3.0
 # Her kademede: yatay ortala → bu kadar metre in → tekrar ortala ...
-ALIGNMENT_DESCENT_STEP_M = 2.0
+ALIGNMENT_DESCENT_STEP_M = 1.0
 
 # Geriye dönük uyumluluk
 FINAL_TARGET_ALTITUDE = PAYLOAD_RELEASE_ALTITUDE
@@ -87,7 +87,13 @@ PAYLOAD_ALIGN_TIMEOUT_S = 4.0
 # kadar ileri giderek mekanizmayı payload'ın tam üzerine getirir.
 CAMERA_TO_MECHANISM_OFFSET_M = 0.08
 
-# Offset düzeltmesinde 8cm'lik ileri hareketin tamamlanması için verilen
+# Yük BIRAKMA offseti (metre): 2.5m'de (PAYLOAD_RELEASE_ALTITUDE) görüntü
+# hizalaması bittikten sonra İHA, hedef merkez doğrultusu boyunca bu kadar
+# İLERİ gider (görev mekanizması arkada → hedefin tam ortasına denk gelir).
+# Bu adımda görüntü işleme kapalıdır; config'ten istenildiği gibi değiştirilir.
+DROP_OFFSET_M = 1
+
+# Offset düzeltmesinde ileri hareketin tamamlanması için verilen
 # maksimum süre (saniye). Bu süre dolunca alçalmaya geçilir.
 OFFSET_CORRECTION_WAIT_S = 2.0
 
@@ -145,6 +151,13 @@ CAMERA_ORIENTATION = 'NORMAL'
 RPI_CAMERA_NUM = 0            # CSI port (0 = CAM0)
 REAL_CAMERA_FPS    = 30
 
+# ── Vision kırpma (payload mekanizması) ─────────────────────────────────────
+# Görev mekanizması kameranın DİKEY kadrajının alt kısmını kaplıyor. Bu değer,
+# kadrajın ÜSTTEN itibaren kaç pikselinin vision pipeline'a verileceğidir:
+#   704 → vision 1920x704 kullanır (alt 376 px — mekanizma — yok sayılır),
+#   kamera yine 1920x1080 üretmeye devam eder (FOV/geometri değişmez).
+VISION_HEIGHT_PX = 704   # px — vision'a verilen frame yüksekliği (tek ayar)
+
 MIN_TARGET_AREA_PX = 400.0
 MIN_PAYLOAD_AREA_PX = 40.0
 DETECTION_HISTORY_SIZE = 5
@@ -173,11 +186,28 @@ VERTICAL_SPEED_MPS = 1.0
 
 POSITION_TOLERANCE_M = 0.35
 ALTITUDE_TOLERANCE_M = 0.20
-PIXEL_ALIGNMENT_TOLERANCE_PX = 30.0
+# Hizalama piksel toleransı. 2.5m'de hedef büyük olduğundan sıkı tolerans (30px)
+# centroid jitter'ı yüzünden uzun süren ortalama üretiyor → 60px yeterli (hedef
+# 4m çap; bırakma hedefin içinde kalır). Payload alımı kendi sıkı toleransını
+# (PAYLOAD_PIXEL_TOLERANCE_PX) kullanmaya devam eder.
+PIXEL_ALIGNMENT_TOLERANCE_PX = 60.0
 
 # Hizalama komutu gönderme aralığı (saniye)
-# Her step'te değil, bu aralıkta bir goto_body_offset gönderilir.
+# Her step'te değil, bu aralıkta bir goto_global gönderilir.
 ALIGN_CMD_INTERVAL_S = 0.4
+
+# Hizalama komut ölçeği (gain) — piksel hatasının NE KADARI metre düzeltmesine
+# çevrilir. 0.8: hızlı yakınsama (uzun süreli hassas ortalama gerekmiyor);
+# hedef görüntüyü doldurduğunda 'hedef üzerinde' kabul edilip inişe geçilir.
+ALIGN_GAIN = 0.8
+
+# "Hizalı" kararı için GEREKLİ ardışık frame sayısı (temporal confirmation).
+# Tek bir frame'de hedefin milisaniyelik merkeze denk gelmesi (jitter / tesadüfi
+# geçiş) İHA'yı yanlış "ortaladım" sonucuna götürmesin diye, hedefin merkezde
+# ARDIŞIK bu kadar frame kalması şart koşulur; araya hizasız frame girerse sayaç
+# sıfırlanır. ALIGN_CMD_INTERVAL_S (0.4s) aralığında sayıldığından 3 onay ≈ 1.2s
+# stabil merkezde kalma demektir.
+ALIGNED_FRAMES_REQUIRED = 3
 
 # GPS kalite biriktirme: hizalama döngüsünde "hizalı" anında GPS + confidence
 # kaydedilir; en az bu kadar örnek birikmeden GPS kesinleşmez.

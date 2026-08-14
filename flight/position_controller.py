@@ -1,6 +1,6 @@
 import math
 
-from config import PIXEL_ALIGNMENT_TOLERANCE_PX
+from config import ALIGN_GAIN, PIXEL_ALIGNMENT_TOLERANCE_PX
 from flight.navigation import Navigation
 from vision.geometry import CameraModel
 
@@ -54,9 +54,11 @@ class PositionController:
             return True
 
         # Adım 1: Piksel → araç gövde ekseni (body frame)
+        # ALIGN_GAIN: tam düzeltme (1.0) İHA'nın hedefi aşıp etrafında dönmesine
+        # yol açar; yarım düzeltme (0.5) geometrik yakınsama sağlar (daire yok).
         mpp_x, mpp_y = self.camera.meters_per_pixel(altitude_m)
-        forward_m = -dy * mpp_y   # image +Y → araç gerisi → forward negatif
-        right_m   =  dx * mpp_x   # image +X → araç sağı   → right pozitif
+        forward_m = -dy * mpp_y * ALIGN_GAIN   # image +Y → araç gerisi → forward negatif
+        right_m   =  dx * mpp_x * ALIGN_GAIN   # image +X → araç sağı   → right pozitif
 
         # Adım 2: Body → NED  (araç heading'i ile rotate)
         pos = self.navigation.position()
@@ -72,8 +74,12 @@ class PositionController:
             pos.latitude, pos.longitude, north_m, east_m
         )
 
-        # Adım 4: Mevcut irtifayı koruyarak hedefe git
-        self.navigation.goto_global(target_lat, target_lon, altitude_m)
+        # Adım 4: Mevcut irtifayı koruyarak hedefe git.
+        # Yaw kilidi: İHA burnu komutlar arasında dönmesin — düzeltme vektörleri
+        # tutarlı frame'de hesaplanır (hedef etrafında dönme/daire önlenir).
+        self.navigation.goto_global(
+            target_lat, target_lon, altitude_m, yaw_deg=pos.heading_deg
+        )
         return False
 
 

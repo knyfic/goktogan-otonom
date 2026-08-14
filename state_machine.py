@@ -36,7 +36,9 @@ from config import (
     FIELD_LENGTH,
     FIELD_WIDTH,
     ALIGNMENT_DESCENT_STEP_M,
+    ALIGNED_FRAMES_REQUIRED,
     CAMERA_TO_MECHANISM_OFFSET_M,
+    DROP_OFFSET_M,
     MISSION_TIMEOUT_S,
     MAX_PICKUP_ATTEMPTS,
     MAX_PAYLOAD_SIZE_FACTOR,
@@ -190,6 +192,10 @@ class MissionStateMachine:
         self._payload_descent_alt: float | None = None
         # Her HORIZONTAL fazının başlangıç zamanı — timeout için
         self._align_phase_start_t: float | None = None
+        # Ardışık "hizalı" frame sayacı — tek frame'de merkezde görünmek
+        # (jitter / tesadüf) hizalı sayılmasın; ALIGNED_FRAMES_REQUIRED ardışık
+        # onay gereklidir. Hizasız frame sayaçı sıfırlar.
+        self._aligned_frame_count: int = 0
 
         # ---- SEARCHING_PAYLOAD timeout ----
         # Payload bulunamazsa bu süre sonunda yukarı çıkıp yeniden merkezle.
@@ -531,6 +537,16 @@ class MissionStateMachine:
         l1, l2 = self._hud_lines(extra=f"{label}  {pl_str}")
         self._pending_display = self._draw_hud(disp, l1, l2)
 
+    def _set_display_offset(self, label: str) -> None:
+        """Bırakma OFFSET fazı bildirimi — görüntü işleme penceresinde
+        payload alımındaki gibi HUD satırı olarak gösterilir.
+        Görüntü işleme kapalıyken son kare üzerine çizilir (read-only)."""
+        frame = self.camera.latest()
+        if frame is None:
+            return
+        l1, l2 = self._hud_lines(extra=label)
+        self._pending_display = self._draw_hud(frame, l1, l2)
+
     # ==================================================================== #
     #  Non-blocking irtifa yardımcıları
     # ==================================================================== #
@@ -817,9 +833,64 @@ class MissionStateMachine:
     def _do_align_target(self) -> None:
         """
         Kademeli yük bırakma yaklaşımı:
-          yatay ortala → 2m in → yatay ortala → 2m in → ... → 2m'de son ortalama
-          → GPS kaydı → 1m sabit iniş → (opsiyonel) 1m'de ek hizalama → yük bırakma.
+          yatay ortala → in → ortala → ... → 2.5m'de son ortalama
+          → OFFSET düzeltmesi (İHA ileri — mekanizma hedefin ortasına)
+          → görüntü işleme KAPALI → dik iniş 1m → yük bırakma.
         """
+        # ── Görüntü işleme GEREKTİRMEYEN fazlar ──────────────────────────────
+        # OFFSET: 2.5m'de ortalama bitti; İHA, hedef merkez doğrultusu boyunca
+        # DROP_OFFSET_M (0.5m) İLERİ hareket eder (yük mekanizması arkada →
+        # hedefin ortasına denk gelir). Bu adımda görüntü işleme ÇALIŞMAZ.
+        if self._align_phase == "OFFSET":
+            if self._offset_correction_start is None:
+                self._offset_correction_start = time.monotonic()
+                self.log.info(
+                    "OFFSET (bırakma): İleri %.0fcm gidiliyor...",
+                    DROP_OFFSET_M * 100,
+                )
+                self.nav.goto_body_offset(
+                    forward_m=DROP_OFFSET_M, right_m=0.0
+                )
+                # Görüntü işleme penceresinde bildirim göster (payload alımındaki gibi)
+                self._set_display_offset(
+                    f"OFFSET: hedefe {DROP_OFFSET_M:.1f}m ileri gidiliyor"
+                )
+                return
+            elapsed = time.monotonic() - self._offset_correction_start
+            if elapsed < OFFSET_CORRECTION_WAIT_S:
+                # Bekleme süresince bildirim güncel kalsın
+                self._set_display_offset(
+                    f"OFFSET: hedefe {DROP_OFFSET_M:.1f}m ileri  "
+                    f"({elapsed:.1f}/{OFFSET_CORRECTION_WAIT_S:.0f}s)"
+                )
+                return
+            # Offset tamam → dik iniş: 2.5m → 1m (yalnızca irtifa değişir)
+            self._offset_correction_start = None
+            self.log.info(
+                "OFFSET bitti. Dik iniş: → %.1fm (yük bırakılacak).",
+                PAYLOAD_DROP_ALTITUDE,
+            )
+            self._reset_altitude_state()
+            self._align_phase = "DROPPING"
+            self._no_detection_count = 0
+            self._send_altitude(PAYLOAD_DROP_ALTITUDE, timeout=20.0)
+            return
+
+        # DROPPING: görüntü işleme OLMADAN dik iniş → 1m'ye varınca bırakma.
+        if self._align_phase == "DROPPING":
+            result = self._altitude_ok()
+            if result is False:
+                return  # hâlâ iniyor
+            self._reset_altitude_state()
+            self.log.info(
+                "Sabit iniş tamamlandı (%.1fm). Yük bırakılıyor.",
+                self.nav.position().relative_altitude,
+            )
+            self._align_phase = "HORIZONTAL"
+            self._goto(MissionState.TARGET_ALIGNED)
+            return
+
+        # ── Görüntü işleme fazları (HORIZONTAL / DESCENDING) ──────────────────
         frame = self.camera.latest()
         if frame is None:
             return
@@ -855,33 +926,6 @@ class MissionStateMachine:
         else:
             self._no_detection_count += 1
 
-        # ---------- DROPPING fazı: hizalama sonrası görüntü işleme olmadan sabit iniş ----------
-        if self._align_phase == "DROPPING":
-            result = self._altitude_ok()
-            if result is False:
-                return  # hâlâ iniyor
-            # İrtifaya ulaşıldı veya timeout
-            self._reset_altitude_state()
-            self.log.info(
-                "Sabit iniş tamamlandı (%.1fm).",
-                self.nav.position().relative_altitude,
-            )
-            # Opsiyonel: 1m'de görüntüye göre bir kez daha hizala (timeout'lu).
-            # 1m'de şekil tespit edilemezse süre sonunda yine de bırakılır.
-            if PAYLOAD_DROP_ALIGN_TIMEOUT_S > 0:
-                self._enter_drop_align()
-                return
-            self._align_phase = "HORIZONTAL"
-            self._goto(MissionState.TARGET_ALIGNED)
-            return
-
-        # ---------- DROP_ALIGN fazı: 1m'de opsiyonel ek hizalama ----------
-        if self._align_phase == "DROP_ALIGN":
-            if self._drop_align_tick(frame, self.data.pending_detection):
-                self._align_phase = "HORIZONTAL"
-                self._goto(MissionState.TARGET_ALIGNED)
-            return
-
         # ---------- DESCENDING fazı ----------
         if self._align_phase == "DESCENDING":
             result = self._altitude_ok()
@@ -891,6 +935,7 @@ class MissionStateMachine:
             self._reset_altitude_state()
             self._align_phase = "HORIZONTAL"
             self._no_detection_count = 0
+            self._aligned_frame_count = 0   # yeni faz: hizalı onay sayacı temiz
             self.log.info("İrtifa %.1fm'ye ulaşıldı → yatay hizalamaya devam.", reached or 0)
             return
 
@@ -899,13 +944,26 @@ class MissionStateMachine:
 
         # Tespit kayıp sayacı: hem tespit yok hem de limit dolmuşsa recover et
         if self._no_detection_count > self._NO_DETECTION_LIMIT:
-            self.log.warning(
-                "ALIGN: %d tick üst üste tespit yok, kaba GPS'e dönülüyor.",
-                self._no_detection_count,
-            )
-            self._no_detection_count = 0
-            self._recover_to_rough_position()
-            return
+            if self._is_over_rough_target():
+                # İHA hedefin üzerinde — tespit kaybı NORMAL: hedef görüntüyü
+                # dolduruyor, kontur/şekil doğrulaması bozuluyor. Yeniden kovalamak
+                # (kaba GPS'e dönüp tekrar yaklaşmak) sonsuz döngü/daire üretir;
+                # hedefi merkezde kabul edip inişe geçmek doğrusu.
+                self.log.info(
+                    "Tespit kaybı ama hedef kaba GPS'e yakın — hedef üzerinde "
+                    "kabul ediliyor, inişe geçiliyor."
+                )
+                self.data.pending_detection = self._synthetic_center_detection(frame)
+                detection = self.data.pending_detection
+                self._no_detection_count = 0
+            else:
+                self.log.warning(
+                    "ALIGN: %d tick üst üste tespit yok, kaba GPS'e dönülüyor.",
+                    self._no_detection_count,
+                )
+                self._no_detection_count = 0
+                self._recover_to_rough_position()
+                return
 
         if detection is None:
             return
@@ -914,21 +972,44 @@ class MissionStateMachine:
         if now - self._last_align_cmd_t < ALIGN_CMD_INTERVAL_S:
             return
 
-        aligned = self.position_controller.align_detection(
-            detection.center_x,
-            detection.center_y,
-            frame.shape[1],
-            frame.shape[0],
-            pos.relative_altitude,
-        )
+        # Hedef görüntüyü büyük ölçüde dolduruyorsa (İHA hedefe yeterince yakın)
+        # centroid sinyali güvenilmez: sürekli düzeltme → hedef etrafında dönme.
+        # İHA hedef üzerinde kabul edilip inişe geçilir (kovalama biter).
+        # Eşik %50 — hassas ortalama yerine hızlı geçiş.
+        if detection.bbox_width_px >= 0.5 * frame.shape[1]:
+            self.log.info(
+                "Hedef çok yakın (bbox=%.0fpx / frame=%dpx) — "
+                "hedef üzerinde kabul edildi, inişe geçiliyor.",
+                detection.bbox_width_px, frame.shape[1],
+            )
+            aligned = True
+        else:
+            aligned = self.position_controller.align_detection(
+                detection.center_x,
+                detection.center_y,
+                frame.shape[1],
+                frame.shape[0],
+                pos.relative_altitude,
+            )
         self._last_align_cmd_t = now
+
+        # Ardışık frame onayı: tek frame'de merkezde görünmek (jitter / tesadüfi
+        # geçiş) "hizalı" sayılmaz. ALIGNED_FRAMES_REQUIRED ardışık onay gerekir;
+        # araya hizasız frame girerse sayaç sıfırlanır.
+        if aligned:
+            self._aligned_frame_count += 1
+        else:
+            self._aligned_frame_count = 0
+        aligned = self._aligned_frame_count >= ALIGNED_FRAMES_REQUIRED
 
         dx = detection.center_x - frame.shape[1] / 2
         dy = detection.center_y - frame.shape[0] / 2
         heading = self.nav.position().heading_deg
         self.log.info(
-            "ALIGN HORIZONTAL: merkez=(%.0f,%.0f) dx=%.0f dy=%.0f heading=%.0f° → hizalı=%s",
-            detection.center_x, detection.center_y, dx, dy, heading, aligned,
+            "ALIGN HORIZONTAL: merkez=(%.0f,%.0f) dx=%.0f dy=%.0f heading=%.0f° "
+            "onay=%d/%d → hizalı=%s",
+            detection.center_x, detection.center_y, dx, dy, heading,
+            self._aligned_frame_count, ALIGNED_FRAMES_REQUIRED, aligned,
         )
 
         if not aligned:
@@ -957,26 +1038,55 @@ class MissionStateMachine:
             self.nav.set_max_speed(ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS)
             self._align_phase = "DESCENDING"
             self._no_detection_count = 0
+            self._aligned_frame_count = 0   # iniş başladı: onay sayacı temiz
             self._send_altitude(next_alt, timeout=30.0)
         else:
-            # Son irtifada (PAYLOAD_RELEASE_ALTITUDE) ve tam merkezde.
-            # GPS'i kaydet, ardından görüntü işleme olmadan PAYLOAD_DROP_ALTITUDE'a in.
+            # Son irtifada (PAYLOAD_RELEASE_ALTITUDE = 2.5m) ve tam merkezde.
+            # GPS'i kaydet, ardından kamera-mekanizma OFFSET düzeltmesine geç
+            # (mekanizma arkada → İHA ileri), sonra dik inişle 1m'ye inip bırak.
             pos_now = self.nav.position()
             self._gps_candidates.append(
                 (pos_now.latitude, pos_now.longitude, detection.confidence)
             )
             self.log.info(
                 "Son hizalama tamamlandı (%.1fm). GPS kaydedildi: lat=%.7f lon=%.7f "
-                "güven=%.2f (toplam aday=%d). Sabit iniş başlıyor: %.1fm",
+                "güven=%.2f (toplam aday=%d). Kamera-mekanizma offset düzeltmesi "
+                "başlıyor (%.0fcm ileri).",
                 pos.relative_altitude,
                 pos_now.latitude, pos_now.longitude, detection.confidence,
                 len(self._gps_candidates),
-                PAYLOAD_DROP_ALTITUDE,
+                DROP_OFFSET_M * 100,
             )
             self.nav.set_max_speed(ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS)
-            self._align_phase = "DROPPING"
+            self._align_phase = "OFFSET"
+            self._offset_correction_start = None
             self._no_detection_count = 0
-            self._send_altitude(PAYLOAD_DROP_ALTITUDE, timeout=20.0)
+            self._aligned_frame_count = 0   # OFFSET fazına geçiş: onay sayacı temiz
+
+    # ------------------------------------------------------------------ #
+    def _is_over_rough_target(self) -> bool:
+        """İHA, hedefin kaba GPS konumuna (ilk görüldüğü yer) yakın mı?
+        Hedef büyük (4m çap) olduğundan ~2m içi 'hedef üzerinde' sayılır."""
+        if self._target_rough_lat is None or self._target_rough_lon is None:
+            return False
+        pos = self.nav.position()
+        return haversine_m(
+            pos.latitude, pos.longitude, self._target_rough_lat, self._target_rough_lon
+        ) < 2.0
+
+    def _synthetic_center_detection(self, frame: np.ndarray) -> Detection:
+        """Tespit kaybında hedefi görüntü merkezinde kabul et.
+        align_detection merkeze göre hizalı döner → iniş akışı başlar."""
+        return Detection(
+            color=self._locked_color if self._locked_color is not None else TargetColor.BLUE,
+            shape=self._locked_shape or "HEXAGON",
+            center_x=frame.shape[1] / 2.0,
+            center_y=frame.shape[0] / 2.0,
+            area_px=1.0,
+            bbox_width_px=1.0,
+            bbox_height_px=1.0,
+            confidence=0.5,
+        )
 
     # ------------------------------------------------------------------ #
     def _recover_to_rough_position(self) -> None:
@@ -1515,6 +1625,7 @@ class MissionStateMachine:
             self._align_phase = "HORIZONTAL"
             self._align_phase_start_t = None   # yeni faz sayacını sıfırla
             self._no_detection_count = 0
+            self._aligned_frame_count = 0   # yeni faz: hizalı onay sayacı temiz
             self.log.info(
                 "Basamak inişi tamamlandı (%.2fm). Yatay hizalamaya devam.", reached
             )
@@ -1594,14 +1705,24 @@ class MissionStateMachine:
         )
         aligned_tight = dx <= effective_tol and dy <= effective_tol
 
+        # Ardışık frame onayı: tek frame'de merkezde görünmek (jitter / tesadüfi
+        # geçiş) "hizalı" sayılmaz. ALIGNED_FRAMES_REQUIRED ardışık onay gerekir;
+        # araya hizasız frame girerse sayaç sıfırlanır.
+        if aligned_tight:
+            self._aligned_frame_count += 1
+        else:
+            self._aligned_frame_count = 0
+        aligned_tight = self._aligned_frame_count >= ALIGNED_FRAMES_REQUIRED
+
         # Her durumda pozisyon komutu gönder — stuck önleme
         self.position_controller.align_detection(cx, cy, fw, fh, pos.relative_altitude)
         self._last_align_cmd_t = now
 
         self.log.info(
             "PAYLOAD HİZALA: merkez=(%.0f,%.0f) dx=%.0f dy=%.0f "
-            "irtifa=%.2fm tol=%.0fpx hizalı=%s",
-            cx, cy, dx, dy, pos.relative_altitude, effective_tol, aligned_tight,
+            "irtifa=%.2fm tol=%.0fpx onay=%d/%d hizalı=%s",
+            cx, cy, dx, dy, pos.relative_altitude, effective_tol,
+            self._aligned_frame_count, ALIGNED_FRAMES_REQUIRED, aligned_tight,
         )
 
         # Hizalama timeout: belirli süre hizalanamıyorsa zorla bir basamak in.
@@ -1639,6 +1760,7 @@ class MissionStateMachine:
         self._align_phase = "DESCENDING"
         self._align_phase_start_t = None   # bir sonraki HORIZONTAL fazı için sıfırla
         self._no_detection_count = 0
+        self._aligned_frame_count = 0   # iniş başladı: onay sayacı temiz
         self.log.info(
             "Payload hizalama → basamak inişi: %.2fm → %.2fm",
             pos.relative_altitude, next_alt,

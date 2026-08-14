@@ -230,15 +230,31 @@ class Navigation:
             pass
         self.set_mode("GUIDED")
 
-    def goto_global(self, latitude: float, longitude: float, altitude_m: float) -> None:
+    def goto_global(
+        self,
+        latitude: float,
+        longitude: float,
+        altitude_m: float,
+        yaw_deg: float | None = None,
+    ) -> None:
         """
         Belirtilen GPS konumuna ve irtifaya git.
         MAVLink SET_POSITION_TARGET_GLOBAL_INT — yalnızca pozisyon aktif.
         type_mask 0b0000111111111000 = sadece lat/lon/alt geçerli,
         hız/ivme/yaw yoksayılır.
+
+        yaw_deg verilirse: yaw AKTİF yapılır ve bu heading SABİT tutulur.
+        Hizalama sırasında İHA burnunun komutlar arasında dönmesi, düzeltme
+        vektörlerinin gecikmeli heading'le hesaplanmasına ve hedef etrafında
+        dönmeye (daire) yol açar; yaw kilidi bunu önler.
         """
         self._ensure_guided()
         type_mask = 0b0000111111111000
+        yaw_rad = 0.0
+        if yaw_deg is not None:
+            # bit 10 (yaw ignore) = 0 → yaw aktif, mevcut heading verilir
+            type_mask &= ~(1 << 10)
+            yaw_rad = math.radians(yaw_deg)
 
         self.master.mav.set_position_target_global_int_send(
             int(time.time() * 1000) & 0xFFFFFFFF,
@@ -251,7 +267,8 @@ class Navigation:
             altitude_m,
             0, 0, 0,
             0, 0, 0,
-            0, 0,
+            yaw_rad,  # yaw — yaw_deg verildiyse sabitlenir
+            0,        # yaw_rate
         )
 
     def goto_body_offset(self, forward_m: float, right_m: float) -> None:

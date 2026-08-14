@@ -1,19 +1,26 @@
 """
-Payload bırakımı — 1m'de opsiyonel ek hizalama (DROP_ALIGN) testleri.
+Payload bırakımı — 2.5m hizalama + OFFSET + dik iniş testleri.
 
-Davranış:
-  PAYLOAD_DROP_ALIGN_TIMEOUT_S > 0 → 1m (PAYLOAD_DROP_ALTITUDE) inişi sonrası
-  görüntüye göre timeout'lu EK hizalama denenir; tespit edilemez veya süre
-  dolarsa mevcut konumdan bırakılır (zorunlu değil — yalnızca iyileştirme).
-  0 → eski davranış (sabit iniş sonrası doğrudan bırakma).
+Yeni akış (kadraj kırpma sonrası):
+  1. 2.5m'de (PAYLOAD_RELEASE_ALTITUDE) hassas görüntü hizalaması.
+  2. Kamera-mekanizma OFFSET düzeltmesi (İHA ileri — mekanizma hedef üzerine).
+  3. DİK iniş: 2.5m → 1m (PAYLOAD_DROP_ALTITUDE) — yalnızca irtifa.
+  4. 1m'de bırakma (PAYLOAD_DROP_ALIGN_TIMEOUT_S=0 → 1m'de ek hizalama YOK).
 """
 import logging
 import time
 from unittest.mock import MagicMock
 
 import numpy as np
+import pytest
 
-from config import PAYLOAD_DROP_ALIGN_TIMEOUT_S
+from config import (
+    DROP_OFFSET_M,
+    OFFSET_CORRECTION_WAIT_S,
+    PAYLOAD_DROP_ALIGN_TIMEOUT_S,
+    PAYLOAD_DROP_ALTITUDE,
+    PAYLOAD_RELEASE_ALTITUDE,
+)
 
 
 def _make_sm():
@@ -42,88 +49,95 @@ def _detection(cx: float = 32.0, cy: float = 32.0):
     return d
 
 
-# ── 1) Config ─────────────────────────────────────────────────────────────── #
-def test_drop_align_timeout_config_enabled():
-    """Varsayılan: 5 sn ek hizalama süresi tanımlı."""
-    assert PAYLOAD_DROP_ALIGN_TIMEOUT_S == 5.0
-
-
-# ── 2) _enter_drop_align ──────────────────────────────────────────────────── #
-def test_enter_drop_align_sets_phase_and_deadline():
-    sm = _make_sm()
-    sm._enter_drop_align()
-    assert sm._align_phase == "DROP_ALIGN"
-    assert sm._drop_align_deadline is not None
-
-
-# ── 3) _drop_align_tick ───────────────────────────────────────────────────── #
-def test_drop_align_timeout_returns_true():
-    """Süre doldu → tespit olsa da olmasa da bırakılabilir (True)."""
-    sm = _make_sm()
-    sm._enter_drop_align()
-    sm._drop_align_deadline = time.monotonic() - 1.0
-    assert sm._drop_align_tick(_frame(), None) is True
-
-
-def test_drop_align_no_detection_waits():
-    """1m'de tespit yok → bekle (False) — süre dolana kadar bırakılmaz."""
-    sm = _make_sm()
-    sm._enter_drop_align()
-    assert sm._drop_align_tick(_frame(), None) is False
-
-
-def test_drop_align_already_aligned_returns_true():
-    """Hedef zaten merkezde (align_detection=True) → hemen bırak (True)."""
-    sm = _make_sm()
-    sm._enter_drop_align()
-    sm.position_controller.align_detection.return_value = True
-    sm.nav.position.return_value = MagicMock(
-        relative_altitude=1.0, latitude=1.0, longitude=1.0, heading_deg=0.0,
-    )
-    assert sm._drop_align_tick(_frame(), _detection()) is True
-
-
-def test_drop_align_not_aligned_sends_command_and_waits():
-    """Merkezde değil → düzeltme komutu gönderilir, beklenir (False)."""
-    sm = _make_sm()
-    sm._enter_drop_align()
-    sm.position_controller.align_detection.return_value = False
-    sm.nav.position.return_value = MagicMock(
-        relative_altitude=1.0, latitude=1.0, longitude=1.0, heading_deg=0.0,
-    )
-    assert sm._drop_align_tick(_frame(), _detection(cx=50.0, cy=30.0)) is False
-    sm.position_controller.align_detection.assert_called_once()
-
-
-# ── 4) DROPPING → DROP_ALIGN geçişi (entegrasyon) ─────────────────────────── #
-def test_do_align_target_dropping_enters_drop_align():
-    """
-    1m sabit iniş tamamlanınca DROP_ALIGN fazına geçilir (timeout>0),
-    state TARGET_ALIGNED'a hemen GEÇMEZ.
-    """
+def _real_sm():
+    """Gerçek __init__ ile kurulan örnek (tüm öznitelikler hazır)."""
     from models import MissionState
     from state_machine import MissionStateMachine
 
     nav = MagicMock()
     nav.position.return_value = MagicMock(
-        relative_altitude=1.0, latitude=1.0, longitude=1.0, heading_deg=0.0,
+        relative_altitude=PAYLOAD_RELEASE_ALTITUDE,
+        latitude=1.0, longitude=1.0, heading_deg=0.0,
     )
     camera = MagicMock()
-    camera.latest.return_value = _frame()
+    camera.latest.return_value = np.zeros((704, 1920, 3), dtype=np.uint8)
 
     sm = MissionStateMachine(
-        navigation=nav,
-        camera=camera,
-        payload=MagicMock(),
+        navigation=nav, camera=camera, payload=MagicMock(),
         logger=logging.getLogger("t"),
     )
     sm.data.state = MissionState.ALIGNING_TARGET
-    sm._align_phase = "DROPPING"
-    sm._alt_waiting = False          # iniş tamamlandı
-    sm._drop_align_deadline = None
+    sm._alt_waiting = False
+    return sm, nav
+
+
+# ── 1) Config ──────────────────────────────────────────────────────────────── #
+def test_drop_align_timeout_config_disabled():
+    """Yeni akış: 1m'de ek hizalama KAPALI (dik iniş + doğrudan bırakma)."""
+    assert PAYLOAD_DROP_ALIGN_TIMEOUT_S == 0.0
+
+
+def test_release_altitude_above_drop_altitude():
+    """Son hassas hizalama irtifası, yükün bırakıldığı irtifadan yüksektir
+    (kadraj daraldığı için alçak irtifada görüntü hizalaması yapılamaz)."""
+    assert PAYLOAD_RELEASE_ALTITUDE > PAYLOAD_DROP_ALTITUDE
+
+
+# ── 2) OFFSET fazı ────────────────────────────────────────────────────────── #
+def test_align_target_offset_sends_forward_offset():
+    """OFFSET fazı: İHA, bırakma offseti (DROP_OFFSET_M) kadar İLERİ gider."""
+    sm, nav = _real_sm()
+    sm._align_phase = "OFFSET"
+    sm._offset_correction_start = None
 
     sm._do_align_target()
 
-    assert sm._align_phase == "DROP_ALIGN"
-    assert sm.data.state == MissionState.ALIGNING_TARGET  # henüz bırakmadı
-    assert sm._drop_align_deadline is not None
+    nav.goto_body_offset.assert_called_once_with(
+        forward_m=DROP_OFFSET_M, right_m=0.0
+    )
+
+
+def test_align_target_offset_shows_display_notification():
+    """OFFSET fazında görüntü işleme penceresinde bildirim gösterilir."""
+    sm, nav = _real_sm()
+    sm._align_phase = "OFFSET"
+    sm._offset_correction_start = None
+
+    sm._do_align_target()
+
+    assert sm._pending_display is not None
+
+
+def test_drop_offset_is_configurable():
+    """Bırakma offseti config'ten okunur (sıfırdan büyük, ileri hareket)."""
+    assert DROP_OFFSET_M > 0
+
+
+def test_align_target_offset_waits_then_drops():
+    """Offset bekleyince DROPPING'e geçer ve dik iniş (1m) başlatılır."""
+    sm, nav = _real_sm()
+    sm._align_phase = "OFFSET"
+    sm._offset_correction_start = time.monotonic() - OFFSET_CORRECTION_WAIT_S - 1.0
+
+    sm._do_align_target()
+
+    assert sm._align_phase == "DROPPING"
+    assert sm._alt_target == pytest.approx(PAYLOAD_DROP_ALTITUDE)
+
+
+# ── 3) DROPPING tamamlanınca → doğrudan bırakma ───────────────────────────── #
+def test_do_align_target_dropping_goes_straight_to_release():
+    """
+    1m sabit iniş tamamlanınca (PAYLOAD_DROP_ALIGN_TIMEOUT_S=0) DROP_ALIGN'a
+    geçilmez — doğrudan TARGET_ALIGNED'a (bırakma) gidilir.
+    """
+    from models import MissionState
+
+    sm, nav = _real_sm()
+    sm._align_phase = "DROPPING"
+    sm._alt_waiting = False          # iniş tamamlandı
+
+    sm._do_align_target()
+
+    assert sm.data.state == MissionState.TARGET_ALIGNED
+    assert sm._align_phase == "HORIZONTAL"

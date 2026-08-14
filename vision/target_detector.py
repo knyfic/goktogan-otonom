@@ -36,6 +36,15 @@ _HEXAGON_EXTENT = (0.55, 0.95)
 # area_score referansı (büyük hedef alanı)
 _AREA_REF_PX = 15000.0
 
+# Görev hedefleri — yarışma kuralı: yalnızca MAVİ ALTIGEN ve KIRMIZI ÜÇGEN.
+# Bu ikisi dışındaki renk+şekil kombinasyonları (örn. BLUE+TRIANGLE) detector
+# tarafından ÜRETİLMEZ; aksi halde state machine sürekli "Geçersiz kombinasyon"
+# deyip SEARCHING'e döner → sonsuz döngü.
+_VALID_TARGET_COMBINATIONS = (
+    (TargetColor.BLUE, "HEXAGON"),
+    (TargetColor.RED, "TRIANGLE"),
+)
+
 
 class TargetDetector:
     """Mavi altıgen + kırmızı üçgen detector.
@@ -375,6 +384,13 @@ class TargetDetector:
                 )
                 continue
             color, purity = color_info
+
+            # Yalnızca görev hedefleri: mavi altıgen + kırmızı üçgen.
+            if (color, shape) not in _VALID_TARGET_COMBINATIONS:
+                self._log.debug(
+                    "REJECT: görev dışı kombinasyon %s+%s", color.value, shape,
+                )
+                continue
 
             vertex_score = 1.0 - min(1.0, abs(count - expected_vertices) / 2.0)
             extent_score = 1.0 - min(1.0, abs(extent - expected_extent) / 0.25)

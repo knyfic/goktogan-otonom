@@ -27,11 +27,13 @@ from config import (
     PREVIEW_WINDOW_NAME,
     REAL_CAMERA_FPS,
     RPI_CAMERA_NUM,
+    VISION_HEIGHT_PX,
 )
 from flight.navigation import Navigation
 from payload.payload_controller import PayloadController
 from state_machine import MissionStateMachine
 from utils.logging import setup_logging
+from vision.camera import VisionCropCamera
 
 _PAYLOAD_CONFIG = os.path.join(os.path.dirname(__file__), "payload", "config.yaml")
 
@@ -224,6 +226,9 @@ def main():
 
         navigation = _build_navigation(mode, payload_cfg, logger)
         camera     = _build_camera(mode, payload_cfg, logger)
+        # Vision kırpma: payload mekanizmasının kapladığı alt bölge atılır.
+        # Kamera 1920x1080 üretmeye devam eder; pipeline 1920x704 görür.
+        camera     = VisionCropCamera(camera, VISION_HEIGHT_PX)
         backend    = _build_backend(mode, payload_cfg, logger)
         # Renk haritası: hangi renk payload hangi mıknatısta
         color_map  = payload_cfg.get("payload_color_map", {})

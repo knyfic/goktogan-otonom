@@ -32,6 +32,35 @@ class CameraLike(Protocol):
         ...
 
 
+class VisionCropCamera:
+    """
+    Kameranın latest() çıktısını üst height_px satırına kırpar.
+
+    Payload mekanizması kadrajın altını kapladığı için, görüntü işleme
+    pipeline'ına mekanizmayı hiç görmeyen 1920x704 bir frame gider.
+    Kamera 1920x1080 üretmeye devam eder; FOV/geometri değişmez.
+    """
+
+    def __init__(self, camera: CameraLike, height_px: int):
+        self._camera = camera
+        self._height_px = height_px
+
+    def latest(self) -> Optional[np.ndarray]:
+        frame = self._camera.latest()
+        if frame is None:
+            return None
+        return frame[: self._height_px, :]
+
+    def show(self, frame: np.ndarray) -> None:
+        self._camera.show(frame)
+
+    def pump(self) -> None:
+        self._camera.pump()
+
+    def close_preview(self) -> None:
+        self._camera.close_preview()
+
+
 class GazeboCamera:
     """
     Gazebo gz.msgs.Image subscriber.

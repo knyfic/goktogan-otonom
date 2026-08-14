@@ -33,8 +33,10 @@ def test_build_navigation_real_uses_config_serial(mavutil_mock):
 
     cfg = _load_config()
     nav = _build_navigation("real", cfg, logging.getLogger("t"))
+    # device/baudrate TEK kaynak payload/config.yaml → flight_controller.connection
+    conn = cfg["flight_controller"]["connection"]
     mavutil_mock.mavlink_connection.assert_called_once_with(
-        "/dev/serial0", baud=921600, force_mavlink2=True, write=True
+        conn["device"], baud=conn["baudrate"], force_mavlink2=True, write=True
     )
     assert nav.system_id == 1
     nav._hb_stop.set()

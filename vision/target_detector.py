@@ -551,32 +551,44 @@ class TargetDetector:
         out = frame_bgr.copy()
         h, w = out.shape[:2]
         cx, cy = w // 2, h // 2
-        cv2.drawMarker(out, (cx, cy), (255, 255, 255), cv2.MARKER_CROSS, 20, 2)
+        # Çözünürlüğe bağlı ölçek — üst HUD ile aynı (640 bazlı): 1920px'de ~3x.
+        # Sabit boyutlar küçültme sonrası okunmuyordu; artık HUD ile tutarlı.
+        ui_scale = w / 640.0
+        font_scale = 0.65 * ui_scale
+        thickness  = max(1, int(2 * ui_scale))
+        marker_size = int(28 * ui_scale)
+        dot_r = int(10 * ui_scale)
+
+        cv2.drawMarker(out, (cx, cy), (255, 255, 255), cv2.MARKER_CROSS,
+                       marker_size, thickness)
 
         for det in detections:
             color_bgr = (255, 80, 0) if det.color.value == "BLUE" else (0, 60, 255)
             tx = int(det.center_x)
             ty = int(det.center_y)
 
-            cv2.circle(out, (tx, ty), 6, color_bgr, -1)
-            cv2.line(out, (cx, cy), (tx, ty), color_bgr, 1)
+            cv2.circle(out, (tx, ty), dot_r, color_bgr, -1)
+            cv2.line(out, (cx, cy), (tx, ty), color_bgr, max(1, int(ui_scale)))
 
             bw = int(det.bbox_width_px)
             bh = int(det.bbox_height_px)
             x1 = tx - bw // 2
             y1 = ty - bh // 2
-            cv2.rectangle(out, (x1, y1), (x1 + bw, y1 + bh), color_bgr, 2)
+            cv2.rectangle(out, (x1, y1), (x1 + bw, y1 + bh), color_bgr, thickness)
 
+            # Etiket bbox üstünde; üst HUD bandının altına düşecek şekilde
+            # sınırlanır (bbox kadraja yakınsa etiket bandın altında kalır).
             label = f"{det.color.value} {det.shape} {det.confidence:.2f}"
+            label_y = max(y1 - int(10 * ui_scale), int(70 * ui_scale))
             cv2.putText(
-                out, label, (x1, max(y1 - 8, 12)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color_bgr, 2,
+                out, label, (x1, label_y),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale, color_bgr, thickness, cv2.LINE_AA,
             )
 
         cv2.putText(
             out, f"Det: {len(detections)}",
-            (10, frame_bgr.shape[0] - 12),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2,
+            (int(14 * ui_scale), frame_bgr.shape[0] - int(14 * ui_scale)),
+            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 0), thickness, cv2.LINE_AA,
         )
         return out
 

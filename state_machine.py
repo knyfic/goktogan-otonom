@@ -522,19 +522,24 @@ class MissionStateMachine:
         """Payload overlay hazırla."""
         disp = frame.copy()
         h, w = disp.shape[:2]
-        ui_scale = w / 1280.0
-        font_scale = 0.50 * ui_scale
-        thickness  = max(1, int(ui_scale))
+        # Çözünürlüğe bağlı ölçek — üst HUD ile aynı (640 bazlı); sabit/küçük
+        # boyutlar okunmuyordu.
+        ui_scale = w / 640.0
+        font_scale = 0.60 * ui_scale
+        thickness  = max(1, int(2 * ui_scale))
+        circle_r = int(14 * ui_scale)
         for r in results:
             tx, ty = int(r.center_x), int(r.center_y)
-            cv2.circle(disp, (tx, ty), int(10 * ui_scale), (0, 255, 255), max(1, int(2 * ui_scale)), cv2.LINE_AA)
-            cv2.line(disp, (w // 2, h // 2), (tx, ty), (0, 200, 200), thickness, cv2.LINE_AA)
+            cv2.circle(disp, (tx, ty), circle_r, (0, 255, 255),
+                       max(1, int(3 * ui_scale)), cv2.LINE_AA)
+            cv2.line(disp, (w // 2, h // 2), (tx, ty), (0, 200, 200),
+                     max(1, int(ui_scale)), cv2.LINE_AA)
             bw = int(r.width_px)
             bh = int(r.height_px)
             cv2.rectangle(disp, (tx - bw // 2, ty - bh // 2),
                           (tx + bw // 2, ty + bh // 2), (0, 255, 255), thickness)
             cv2.putText(disp, f"PL {r.confidence:.2f} {bw}x{bh}px",
-                        (tx + int(12 * ui_scale), ty - int(6 * ui_scale)),
+                        (tx + int(16 * ui_scale), ty - int(10 * ui_scale)),
                         cv2.FONT_HERSHEY_SIMPLEX, font_scale,
                         (0, 255, 200), thickness, cv2.LINE_AA)
 

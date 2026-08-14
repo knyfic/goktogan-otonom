@@ -74,6 +74,13 @@ PAYLOAD_DESCENT_STEP_M = 0.4
 # kadar ileri gidip yere iner ve mekanizmayı aktive eder.
 PAYLOAD_ALIGN_ALTITUDE_M = 0.4
 
+# Payload alımı: bu irtifanın ALTINDA köşe/kenar tespitleri de geçerlidir.
+# Alçak irtifada İHA payload'ı ortalayamayabilir ve payload köşelere/kenarlara
+# kayabilir; bu yüzden normalde uygulanan %15 kenar marjı (köşe eleme) kaldırılır
+# ve "mavi puan (color_purity) + alan" skoru EN YÜKSEK olan aday gerçek payload
+# kabul edilip ona yönelinir. Bu seçim yalnızca bu eşiğin altında geçerlidir.
+PAYLOAD_CORNER_PICK_ALT_M = 0.5
+
 # Hizalama döngüsü: pickup esnasında piksel tolerans eşiği
 # Normal hizalamadan daha sıkı — yük çok küçük
 PAYLOAD_PIXEL_TOLERANCE_PX = 15.0
@@ -85,13 +92,13 @@ PAYLOAD_ALIGN_TIMEOUT_S = 4.0
 # Kamera ile görev mekanizması (mıknatıs/stepper) arasındaki boyuna offset (metre).
 # Kamera İHA burnuna göre mekanizmanın 8cm önündedir; pickup öncesi İHA bu
 # kadar ileri giderek mekanizmayı payload'ın tam üzerine getirir.
-CAMERA_TO_MECHANISM_OFFSET_M = 0.08
+CAMERA_TO_MECHANISM_OFFSET_M = 0.16
 
 # Yük BIRAKMA offseti (metre): 2.5m'de (PAYLOAD_RELEASE_ALTITUDE) görüntü
 # hizalaması bittikten sonra İHA, hedef merkez doğrultusu boyunca bu kadar
 # İLERİ gider (görev mekanizması arkada → hedefin tam ortasına denk gelir).
 # Bu adımda görüntü işleme kapalıdır; config'ten istenildiği gibi değiştirilir.
-DROP_OFFSET_M = 1
+DROP_OFFSET_M = 1.5
 
 # Offset düzeltmesinde ileri hareketin tamamlanması için verilen
 # maksimum süre (saniye). Bu süre dolunca alçalmaya geçilir.

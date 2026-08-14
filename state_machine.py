@@ -46,6 +46,7 @@ from config import (
     PAYLOAD_ALIGN_TIMEOUT_S,
     PAYLOAD_ALIGN_ALTITUDE_M,
     PAYLOAD_CONTACT_ALTITUDE,
+    PAYLOAD_CORNER_PICK_ALT_M,
     PAYLOAD_DESCENT_STEP_M,
     PAYLOAD_HEIGHT,
     PAYLOAD_PICKUP_VISION_MIN_S,
@@ -2485,13 +2486,19 @@ class MissionStateMachine:
         margin_x = cw * 0.15  # %15 kenar marjı
         margin_y = ch * 0.15
 
+        # PAYLOAD_CORNER_PICK_ALT_M (0.5m) altında köşe/kenar filtresi UYGULANMAZ:
+        # bu kadar alçakta İHA payload'ı ortalayamayabilir ve payload köşelere/
+        # kenarlara kayabilir. Köşedeki tespitler de geçerli adaydır.
+        low_alt = altitude_m <= PAYLOAD_CORNER_PICK_ALT_M
+
         filtered = [
             r for r in results
             if (r.width_px <= max_w
                 and r.height_px <= max_h
                 and min_area <= r.area_px <= max_area
-                and margin_x < r.center_x < (cw - margin_x)
-                and margin_y < r.center_y < (ch - margin_y))
+                and (low_alt
+                     or (margin_x < r.center_x < (cw - margin_x)
+                         and margin_y < r.center_y < (ch - margin_y))))
         ]
 
         if len(filtered) < len(results):
@@ -2499,6 +2506,23 @@ class MissionStateMachine:
                 "Payload filtresi: %d/%d tespit eşikleri geçti (kenar ve boyut)",
                 len(filtered), len(results),
             )
+
+        # PAYLOAD_CORNER_PICK_ALT_M altı: köşedeki adaylar dahil — "mavi puan
+        # (color_purity) + alan" skoru EN YÜKSEK olan gerçek payload kabul edilir.
+        if low_alt and filtered:
+            def _low_score(r):
+                return r.color_purity + min(
+                    1.0, r.area_px / max(1.0, expected_area)
+                )
+
+            best = max(filtered, key=_low_score)
+            self.log.info(
+                "[PAYLOAD PICK] Düşük irtifa (<%.1fm): köşe adaylar dahil — "
+                "skor=%.2f alan=%.0fpx² mavi=%.2f merkez=(%.0f,%.0f)",
+                PAYLOAD_CORNER_PICK_ALT_M, _low_score(best), best.area_px,
+                best.color_purity, best.center_x, best.center_y,
+            )
+            return [best]
 
         # Eğer irtifa PAYLOAD_VERIFY_ALTITUDE bandındaysa, bilinen 1m beklenen
         # payload piksel boyutuna göre en uygun adayı seç (area + merkez yakınlığı).

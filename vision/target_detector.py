@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 from collections import Counter, deque
 from typing import Optional
@@ -19,6 +20,16 @@ from models import Detection, TargetColor
 
 _KAPAMA_KERNEL_Buyuk = 7
 _KAPAMA_KERNEL_Kucuk = 3
+
+# ── Harici (referans) algoritmadan alınan şekil sağlamlığı sabitleri ────────
+# Compactness (çevre²/alan) üst sınırı — tırtıklı/karmaşık konturları eler.
+_MAX_COMPACTNESS = 40.0
+# Dairesellik (4πA/P²) bantları: düzgün üçgen ≈ 0.60, düzgün altıgen ≈ 0.83.
+# Extent doğrulamasıyla birlikte şekle özgü ikinci bir sağlamlık ölçüsüdür.
+_TRIANGLE_CIRCULARITY = (0.45, 0.72)
+_HEXAGON_CIRCULARITY = (0.72, 0.94)
+# Köşe sayımı epsilon katsayıları — 5 farklı epsilon, çoğunluk oyu (referans kod).
+_VERTEX_EPSILONS = (0.02, 0.03, 0.04, 0.06, 0.08)
 
 # ── Tespit sağlamlığı sabitleri (algoritma davranışı korunarak sıkılaştırma) ──
 # Kontur içi baskın renk oranı eşiği. Renk maskesinden gelen konturlarda bile
@@ -233,7 +244,12 @@ class TargetDetector:
 
     @staticmethod
     def _clean_mask(mask, kernel_size=_KAPAMA_KERNEL_Buyuk):
-        """Elips kernel ile kapat (delikleri doldur) sonra aç (küçük gürültüyü at)."""
+        """Median blur + elips kernel ile kapat/aç (referans kod katkısı).
+
+        Median blur küçük gürültü parçacıklarını bastırır; CLOSE delikleri
+        doldurur, OPEN kalan gürültüyü atar.
+        """
+        mask = cv2.medianBlur(mask, 5)
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
@@ -245,10 +261,11 @@ class TargetDetector:
 
     @staticmethod
     def _is_valid_shape(contour, area) -> bool:
-        """Solidity (doluluk) ve aspect ratio ile şekil doğruluğu kontrolü.
+        """Solidity, compactness ve aspect ratio ile şekil doğruluğu kontrolü.
 
-        Yanlış pozitifleri (kırıksı, U şekilli, çok uzun/dar konturlar)
-        maskeleyerek yüzde onlarca yanlış tespiti engeller.
+        Yanlış pozitifleri (kırıksı, U şekilli, çok uzun/dar, tırtıklı konturlar)
+        maskeleyerek yüzde onlarca yanlış tespiti engeller. Compactness eşiği
+        referans algoritmadan alınmıştır.
         """
         hull = cv2.convexHull(contour)
         hull_area = cv2.contourArea(hull)
@@ -256,6 +273,14 @@ class TargetDetector:
             return False
         solidity = float(area) / hull_area
         if solidity < 0.85:
+            return False
+
+        # Compactness: çevre²/alan — tırtıklı/karmaşık konturları eler.
+        perimeter = cv2.arcLength(contour, True)
+        if perimeter == 0:
+            return False
+        compactness = (perimeter ** 2) / area
+        if compactness > _MAX_COMPACTNESS:
             return False
 
         _, _, w, h = cv2.boundingRect(contour)
@@ -267,17 +292,26 @@ class TargetDetector:
         return True
 
     @staticmethod
-    def _count_vertices_robust(contour) -> tuple[int, int]:
-        """3 farklı epsilon ile approxPolyDP → (köşe_sayısı, tutarlılık).
+    def _circularity(contour, area) -> float:
+        """Dairesellik: 4πA/P² — 1 = tam daire, üçgen ≈ 0.60, altıgen ≈ 0.83."""
+        perimeter = cv2.arcLength(contour, True)
+        if perimeter == 0:
+            return 0.0
+        return 4.0 * math.pi * area / (perimeter ** 2)
 
-        Tutarlılık = en çok oy alan köşe sayısının oy miktarı (1..3).
-        [6,6,5] → (6, 2): kabul edilebilir. [5,6,7] → (5, 1): dağınık → reddet.
+    @staticmethod
+    def _count_vertices_robust(contour) -> tuple[int, int]:
+        """5 farklı epsilon ile approxPolyDP → (köşe_sayısı, tutarlılık).
+
+        Referans algoritmadan: 0.02/0.03/0.04/0.06/0.08 epsilon katsayılarıyla
+        yaklaşımlar yapılır, çoğunluk oyu köşe sayısı olarak alınır. Tutarlılık
+        (oy miktarı) mevcut sistemin _MIN_VERTEX_AGREEMENT şartıyla korunur.
         """
         perimeter = cv2.arcLength(contour, True)
         if perimeter <= 0:
             return 0, 0
         votes = []
-        for eps in (0.03, 0.04, 0.05):
+        for eps in _VERTEX_EPSILONS:
             approx = cv2.approxPolyDP(contour, eps * perimeter, True)
             votes.append(len(approx))
         (count, agreement) = Counter(votes).most_common(1)[0]
@@ -366,13 +400,25 @@ class TargetDetector:
             if shape == "TRIANGLE":
                 expected_vertices, expected_extent = 3, 0.50
                 ext_lo, ext_hi = _TRIANGLE_EXTENT
+                circ_lo, circ_hi = _TRIANGLE_CIRCULARITY
             else:
                 expected_vertices, expected_extent = 6, 0.75
                 ext_lo, ext_hi = _HEXAGON_EXTENT
+                circ_lo, circ_hi = _HEXAGON_CIRCULARITY
             if not (ext_lo <= extent <= ext_hi):
                 self._log.debug(
                     "REJECT: extent out of range shape=%s extent=%.2f area=%.0f",
                     shape, extent, area,
+                )
+                continue
+
+            # Şekle özgü dairesellik bandı (referans algoritma): üçgen 0.45–0.72,
+            # altıgen 0.72–0.94 — kenar pürüzlülüğüne duyarlı ikinci doğrulama.
+            circularity = self._circularity(contour, area)
+            if not (circ_lo <= circularity <= circ_hi):
+                self._log.debug(
+                    "REJECT: circularity out of range shape=%s circ=%.2f area=%.0f",
+                    shape, circularity, area,
                 )
                 continue
 

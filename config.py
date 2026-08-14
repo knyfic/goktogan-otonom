@@ -100,6 +100,14 @@ OFFSET_CORRECTION_WAIT_S = 2.0
 # Görev 2 navigasyon sonrası hedef merkezleme zaman aşımı (sn)
 ALIGN_ON_TARGET_TIMEOUT_S = 5
 
+# Yük alımı görüntü işleme fazı MİNİMUM süresi (saniye).
+# İHA hedef şekle gelince merkezleme başlar; tek frame'de tesadüfi hizalı
+# görünüm (jitter) İHA'yı daha kendini ortalamadan SEARCHING_PAYLOAD'a
+# gönderiyordu → hedefin üzerinde olmadığı için payload'ı göremiyordu.
+# Bu süre dolmadan (hem merkezleme hem payload hizalama fazlarında)
+# "hazır / payload yok" kararı verilmez.
+PAYLOAD_PICKUP_VISION_MIN_S = 3.0
+
 # Servo/mekanik mekanizmanın çalışması için bekleme süresi (saniye).
 # Simulation modunda yapay bekleme için kullanılır.
 # Gerçek uçuşta (HIL/real) bu değer stepper süresinden hesaplanır:

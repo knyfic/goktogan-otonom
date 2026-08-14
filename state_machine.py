@@ -48,6 +48,7 @@ from config import (
     PAYLOAD_CONTACT_ALTITUDE,
     PAYLOAD_DESCENT_STEP_M,
     PAYLOAD_HEIGHT,
+    PAYLOAD_PICKUP_VISION_MIN_S,
     PAYLOAD_PIXEL_TOLERANCE_PX,
     PIXEL_ALIGNMENT_TOLERANCE_PX,
     PAYLOAD_DROP_ALIGN_TIMEOUT_S,
@@ -207,6 +208,9 @@ class MissionStateMachine:
         # ---- Hedef üzerinde hizalama (pickup öncesi) ----
         # ALIGNING_ON_TARGET_FOR_PICKUP state'inde kullanılır
         self._align_for_pickup_deadline: float | None = None
+        # ALIGNING_ON_TARGET_FOR_PICKUP fazının başlangıç zamanı — minimum
+        # görüntü işleme süresi (PAYLOAD_PICKUP_VISION_MIN_S) için
+        self._align_for_pickup_start: float | None = None
 
         # ---- Gösterilecek frame (sadece _pump_preview yazar ekrana) ----
         # State handler'lar _pending_display'e atar; _pump_preview gösterir.
@@ -1339,6 +1343,8 @@ class MissionStateMachine:
             self.nav.position().relative_altitude,
         )
         self._align_for_pickup_deadline = time.monotonic() + ALIGN_ON_TARGET_TIMEOUT_S
+        self._align_for_pickup_start = time.monotonic()
+        self._aligned_frame_count = 0   # yeni faz: hizalı onay sayacı temiz
         self._last_align_cmd_t = 0.0
         self._payload_descent_alt = None
         self._goto(MissionState.ALIGNING_ON_TARGET_FOR_PICKUP)
@@ -1386,7 +1392,9 @@ class MissionStateMachine:
         self._set_display_detections(frame, target_detections)
 
         if not target_detections:
-            # Hedef görünmüyor — GPS'te bekle, taşınma
+            # Hedef görünmüyor — GPS'te bekle, taşınma.
+            # Görünmezlik sırasında İHA kayabilir: onay sayacını sıfırla.
+            self._aligned_frame_count = 0
             return
 
         best = target_detections[0]
@@ -1407,15 +1415,35 @@ class MissionStateMachine:
             best.center_x, best.center_y, aligned,
         )
 
+        # Ardışık frame onayı: tek frame'de tesadüfi hizalı görünüm (jitter)
+        # İHA'yı daha hedefi ortalamadan SEARCHING'e göndermesin.
         if aligned:
+            self._aligned_frame_count += 1
+        else:
+            self._aligned_frame_count = 0
+        aligned_confirmed = self._aligned_frame_count >= ALIGNED_FRAMES_REQUIRED
+
+        if aligned_confirmed and self._align_for_pickup_start is not None:
+            # Minimum görüntü işleme süresi: faz en az PAYLOAD_PICKUP_VISION_MIN_S
+            # sürmeden SEARCHING'e geçilmez — İHA hedefi gerçekten ortalamalı.
+            phase_elapsed = time.monotonic() - self._align_for_pickup_start
+            if phase_elapsed < PAYLOAD_PICKUP_VISION_MIN_S:
+                self.log.info(
+                    "Hedef hizalı; minimum görüntü işleme süresi için "
+                    "%.0fs daha bekleniyor...",
+                    PAYLOAD_PICKUP_VISION_MIN_S - phase_elapsed,
+                )
+                return
             self.log.info(
-                "Hedef merkezleme tamamlandı (%.1fm). "
+                "Hedef merkezleme tamamlandı (%.1fm, %.0fs). "
                 "İHA hedefin tam üzerinde → payload aranıyor.",
-                pos.relative_altitude,
+                pos.relative_altitude, phase_elapsed,
             )
             self._align_for_pickup_deadline = None
+            self._align_for_pickup_start = None
             self._last_align_cmd_t = 0.0
             self._payload_descent_alt = None
+            self._aligned_frame_count = 0
             self._goto(MissionState.SEARCHING_PAYLOAD)
 
     # ------------------------------------------------------------------ #
@@ -1445,6 +1473,8 @@ class MissionStateMachine:
             self._payload_search_start = None   # sayacı sıfırla
             self._reset_altitude_state()
             self._align_for_pickup_deadline = time.monotonic() + ALIGN_ON_TARGET_TIMEOUT_S
+            self._align_for_pickup_start = time.monotonic()
+            self._aligned_frame_count = 0   # yeni faz: hizalı onay sayacı temiz
             self._last_align_cmd_t = 0.0
             self._payload_descent_alt = None
 
@@ -1504,6 +1534,8 @@ class MissionStateMachine:
             confidence=best.confidence,
         )
         self._last_align_cmd_t = 0.0
+        self._align_phase_start_t = None   # ALIGNING_PAYLOAD yeni faz temiz başlasın
+        self._aligned_frame_count = 0      # hizalı onay sayacı temiz
         self._goto(MissionState.ALIGNING_PAYLOAD)
 
     # ------------------------------------------------------------------ #
@@ -1635,6 +1667,11 @@ class MissionStateMachine:
         if frame is None:
             return
 
+        # Faz başlangıç zamanı — hizalama timeout'u ve minimum görüntü işleme
+        # süresi (PAYLOAD_PICKUP_VISION_MIN_S) için; ilk tick'te set edilir.
+        if self._align_phase_start_t is None:
+            self._align_phase_start_t = time.monotonic()
+
         target = self.data.first_target
         if target is None:
             self._goto(MissionState.TASK_2_FAILED)
@@ -1668,12 +1705,18 @@ class MissionStateMachine:
                 confidence=best.confidence,
             )
         else:
-            # Yük bu irtifada görünmüyor — hafif kayma olabilir, GPS'te bekle
+            # Yük bu irtifada görünmüyor — hafif kayma olabilir, GPS'te bekle.
+            # ANCAK: İHA hedefi (şekli) henüz ortalamadıysa payload görünmez;
+            # görüntü işleme fazı en az PAYLOAD_PICKUP_VISION_MIN_S sürmeli,
+            # bu süre dolmadan SEARCHING'e dönmek yanlış alarm üretir (döngü).
             self._no_detection_count += 1
-            if self._no_detection_count > self._NO_DETECTION_LIMIT:
+            vision_elapsed = time.monotonic() - self._align_phase_start_t
+            if (self._no_detection_count > self._NO_DETECTION_LIMIT
+                    and vision_elapsed >= PAYLOAD_PICKUP_VISION_MIN_S):
                 self.log.warning(
-                    "Payload görünmüyor (%d tick). Yük arama adımına dönülüyor.",
-                    self._no_detection_count,
+                    "Payload görünmüyor (%d tick, %.0fs). "
+                    "Yük arama adımına dönülüyor.",
+                    self._no_detection_count, vision_elapsed,
                 )
                 self._no_detection_count = 0
                 self._payload_descent_alt = None
@@ -1727,9 +1770,6 @@ class MissionStateMachine:
 
         # Hizalama timeout: belirli süre hizalanamıyorsa zorla bir basamak in.
         # Daha aşağıda payload daha büyük görünür ve hizalama kolaylaşır.
-        if self._align_phase_start_t is None:
-            self._align_phase_start_t = now
-
         align_elapsed = now - self._align_phase_start_t
 
         if not aligned_tight and align_elapsed < PAYLOAD_ALIGN_TIMEOUT_S:

@@ -127,6 +127,15 @@ class CompetitionField:
         )
         return lat, lon
 
+    # ── Yönler ─────────────────────────────────────────────────────────────── #
+    def length_heading_deg(self) -> float:
+        """Uzun eksenin (y) pusula yönü (derece) — kısa kenara DİK yön.
+
+        atan2(east, north) → pusula kerterizi. İlk arama (tek geçiş) sırasında
+        İHA burnunun kısa kenara dik durması için kullanılır.
+        """
+        return math.degrees(math.atan2(self._u_hat[1], self._u_hat[0])) % 360.0
+
     # ── Alan sınırları ────────────────────────────────────────────────────── #
     def contains_local(self, x_m: float, y_m: float, eps: float = 1e-6) -> bool:
         return (

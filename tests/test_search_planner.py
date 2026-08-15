@@ -216,7 +216,9 @@ def test_init_search_inside_area_builds_route():
 
 
 def test_advance_search_uses_field_gps():
-    """_advance_search, waypoint'i competition frame'den GPS'e çevirir."""
+    """_advance_search, waypoint'i competition frame'den GPS'e çevirir ve
+    arama irtifasını (TAKEOFF_ALTITUDE) iletir."""
+    from config import TAKEOFF_ALTITUDE
     from state_machine import MissionStateMachine
 
     nav = MagicMock()
@@ -237,21 +239,15 @@ def test_advance_search_uses_field_gps():
     expected_lat, expected_lon = f.local_to_gps(5.0, 5.0)
     nav.goto_global.assert_called_once()
     args = nav.goto_global.call_args[0]
+    kwargs = nav.goto_global.call_args[1]
     assert args[0] == pytest.approx(expected_lat, abs=1e-6)
     assert args[1] == pytest.approx(expected_lon, abs=1e-6)
+    # Arama irtifası = TAKEOFF_ALTITUDE (11.5m); yaw kurulmamışsa gönderilmez
+    assert args[2] == pytest.approx(TAKEOFF_ALTITUDE)
+    assert kwargs.get("yaw_deg") is None
 
 
 # ── 9) SEARCH_SPEED_MPS config'ten gelir; yalnızca search'te geçerli ──────── #
-def _route_from_field(field, lat, lon):
-    """State machine'in _init_search'i ile birebir aynı rota üretimi."""
-    planner = LawnmowerPlanner(field.width_m, field.length_m,
-                               SCAN_LINE_SPACING, SEARCH_MARGIN)
-    points = [SearchPoint(p.x_m + field.width_m / 2.0, p.y_m)
-              for p in planner.generate()]
-    lx, ly = field.gps_to_local(lat, lon)
-    return reorder_search_from_drone(points, lx, ly)
-
-
 def _make_sm(nav):
     from state_machine import MissionStateMachine
 
@@ -290,12 +286,16 @@ def test_search_speed_not_applied_before_search():
         "kurulumda search hızı uygulanmamalı"
 
 
-# ── 10) İlk search — takeoff referansı ────────────────────────────────────── #
+# ── 10) İlk search — takeoff referansı + TEK GEÇİŞ (kırmızı üçgen) ────────── #
 def test_first_search_uses_takeoff_reference():
-    from config import COMPETITION_CORNERS
+    """İlk arama (kırmızı üçgen): launch referansı kullanılır; rota kısa kenar
+    ORTASINDAN karşı kısa kenara uzun eksen boyunca TEK GEÇİŞTİR (11.5m)."""
+    from config import COMPETITION_CORNERS, TAKEOFF_ALTITUDE
 
     field = CompetitionField(COMPETITION_CORNERS)
-    launch_lat, launch_lon = field.local_to_gps(15.0, 50.0)
+    mid_x = field.width_m / 2.0
+    length = field.length_m
+    launch_lat, launch_lon = field.local_to_gps(mid_x, 50.0)
     nav = MagicMock()
     nav.fresh_position.return_value = MagicMock(
         latitude=launch_lat, longitude=launch_lon,
@@ -305,10 +305,53 @@ def test_first_search_uses_takeoff_reference():
     # Referans = takeoff GPS
     assert sm._search_origin_lat == pytest.approx(launch_lat, abs=1e-9)
     assert sm._search_origin_lon == pytest.approx(launch_lon, abs=1e-9)
-    # Rota (15,50)'ye en yakın hattan başlamalı
-    expected = _route_from_field(field, launch_lat, launch_lon)
+    # TEK GEÇİŞ rotası: (orta, 0) → (orta, L) — kısa kenar ortasından uzun eksen
     assert [(p.x_m, p.y_m) for p in sm._search_points] == \
-        [(p.x_m, p.y_m) for p in expected]
+        [(mid_x, 0.0), (mid_x, length)]
+    # Arama irtifası = TAKEOFF_ALTITUDE (11.5m)
+    assert nav.set_max_speed.call_count == 1
+    # Yaw: uzun eksen yönü — SITL alanı kuzeye hizalı olduğundan 0° (kısa kenara dik)
+    assert sm._search_yaw_deg == pytest.approx(0.0)
+
+
+def test_first_search_launch_in_upper_half_yaw_180():
+    """Launch uzun eksenin üst yarısındaysa EN YAKIN kısa kenar üst kenardır;
+    yaw 180° çevrilir (uzak kenara bakacak şekilde)."""
+    from config import COMPETITION_CORNERS
+
+    field = CompetitionField(COMPETITION_CORNERS)
+    mid_x = field.width_m / 2.0
+    length = field.length_m
+    launch_lat, launch_lon = field.local_to_gps(10.0, length * 0.8)   # üst yarı (y=80)
+    nav = MagicMock()
+    nav.fresh_position.return_value = MagicMock(
+        latitude=launch_lat, longitude=launch_lon,
+    )
+    sm = _make_sm(nav)
+    sm._init_search()
+    # y=80 > L/2 → en yakın kısa kenar ÜST kenar (y=L) → başlangıç (orta, L)
+    assert [(p.x_m, p.y_m) for p in sm._search_points] == \
+        [(mid_x, length), (mid_x, 0.0)]
+    assert sm._search_yaw_deg == pytest.approx(180.0)
+
+
+def test_advance_search_sends_yaw():
+    """Tek geçiş yaw hedefi (kısa kenara dik) goto_global'e iletilir."""
+    nav = MagicMock()
+    nav.position.return_value = MagicMock(
+        latitude=_ORIGIN[0], longitude=_ORIGIN[1], heading_deg=0.0, relative_altitude=8.0,
+    )
+    sm = _make_sm(nav)
+    f = _field(30.0, 100.0, 0.0)
+    sm._search_field = f
+    sm._search_points = [SearchPoint(15.0, 5.0), SearchPoint(15.0, 95.0)]
+    sm._search_idx = 0
+    sm._search_yaw_deg = 0.0   # SITL alanı kuzeye hizalı → 0°
+
+    sm._advance_search()
+
+    kwargs = nav.goto_global.call_args[1]
+    assert kwargs.get("yaw_deg") == 0.0
 
 
 # ── 11) İkinci search — ilk payload drop referansı ────────────────────────── #
@@ -325,10 +368,14 @@ def _enter_second_search(sm, drop_lat, drop_lon, nav):
 
 
 def test_second_search_uses_first_drop_reference():
+    """İkinci arama (mavi altıgen): DROP konumu referans alınır; aynı TEK GEÇİŞ
+    geometrisi kurulur (en yakın kısa kenar ortası → karşı kısa kenar)."""
     from config import COMPETITION_CORNERS
     from models import MissionState, Target, TargetColor, TargetType
 
     field = CompetitionField(COMPETITION_CORNERS)
+    mid_x = field.width_m / 2.0
+    length = field.length_m
     takeoff_lat, takeoff_lon = field.local_to_gps(15.0, 50.0)
     drop_lat, drop_lon = field.local_to_gps(27.0, 90.0)
 
@@ -349,19 +396,21 @@ def test_second_search_uses_first_drop_reference():
     assert sm._search_origin_lon == pytest.approx(drop_lon, abs=1e-9)
     assert sm._search_origin_lat != pytest.approx(takeoff_lat, abs=1e-9)
     assert sm._search_origin_lon != pytest.approx(takeoff_lon, abs=1e-9)
-    # Rota drop konumuna en yakın hattan başlamalı
-    expected = _route_from_field(field, drop_lat, drop_lon)
+    # İkinci arama da TEK GEÇİŞ: drop (27,90) üst yarıda → (orta, L) → (orta, 0)
     assert [(p.x_m, p.y_m) for p in sm._search_points] == \
-        [(p.x_m, p.y_m) for p in expected]
+        [(mid_x, length), (mid_x, 0.0)]
+    assert sm._search_yaw_deg == pytest.approx(180.0)
 
 
 @pytest.mark.parametrize("dx,dy", [(2.0, 5.0), (15.0, 50.0), (28.0, 95.0)])
 def test_second_search_different_drop_positions(dx, dy):
-    """Farklı drop konumları → her seferinde o konuma en yakın hattan başlar."""
+    """Farklı drop konumları → en yakın kısa kenarın ORTASINDAN TEK GEÇİŞ."""
     from config import COMPETITION_CORNERS
     from models import MissionState, Target, TargetColor, TargetType
 
     field = CompetitionField(COMPETITION_CORNERS)
+    mid_x = field.width_m / 2.0
+    length = field.length_m
     drop_lat, drop_lon = field.local_to_gps(dx, dy)
 
     nav = MagicMock()
@@ -375,9 +424,10 @@ def test_second_search_different_drop_positions(dx, dy):
     assert sm.data.state == MissionState.SEARCHING_SECOND_TARGET
     assert sm._search_origin_lat == pytest.approx(drop_lat, abs=1e-9)
     assert sm._search_origin_lon == pytest.approx(drop_lon, abs=1e-9)
-    expected = _route_from_field(field, drop_lat, drop_lon)
+    # En yakın kısa kenarın ORTASI → karşı kısa kenar (tek geçiş)
+    near_edge_y = 0.0 if dy <= length / 2.0 else length
     assert [(p.x_m, p.y_m) for p in sm._search_points] == \
-        [(p.x_m, p.y_m) for p in expected]
+        [(mid_x, near_edge_y), (mid_x, length - near_edge_y)]
     # Tüm waypoint'ler yarışma alanı içinde kalmalı
     for p in sm._search_points:
         assert field.contains_local(p.x_m, p.y_m), \

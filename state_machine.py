@@ -65,8 +65,6 @@ from config import (
     RTL_ARRIVAL_TIMEOUT_S,
     RTL_DISARM_TIMEOUT_S,
     RTL_PREVIEW_HZ,
-    SCAN_LINE_SPACING,
-    SEARCH_MARGIN,
     SEARCH_SPEED_MPS,
     STATE_TIMEOUT,
     TARGET_APPROACH_ALTITUDE,
@@ -91,12 +89,7 @@ from models import (
     TargetType,
 )
 from payload.payload_controller import PayloadController
-from search.coverage_planner import (
-    CompetitionField,
-    LawnmowerPlanner,
-    SearchPoint,
-    reorder_search_from_drone,
-)
+from search.coverage_planner import CompetitionField, SearchPoint
 from vision.camera import CameraLike
 from vision.geometry import CameraModel, expected_payload_pixels
 from vision.payload_detector import PayloadDetector
@@ -157,6 +150,8 @@ class MissionStateMachine:
         self._search_field: CompetitionField | None = None
         self._search_origin_lat: float | None = None
         self._search_origin_lon: float | None = None
+        # Tek geçiş (single_pass) yaw hedefi: kısa kenara dik (uzun eksen yönü).
+        self._search_yaw_deg: float | None = None
 
         # ---- Non-blocking irtifa bekleme ----
         self._alt_target: float | None = None
@@ -653,13 +648,17 @@ class MissionStateMachine:
 
         reference_lat/lon verilirse O GPS referans alınır — ikinci search,
         launch konumu yerine İLK PAYLOAD BIRAKMA konumundan başlar. Verilmezse
-        İHA'nın o anki GPS'i (launch) kullanılır. Her iki durumda da aynı
-        CompetitionField + LawnmowerPlanner + reorder_search_from_drone kullanılır.
+        İHA'nın o anki GPS'i (launch) kullanılır.
+
+        Her iki hedef araması da TEK GEÇİŞ (single_pass) geometrisini kullanır:
+        en yakın KISA KENARIN ORTASINA gidilir, yaw ile ön kısa kenara dik
+        yapılır ve uzun eksen (100m) boyunca tek düz geçişle taranır. Arama
+        irtifası = TAKEOFF_ALTITUDE (11.5m). Lawnmower/boustrophedon mission
+        flow'da KULLANILMAZ (algoritma search/coverage_planner.py'de korunur).
 
         1. Referans GPS → competition frame'e çevrilir.
         2. Referans alan dışındaysa search başlatılmaz → hata + RTL.
-        3. Lawnmower planner competition frame'de çalıştırılır (pattern aynı).
-        4. Rota, referansa EN YAKIN search hattından başlatılır (zigzag korunur).
+        3. Tek geçiş rotası kurulur (kısa kenar ortası → karşı kısa kenar).
         """
         self._search_count += 1
         if reference_lat is None or reference_lon is None:
@@ -683,29 +682,33 @@ class MissionStateMachine:
             self._goto(MissionState.RTL)
             return
 
-        planner = LawnmowerPlanner(
-            field.width_m, field.length_m, SCAN_LINE_SPACING, SEARCH_MARGIN
-        )
-        points = planner.generate()
-        # Planner ortalanmış x eksenini ([-w/2, w/2]) competition frame'e (0..w)
-        # kaydır; y ekseni zaten competition frame ile aynıdır (alt kenar tabanlı).
-        points = [SearchPoint(p.x_m + field.width_m / 2.0, p.y_m) for p in points]
-        # Referansa en yakın search hattından başla — zigzag sırası korunur.
-        self._search_points = reorder_search_from_drone(points, lx, ly)
+        # ── Tek geçiş (single_pass): en yakın kısa kenarın ORTASI → karşı kısa kenar ──
+        # Kısa kenar = genişlik (30m), uzun eksen = boy (100m). Arama çizgisi
+        # alanın merkezinden geçer (kamera 11.5m'de 30×100m alanı görür).
+        length = field.length_m
+        near_edge_y = 0.0 if ly <= length / 2.0 else length
+        start = SearchPoint(field.width_m / 2.0, near_edge_y)
+        end = SearchPoint(field.width_m / 2.0, length - near_edge_y)
+        self._search_points = [start, end]
+        # Yaw: uzun eksen (y) yönü — kısa kenara dik. Uzak kenara bakacak
+        # şekilde başlangıç kenarına göre 180° çevrilir.
+        heading = field.length_heading_deg()
+        if near_edge_y > 0.0:
+            heading = (heading + 180.0) % 360.0
+        self._search_yaw_deg = heading
         self._search_field = field
         self._search_idx = 0
         # SEARCH_SPEED_MPS — yalnızca search rotasında geçerli (config'ten).
         self.nav.set_max_speed(SEARCH_SPEED_MPS, VERTICAL_SPEED_MPS)
         start = self._search_points[0] if self._search_points else None
         self.log.info(
-            "SEARCH #%d başlatıldı: %d nokta, alan %.0fx%.0f m | "
+            "SEARCH #%d başlatıldı (single_pass, %.1fm): %d nokta | "
             "referans GPS=(%.7f, %.7f) local=(%.1f, %.1f) | "
-            "ilk waypoint local=(%.1f, %.1f) | hız=%.1f m/s",
-            self._search_count, len(self._search_points),
-            field.width_m, field.length_m,
+            "ilk waypoint local=(%.1f, %.1f) | hız=%.1f m/s | yaw=%.1f°",
+            self._search_count, TAKEOFF_ALTITUDE, len(self._search_points),
             ref_lat, ref_lon, lx, ly,
             start.x_m if start else 0.0, start.y_m if start else 0.0,
-            SEARCH_SPEED_MPS,
+            SEARCH_SPEED_MPS, self._search_yaw_deg,
         )
 
     def _advance_search(self) -> None:
@@ -713,10 +716,11 @@ class MissionStateMachine:
             return
         if self._search_idx >= len(self._search_points):
             self._search_idx = 0
-            self.log.warning("Lawnmower tamamlandı, başa dönüyor.")
+            self.log.warning("Search rotası tamamlandı, başa dönüyor.")
         sp = self._search_points[self._search_idx]
         lat, lon = self._search_field.local_to_gps(sp.x_m, sp.y_m)
-        self.nav.goto_global(lat, lon, TAKEOFF_ALTITUDE)
+        # Tek geçiş: kısa kenara dik yaw korunur (yaw yoksa eski davranış).
+        self.nav.goto_global(lat, lon, TAKEOFF_ALTITUDE, yaw_deg=self._search_yaw_deg)
         pos = self.nav.position()
         if haversine_m(pos.latitude, pos.longitude, lat, lon) < 3.0:
             self._search_idx += 1
@@ -811,10 +815,25 @@ class MissionStateMachine:
         # yapmayız; Gazebo dahil tüm kaynaklarda renk sınıflandırması stabil kalır.
         detections = self.target_detector.detect(frame)
 
-        # İkinci hedef: birinci hedefin TERSİ olan tür aranır — başka hiçbir
-        # tür kabul edilmez (geçersiz kombinasyon / birinci hedef / gürültü
-        # zaman kilidini kirletemez).
-        if (self.data.state == MissionState.SEARCHING_SECOND_TARGET
+        # Hedef tipi filtresi — hangi aramada hangi tür kabul edilir:
+        #   SEARCHING_FIRST_TARGET  → YALNIZCA KIRMIZI ÜÇGEN (görev planı).
+        #   SEARCHING_SECOND_TARGET → birinci hedefin TERSİ (MAVİ ALTIGEN).
+        # Filtre dışı türler zaman kilidini/görevi tetikleyemez (gürültü kirletemez).
+        if self.data.state == MissionState.SEARCHING_FIRST_TARGET:
+            expected_color, expected_shape = TargetColor.RED, "TRIANGLE"
+            detections = [
+                d for d in detections
+                if d.color == expected_color and d.shape == expected_shape
+            ]
+            # Mavi altıgen ilk aramada hedef DEĞİLDİR — varsa kilit kalıntısını temizle.
+            if (self._locked_color is not None
+                    and (self._locked_color, self._locked_shape)
+                        != (expected_color, expected_shape)):
+                self._locked_color = None
+                self._locked_shape = None
+                self.target_detector.history.clear()
+                self.target_detector.reset_time_lock()
+        elif (self.data.state == MissionState.SEARCHING_SECOND_TARGET
                 and self.data.first_target is not None):
             known = self.data.first_target
             if known.shape == TargetType.HEXAGON:

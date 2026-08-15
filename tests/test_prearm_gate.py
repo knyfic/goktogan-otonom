@@ -176,14 +176,15 @@ def test_no_sys_status_yet_keeps_waiting():
 
 # ── 4) Pre-arm GOOD → mevcut akış ─────────────────────────────────────────── #
 def test_prearm_good_starts_existing_mission_flow():
-    from config import COMPETITION_CORNERS
+    from config import COMPETITION_CORNERS, TAKEOFF_ALTITUDE
 
     a = COMPETITION_CORNERS["A"]
     nav = MagicMock()
     nav.prearm_good.return_value = True
     nav.prearm_reason.return_value = None
     nav.position.return_value = MagicMock(
-        relative_altitude=8.0, latitude=float(a[0]), longitude=float(a[1]),
+        # Kalkış irtifası = arama irtifası (11.5m)
+        relative_altitude=TAKEOFF_ALTITUDE, latitude=float(a[0]), longitude=float(a[1]),
         heading_deg=0.0,
     )
     nav.fresh_position.return_value = MagicMock(
@@ -200,6 +201,8 @@ def test_prearm_good_starts_existing_mission_flow():
     sm._do_takeoff()                    # takeoff + irtifa → SEARCHING_FIRST_TARGET
     assert sm.data.state == MissionState.SEARCHING_FIRST_TARGET
     nav.takeoff.assert_called_once()
+    # Takeoff hedefi 11.5m (TAKEOFF_ALTITUDE)
+    assert nav.takeoff.call_args[0][0] == TAKEOFF_ALTITUDE
 
 
 # ── 5) Beklerken kamera/vision/HUD/GStreamer canlı ────────────────────────── #

@@ -8,6 +8,8 @@ CAMERA_TOPIC = "/world/iris_runway/model/iris_with_gimbal/model/gimbal/link/pitc
 GAZEBO_MSGS_MODULE = "gz.msgs"
 GAZEBO_TRANSPORT_MODULE = "gz.transport"
 
+# Kalkış + HER İKİ hedef araması (kırmızı üçgen / mavi altıgen) bu irtifada yapılır.
+# 11.5m'de kamera 30×100m alanı görür → her arama tek geçiş (single_pass) ile yapılır.
 TAKEOFF_ALTITUDE = 11.5
 TARGET_APPROACH_ALTITUDE = 4.0
 

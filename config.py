@@ -125,6 +125,23 @@ PAYLOAD_SERVO_WAIT_S = 3
 FIELD_WIDTH = 30.0
 FIELD_LENGTH = 100.0
 
+# ── Yarışma alanı (competition) GPS köşeleri ─────────────────────────────────
+# 30×100 m dikdörtgen yarışma alanının dört GPS köşesi. Sıralama (kavramsal):
+#   A = alt-sol, B = üst-sol, C = üst-sağ, D = alt-sağ
+# CompetitionField (search/coverage_planner.py) bu köşelerden SABİT local frame
+# kurar; İHA'nın launch konumu runtime GPS'ten alınır ve bu frame'e çevrilir.
+# İHA alan dışında kalkarsa search başlatılmaz (RTL + hata logu).
+#
+# Değerler SITL home'una göre düzenlenmiştir: SITL --home 41.0082,28.9784
+# alanın tam MERKEZİNE (local 15, 50) denk gelir. Gerçek yarışma alanına
+# geçerken yalnızca bu dört değer güncellenir (kod değişmez).
+COMPETITION_CORNERS = {
+    "A": (41.0077508, 28.9782215),
+    "B": (41.0086492, 28.9782215),
+    "C": (41.0086492, 28.9785785),
+    "D": (41.0077508, 28.9785785),
+}
+
 HEXAGON_SIDE_LENGTH = 2.0
 TRIANGLE_SIDE_LENGTH = 1.0
 

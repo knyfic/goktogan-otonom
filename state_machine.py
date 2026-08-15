@@ -33,8 +33,7 @@ from config import (
     CAMERA_HORIZONTAL_FOV_DEG,
     CAMERA_WIDTH_PX,
     CAMERA_VERTICAL_FOV_DEG,
-    FIELD_LENGTH,
-    FIELD_WIDTH,
+    COMPETITION_CORNERS,
     ALIGNMENT_DESCENT_STEP_M,
     ALIGNED_FRAMES_REQUIRED,
     CAMERA_TO_MECHANISM_OFFSET_M,
@@ -90,7 +89,12 @@ from models import (
     TargetType,
 )
 from payload.payload_controller import PayloadController
-from search.coverage_planner import LawnmowerPlanner, local_to_gps
+from search.coverage_planner import (
+    CompetitionField,
+    LawnmowerPlanner,
+    SearchPoint,
+    reorder_search_from_drone,
+)
 from vision.camera import CameraLike
 from vision.geometry import CameraModel, expected_payload_pixels
 from vision.payload_detector import PayloadDetector
@@ -141,6 +145,8 @@ class MissionStateMachine:
         # ---- Lawnmower tarama ----
         self._search_points: list = []
         self._search_idx: int = 0
+        # Yarışma alanı frame'i — _init_search'te COMPETITION_CORNERS'ten kurulur.
+        self._search_field: CompetitionField | None = None
         self._search_origin_lat: float | None = None
         self._search_origin_lon: float | None = None
 
@@ -593,33 +599,57 @@ class MissionStateMachine:
     # ==================================================================== #
 
     def _init_search(self) -> None:
+        """Yarışma alanı frame'inde dinamik search rotası kurar.
+
+        1. İHA'nın runtime GPS konumu competition frame'e çevrilir.
+        2. İHA alan dışındaysa search başlatılmaz → hata + RTL.
+        3. Lawnmower planner competition frame'de çalıştırılır (pattern aynı).
+        4. Rota, İHA'ya EN YAKIN search hattından başlatılır (zigzag korunur).
+        """
         pos = self.nav.fresh_position(timeout=1.0)
         self._search_origin_lat = pos.latitude
         self._search_origin_lon = pos.longitude
+
+        field = CompetitionField(COMPETITION_CORNERS)
+        lx, ly = field.gps_to_local(pos.latitude, pos.longitude)
+        if not field.contains_local(lx, ly):
+            self.log.error(
+                "Launch position is outside competition area: "
+                "GPS=(%.7f, %.7f) local=(%.1f, %.1f) — alan [0..%.0f]x[0..%.0f] m",
+                pos.latitude, pos.longitude, lx, ly,
+                field.width_m, field.length_m,
+            )
+            self.data.mission_failed = True
+            self._goto(MissionState.RTL)
+            return
+
         planner = LawnmowerPlanner(
-            FIELD_WIDTH, FIELD_LENGTH, SCAN_LINE_SPACING, SEARCH_MARGIN
+            field.width_m, field.length_m, SCAN_LINE_SPACING, SEARCH_MARGIN
         )
-        self._search_points = planner.generate()
+        points = planner.generate()
+        # Planner ortalanmış x eksenini ([-w/2, w/2]) competition frame'e (0..w)
+        # kaydır; y ekseni zaten competition frame ile aynıdır (alt kenar tabanlı).
+        points = [SearchPoint(p.x_m + field.width_m / 2.0, p.y_m) for p in points]
+        # İHA'ya en yakın search hattından başla — zigzag sırası korunur.
+        self._search_points = reorder_search_from_drone(points, lx, ly)
+        self._search_field = field
         self._search_idx = 0
         self.nav.set_max_speed(SEARCH_SPEED_MPS, VERTICAL_SPEED_MPS)
         self.log.info(
-            "Lawnmower başlatıldı: %d nokta, origin=(%.6f, %.6f)",
-            len(self._search_points), self._search_origin_lat, self._search_origin_lon,
+            "Competition search başlatıldı: %d nokta, alan %.0fx%.0f m, "
+            "İHA GPS=(%.7f, %.7f) local=(%.1f, %.1f)",
+            len(self._search_points), field.width_m, field.length_m,
+            pos.latitude, pos.longitude, lx, ly,
         )
 
     def _advance_search(self) -> None:
-        if not self._search_points or self._search_origin_lat is None:
+        if not self._search_points or self._search_field is None:
             return
         if self._search_idx >= len(self._search_points):
             self._search_idx = 0
             self.log.warning("Lawnmower tamamlandı, başa dönüyor.")
         sp = self._search_points[self._search_idx]
-        if self._search_origin_lon is None:
-            return
-        lat, lon = local_to_gps(
-            self._search_origin_lat, self._search_origin_lon,
-            north_m=sp.y_m, east_m=sp.x_m,
-        )
+        lat, lon = self._search_field.local_to_gps(sp.x_m, sp.y_m)
         self.nav.goto_global(lat, lon, TAKEOFF_ALTITUDE)
         pos = self.nav.position()
         if haversine_m(pos.latitude, pos.longitude, lat, lon) < 3.0:

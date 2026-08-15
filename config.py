@@ -8,7 +8,7 @@ CAMERA_TOPIC = "/world/iris_runway/model/iris_with_gimbal/model/gimbal/link/pitc
 GAZEBO_MSGS_MODULE = "gz.msgs"
 GAZEBO_TRANSPORT_MODULE = "gz.transport"
 
-TAKEOFF_ALTITUDE = 8.0
+TAKEOFF_ALTITUDE = 11.5
 TARGET_APPROACH_ALTITUDE = 4.0
 
 # Yük bırakma: görüntü işleme ile HASSAS hizalanılan irtifa.

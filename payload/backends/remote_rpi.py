@@ -133,7 +133,7 @@ class RemoteRPiBackend(PayloadBackend):
                 duration = status_resp.get("status", {}).get("stepper_duration")
                 if duration is not None:
                     self.stepper_duration = float(duration)
-                    self._log.info("[REMOTE] Stepper süresi RPi'den alındı: %.1fs",
+                    self._log.info("[REMOTE] Pickup bekleme süresi RPi'den alındı: %.1fs",
                                    self.stepper_duration)
             except Exception:
                 pass   # Eski RPi firmware — stepper_duration yok, config.py değeri kullanılır

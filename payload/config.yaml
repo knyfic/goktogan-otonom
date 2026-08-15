@@ -61,7 +61,13 @@ remote_camera:
   read_timeout_s: 2.0
   reconnect_wait_s: 1.0
 
-# ── Stepper motor ───────────────────────────────────────────────────────────
+# ── Görev mekanizması ───────────────────────────────────────────────────────
+# STEP MOTOR KULLANILMIYOR: mekanizma sabit durur; yükler mıknatıslarla alınır.
+# İHA yere indikten sonra yükün tutulması için beklenen süre (saniye).
+# LocalRPiBackend bu değeri stepper_duration olarak state machine'e iletir.
+pickup_wait_s: 3.0
+
+# ── Stepper motor (DOKUNULMUYOR — yalnızca donanım tanımı) ───────────────────
 stepper:
   # GPIO pinleri (BCM mode)
   step_pin:   13

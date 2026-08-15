@@ -209,8 +209,9 @@ class PayloadController:
     @property
     def servo_wait_s(self) -> float | None:
         """
-        Stepper'ın aşağı hareketi için gereken süre (saniye).
-        None dönerse state machine config.py'deki PAYLOAD_SERVO_WAIT_S kullanır.
-        Gerçek backend'lerde steps_for_travel × step_delay × 2 olarak hesaplanır.
+        Pickup bekleme süresi (saniye) — İHA yere indikten sonra yükün
+        tutulması için beklenen süre. None dönerse state machine config.py'deki
+        PAYLOAD_SERVO_WAIT_S kullanır. Gerçek backend'lerde pickup_wait_s'ten
+        (varsayılan 3.0s) gelir — STEP MOTOR KULLANILMAZ, mekanizma sabittir.
         """
         return self._stepper_duration

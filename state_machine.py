@@ -1871,8 +1871,9 @@ class MissionStateMachine:
         İlk çağrıda servo komutunu gönder; sonraki tick'lerde
         bekleme süresi doldu mu diye kontrol et.
 
-        Bekleme süresi: payload.servo_wait_s → stepper'ın gerçek süresi
-        (LocalRPiBackend/RemoteRPiBackend tarafından hesaplanır).
+        Bekleme süresi: payload.servo_wait_s → pickup bekleme süresi
+        (LocalRPiBackend/RemoteRPiBackend — pickup_wait_s, varsayılan 3.0s;
+        STEP MOTOR kullanılmaz, mekanizma sabittir).
         None dönerse simulation için config.py PAYLOAD_SERVO_WAIT_S kullanılır.
         """
         target = self.data.first_target
@@ -1884,7 +1885,7 @@ class MissionStateMachine:
             payload_type = self.payload_for_target(target)
             self.payload.send_pickup_command(payload_type)
             self._pickup_servo_start = time.monotonic()
-            # Gerçek stepper süresini backend'den al, yoksa simulation değeri
+            # Pickup bekleme süresini backend'den al, yoksa simulation değeri
             wait = self.payload.servo_wait_s
             if wait is None:
                 wait = PAYLOAD_SERVO_WAIT_S

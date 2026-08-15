@@ -115,18 +115,18 @@ class LocalRPiBackend(PayloadBackend):
 
         if steps is None:
             steps = sc.get("steps_for_travel", 10000)
-        # Stepper aşağı hareket süresi: ortalama delay ile tahmin
-        avg_us = (sc.get("start_delay_us", 1500) + sc.get("target_delay_us", 1200)) / 2
-        stepper_duration = steps * (avg_us + 10) * 1e-6   # +10µs HIGH pulse
+        # Step motor KULLANILMIYOR: mekanizma sabit durur; bekleme süresi
+        # pickup_wait_s'ten (varsayılan 3.0s) gelir — step adım süresi değil.
+        pickup_wait_s = float(cfg.get("pickup_wait_s", 3.0))
         inst = cls(stepper=stepper, magnets=magnets, steps=steps, logger=log)
-        inst.stepper_duration = stepper_duration
-        log.info("Stepper hareket süresi tahmini: %.1fs (%d adım)", stepper_duration, steps)
+        inst.stepper_duration = pickup_wait_s
+        log.info("Pickup bekleme süresi: %.1fs (step motor kullanılmıyor)", pickup_wait_s)
         return inst
 
     # ── PayloadBackend interface ──────────────────────────────────────────── #
 
     def initialize(self) -> PayloadOperationResult:
-        self._log.info("LocalRPiBackend initialize: Magnet1=ON Magnet2=ON Stepper=SAFE")
+        self._log.info("LocalRPiBackend initialize: Magnet1=ON Magnet2=ON Stepper=DEVRE DIŞI")
         self._emergency = False
         self._stepper.reset_emergency()
         self._stepper.setup()
@@ -140,24 +140,18 @@ class LocalRPiBackend(PayloadBackend):
         if self._state != PayloadMechanismState.READY:
             return _fail(OperationResult.INVALID_STATE,
                          f"Beklenen READY, mevcut: {self._state}")
+        # Step motor SÜRÜLMEZ: mekanizma sabit durur; mıknatıslar yükü tutar.
         self._magnets.all_on()
         self._state = PayloadMechanismState.PICKING_UP
-        self._log.info("Pickup: Magnet1=ON Magnet2=ON, Stepper↓ başlıyor")
-        self._stepper.enable()
-        self._move_thread = threading.Thread(
-            target=self._stepper.move_down, args=(self._steps,), daemon=True)
-        self._move_thread.start()
+        self._log.info("Pickup: Magnet1=ON Magnet2=ON (step motor YOK — mekanizma sabit)")
         return _ok("Pickup command sent.")
 
     def finish_pickup(self) -> PayloadOperationResult:
         if self._state != PayloadMechanismState.PICKING_UP:
             return _fail(OperationResult.INVALID_STATE,
                          f"Beklenen PICKING_UP, mevcut: {self._state}")
-        if self._move_thread and self._move_thread.is_alive():
-            self._move_thread.join(timeout=30.0)
-        self._log.info("Pickup tamamlandı, Stepper↑")
-        self._stepper.move_up(self._steps)
-        self._stepper.disable()
+        # Step motor yok: yük zaten mıknatıslarda — sadece state tamamlanır.
+        self._log.info("Pickup tamamlandı (step motor kullanılmadı).")
         self._carried += 1
         self._state = PayloadMechanismState.READY
         return _ok("Pickup finished.")

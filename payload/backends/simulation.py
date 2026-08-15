@@ -49,10 +49,10 @@ class SimulationBackend(PayloadBackend):
             return PayloadOperationResult.fail(
                 OperationResult.INVALID_STATE,
                 f"send_pickup_command için state uygunsuz: {self._state}")
-        # Her iki mıknatıs ON olmalı
+        # Step motor YOK: mekanizma sabit durur; mıknatıslar yükü tutar.
         self._magnets = MagnetState(magnet_1_on=True, magnet_2_on=True)
         self._state = PayloadMechanismState.PICKING_UP
-        self._log.info("[SIM] send_pickup_command: Magnet1=ON Magnet2=ON, Stepper↓ başlıyor")
+        self._log.info("[SIM] send_pickup_command: Magnet1=ON Magnet2=ON (step motor yok)")
         return PayloadOperationResult.ok("Pickup command sent (simulation).")
 
     def finish_pickup(self) -> PayloadOperationResult:
@@ -62,7 +62,7 @@ class SimulationBackend(PayloadBackend):
                 f"finish_pickup beklenen state PICKING_UP, mevcut: {self._state}")
         self._carried += 1
         self._state = PayloadMechanismState.READY
-        self._log.info("[SIM] finish_pickup: Stepper↑ tamamlandı, carried=%d", self._carried)
+        self._log.info("[SIM] finish_pickup tamamlandı (step motor yok), carried=%d", self._carried)
         return PayloadOperationResult.ok("Pickup finished (simulation).")
 
     # ------------------------------------------------------------------ #

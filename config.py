@@ -115,12 +115,12 @@ ALIGN_ON_TARGET_TIMEOUT_S = 5
 # "hazır / payload yok" kararı verilmez.
 PAYLOAD_PICKUP_VISION_MIN_S = 3.0
 
-# Servo/mekanik mekanizmanın çalışması için bekleme süresi (saniye).
-# Simulation modunda yapay bekleme için kullanılır.
-# Gerçek uçuşta (HIL/real) bu değer stepper süresinden hesaplanır:
-#   steps_for_travel × step_delay_s × 2 = 11429 × 0.001 × 2 ≈ 22.9s
-# Buradaki değer yalnızca simulation backend için geçerlidir.
-PAYLOAD_SERVO_WAIT_S = 1
+# Payload alımı bekleme süresi (saniye) — STEP MOTOR KULLANILMIYOR.
+# Görev mekanizması sabit durur; yükler mıknatıslarla alınır. İHA yere
+# indikten sonra yükün tutulması için bu kadar beklenir.
+# Simulation modunda (backend'ten süre gelmezse) bu değer kullanılır;
+# real/HIL'de payload/config.yaml → pickup_wait_s (varsayılan 3.0s) geçerlidir.
+PAYLOAD_SERVO_WAIT_S = 3
 
 FIELD_WIDTH = 30.0
 FIELD_LENGTH = 100.0

@@ -28,6 +28,7 @@ from config import (
     ALIGN_SPEED_MPS,
     ALIGN_ON_TARGET_TIMEOUT_S,
     ALTITUDE_TOLERANCE_M,
+    APPROACH_RADIUS_M,
     APPROACH_SPEED_MPS,
     CAMERA_HEIGHT_PX,
     CAMERA_HORIZONTAL_FOV_DEG,
@@ -903,16 +904,33 @@ class MissionStateMachine:
     def _do_approach(self) -> None:
         """
         Kaba yatay yaklaşma — irtifa değiştirilmez.
-        Önce yatay hizalama (ALIGNING), ardından kademeli iniş yapılır.
+
+        İki aşamalı hız tasarımı (APPROACH_RADIUS_M):
+          - Hedef kaba GPS'e UZAK (> APPROACH_RADIUS_M): APPROACH_SPEED_MPS ile
+            yaklaş; APPROACHING_TARGET state'inde kal (her tick yeni goto).
+          - Yarıçapa girince ALIGN_SPEED_MPS'e düş ve ALIGNING_TARGET'a geç.
+
+        Eski davranış: hız aynı çağrıda 2.0'dan 0.8'e düşürülüyordu → tüm hedef
+        transit'i 0.8 m/s'de sürünüyordu. Mesafe kapısı bunu düzeltir.
         """
         pos = self.nav.position()
-        self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
-        if self._target_rough_lat is not None and self._target_rough_lon is not None:
-            self.nav.goto_global(
-                self._target_rough_lat,
-                self._target_rough_lon,
-                pos.relative_altitude,
+        if (self._target_rough_lat is not None
+                and self._target_rough_lon is not None):
+            dist = haversine_m(
+                pos.latitude, pos.longitude,
+                self._target_rough_lat, self._target_rough_lon,
             )
+            if dist > APPROACH_RADIUS_M:
+                # Henüz uzakta — yaklaşma hızıyla ilerle, hizalamaya geçme.
+                self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
+                self.nav.goto_global(
+                    self._target_rough_lat,
+                    self._target_rough_lon,
+                    pos.relative_altitude,
+                )
+                return
+
+        # Hedef yarıçap içinde (veya kaba GPS yok) → hassas hizalamaya geç.
         self._reset_altitude_state()
         self._align_phase = "HORIZONTAL"
         self._last_align_cmd_t = 0.0
@@ -978,6 +996,23 @@ class MissionStateMachine:
           → görüntü işleme KAPALI → dik iniş 1m → yük bırakma.
         """
         # ── Görüntü işleme GEREKTİRMEYEN fazlar ──────────────────────────────
+        # REACQUIRE: hedef görüntüden kayboldu → güvenli irtifaya (4m) yüksel;
+        # irtifaya varınca beklenen tür (kilit korunur) aranır — bulunamazsa
+        # arama pattern'i kaldığı yerden devam eder. KÖR BIRAKMA YOK.
+        if self._align_phase == "REACQUIRE":
+            result = self._altitude_ok()
+            if result is False:
+                return  # hâlâ yükseliyor
+            self._reset_altitude_state()
+            self._align_phase = "HORIZONTAL"
+            self.log.info(
+                "Yükselme tamam (%.1fm). Beklenen hedef türü aranıyor — "
+                "arama kaldığı yerden devam ediyor.",
+                self.nav.position().relative_altitude,
+            )
+            self._return_search()
+            return
+
         # OFFSET: 2.5m'de ortalama bitti; İHA, hedef merkez doğrultusu boyunca
         # DROP_OFFSET_M (0.5m) İLERİ hareket eder (yük mekanizması arkada →
         # hedefin ortasına denk gelir). Bu adımda görüntü işleme ÇALIŞMAZ.
@@ -1082,28 +1117,23 @@ class MissionStateMachine:
         # ---------- HORIZONTAL fazı ----------
         detection = self.data.pending_detection
 
-        # Tespit kayıp sayacı: hem tespit yok hem de limit dolmuşsa recover et
+        # Tespit kayıp sayacı: limit doldu → KÖR BIRAKMA YOK.
+        # Yüksel, beklenen türü (kilit: renk/şekil) yeniden ara; bulunamazsa
+        # arama pattern'i kaldığı yerden devam eder (search noktaları korunur).
         if self._no_detection_count > self._NO_DETECTION_LIMIT:
-            if self._is_over_rough_target():
-                # İHA hedefin üzerinde — tespit kaybı NORMAL: hedef görüntüyü
-                # dolduruyor, kontur/şekil doğrulaması bozuluyor. Yeniden kovalamak
-                # (kaba GPS'e dönüp tekrar yaklaşmak) sonsuz döngü/daire üretir;
-                # hedefi merkezde kabul edip inişe geçmek doğrusu.
-                self.log.info(
-                    "Tespit kaybı ama hedef kaba GPS'e yakın — hedef üzerinde "
-                    "kabul ediliyor, inişe geçiliyor."
-                )
-                self.data.pending_detection = self._synthetic_center_detection(frame)
-                detection = self.data.pending_detection
-                self._no_detection_count = 0
-            else:
-                self.log.warning(
-                    "ALIGN: %d tick üst üste tespit yok, kaba GPS'e dönülüyor.",
-                    self._no_detection_count,
-                )
-                self._no_detection_count = 0
-                self._recover_to_rough_position()
-                return
+            self.log.warning(
+                "ALIGN: %d tick üst üste tespit yok. Yükselip hedef yeniden "
+                "aranıyor (beklenen: %s/%s) — kör bırakma yapılmayacak.",
+                self._no_detection_count,
+                self._locked_color.value if self._locked_color else "-",
+                self._locked_shape or "-",
+            )
+            self._no_detection_count = 0
+            self._aligned_frame_count = 0
+            self._align_phase = "REACQUIRE"
+            self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
+            self._send_altitude(TARGET_APPROACH_ALTITUDE, timeout=20.0)
+            return
 
         if detection is None:
             return
@@ -1202,31 +1232,6 @@ class MissionStateMachine:
             self._offset_correction_start = None
             self._no_detection_count = 0
             self._aligned_frame_count = 0   # OFFSET fazına geçiş: onay sayacı temiz
-
-    # ------------------------------------------------------------------ #
-    def _is_over_rough_target(self) -> bool:
-        """İHA, hedefin kaba GPS konumuna (ilk görüldüğü yer) yakın mı?
-        Hedef büyük (4m çap) olduğundan ~2m içi 'hedef üzerinde' sayılır."""
-        if self._target_rough_lat is None or self._target_rough_lon is None:
-            return False
-        pos = self.nav.position()
-        return haversine_m(
-            pos.latitude, pos.longitude, self._target_rough_lat, self._target_rough_lon
-        ) < 2.0
-
-    def _synthetic_center_detection(self, frame: np.ndarray) -> Detection:
-        """Tespit kaybında hedefi görüntü merkezinde kabul et.
-        align_detection merkeze göre hizalı döner → iniş akışı başlar."""
-        return Detection(
-            color=self._locked_color if self._locked_color is not None else TargetColor.BLUE,
-            shape=self._locked_shape or "HEXAGON",
-            center_x=frame.shape[1] / 2.0,
-            center_y=frame.shape[0] / 2.0,
-            area_px=1.0,
-            bbox_width_px=1.0,
-            bbox_height_px=1.0,
-            confidence=0.5,
-        )
 
     # ------------------------------------------------------------------ #
     def _recover_to_rough_position(self) -> None:

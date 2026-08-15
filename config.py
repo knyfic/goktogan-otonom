@@ -215,6 +215,11 @@ APPROACH_SPEED_MPS = 2.0
 ALIGN_SPEED_MPS = 0.8
 # İrtifa değişim hızı
 VERTICAL_SPEED_MPS = 1.0
+# Hedef kaba GPS'ine bu yarıçaptan UZAKTAYKEN APPROACH_SPEED_MPS kullanılır;
+# yarıçapa girince ALIGN_SPEED_MPS'ye düşülüp görüntü hizalaması başlar.
+# (Eski davranış: tüm hedef transit'i 0.8 m/s'de sürünüyordu — bu kapı
+# "uzak=APPROACH / yakın=ALIGN" iki aşamalı tasarımı gerçekleştirir.)
+APPROACH_RADIUS_M = 5.0
 
 POSITION_TOLERANCE_M = 0.35
 ALTITUDE_TOLERANCE_M = 0.20

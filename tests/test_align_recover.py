@@ -1,68 +1,139 @@
 """
-Hedef üzerinde kabul (recover yerine iniş) davranışı testleri.
+Hedef kaybı → REACQUIRE (kör bırakma YOK) davranışı testleri.
 
-İHA hedefe yaklaştığında hedef görüntüyü doldurur → şekil doğrulaması bozulur
-→ tespit kaybolur. Eski davranış kaba GPS'e dönüp tekrar yaklaşmak (sonsuz
-döngü → daire çizme). Yeni davranış: İHA hedef kaba GPS'ine yakınken tespit
-kaybını "hedef üzerinde" kabul edip inişe geçer.
+Eski davranış: İHA hedef kaba GPS'ine yakınken tespit kaybını "hedef üzerinde"
+KABUL EDİP sentetik merkez tespitiyle inişe/kör bırakmaya geçiyordu (hedef aslında
+orada olmasa bile).
+
+Yeni davranış: tespit limit dolunca — nerede olursa olsun — güvenli irtifaya (4m)
+yüksel, beklenen türü (kilit: renk/şekil) yeniden ara; bulunamazsa arama pattern'i
+kaldığı yerden devam eder. Tespit olmadan bırakma yapılmaz.
 """
+import logging
 from unittest.mock import MagicMock
 
 import numpy as np
 
-from models import TargetColor
+from config import APPROACH_SPEED_MPS, SEARCH_SPEED_MPS, TARGET_APPROACH_ALTITUDE, VERTICAL_SPEED_MPS
+from models import MissionState, TargetColor
 from state_machine import MissionStateMachine
 
 
-def _sm():
-    sm = object.__new__(MissionStateMachine)
-    sm._target_rough_lat = 1.0
-    sm._target_rough_lon = 1.0
-    sm._locked_color = None
-    sm._locked_shape = None
-    sm.nav = MagicMock()
-    return sm
+def _make_sm(nav=None, rough_lat=1.0, rough_lon=1.0):
+    nav = nav or MagicMock()
+    nav.position.return_value = MagicMock(
+        relative_altitude=4.0, latitude=1.0, longitude=1.0, heading_deg=0.0,
+        battery_voltage_v=0.0, battery_percent=-1,
+    )
+    camera = MagicMock()
+    camera.latest.return_value = np.zeros((704, 1920, 3), dtype=np.uint8)
 
-
-def _pos(lat: float, lon: float):
-    return MagicMock(latitude=lat, longitude=lon)
-
-
-def test_is_over_rough_target_near():
-    sm = _sm()
-    sm.nav.position.return_value = _pos(1.00001, 1.00001)  # ~1.5m kuzeydoğu
-    assert sm._is_over_rough_target() is True
-
-
-def test_is_over_rough_target_far():
-    sm = _sm()
-    sm.nav.position.return_value = _pos(1.0001, 1.0001)  # ~15m
-    assert sm._is_over_rough_target() is False
-
-
-def test_is_over_rough_target_none():
-    sm = _sm()
-    sm._target_rough_lat = None
-    sm.nav.position.return_value = _pos(1.0, 1.0)
-    assert sm._is_over_rough_target() is False
-
-
-def test_synthetic_center_detection():
-    sm = _sm()
-    det = sm._synthetic_center_detection(np.zeros((704, 1920, 3), dtype=np.uint8))
-    assert det.center_x == 960.0
-    assert det.center_y == 352.0
-    assert det.color is not None
-    assert det.confidence == 0.5
-
-
-def test_synthetic_center_detection_uses_lock():
-    sm = _sm()
+    sm = MissionStateMachine(
+        navigation=nav, camera=camera, payload=MagicMock(),
+        logger=logging.getLogger("t"),
+    )
+    sm.data.state = MissionState.ALIGNING_TARGET
+    sm._align_phase = "HORIZONTAL"
+    sm._last_align_cmd_t = 0.0
+    sm._target_rough_lat = rough_lat
+    sm._target_rough_lon = rough_lon
     sm._locked_color = TargetColor.RED
     sm._locked_shape = "TRIANGLE"
-    det = sm._synthetic_center_detection(np.zeros((704, 1920, 3), dtype=np.uint8))
-    assert det.color == TargetColor.RED
-    assert det.shape == "TRIANGLE"
+    sm.data.pending_detection = None
+    return sm, nav
+
+
+def test_lost_target_over_rough_triggers_reacquire_no_blind_drop():
+    """Tespit kaybı + limit doldu → KÖR BIRAKMA YOK: REACQUIRE'a geç (4m yüksel)."""
+    sm, nav = _make_sm()   # drone kaba GPS'te (hedefin üstünde)
+    sm._no_detection_count = sm._NO_DETECTION_LIMIT + 1
+
+    sm._do_align_target()
+
+    assert sm._align_phase == "REACQUIRE", "tespit yokken inişe/bırakmaya geçilmemeli"
+    assert sm.data.state == MissionState.ALIGNING_TARGET, "TARGET_ALIGNED'e geçilmemeli (kör bırakma)"
+    assert sm.data.pending_detection is None, "sentetik merkez tespiti ÜRETİLMEMELİ"
+    # Kilit korunur → yeniden arama yalnızca beklenen türü arar (kırmızı üçgen)
+    assert sm._locked_color == TargetColor.RED
+    assert sm._locked_shape == "TRIANGLE"
+    # Yükselme komutu: APPROACH hızı + TARGET_APPROACH_ALTITUDE
+    assert nav.set_max_speed.call_args[0][0] == APPROACH_SPEED_MPS
+    nav.set_relative_altitude.assert_called_once_with(TARGET_APPROACH_ALTITUDE)
+
+
+def test_lost_target_far_from_rough_also_reacquires():
+    """Kaba GPS'ten uzakta kaybolsa da → yüksel + yeniden ara (kaba GPS'e dönüş YOK)."""
+    sm, nav = _make_sm(rough_lat=1.01, rough_lon=1.01)   # ~1.4km uzaklıkta kaba GPS
+    sm._no_detection_count = sm._NO_DETECTION_LIMIT + 1
+
+    sm._do_align_target()
+
+    assert sm._align_phase == "REACQUIRE"
+    assert sm.data.state == MissionState.ALIGNING_TARGET
+    nav.goto_global.assert_not_called()   # kaba GPS'e geri gitme — yüksel + ara
+
+
+def test_reacquire_ascend_done_returns_to_search_keeping_lock():
+    """Yükselme bitince → search'e dön (kilit korunur, search hızı, pattern aynı)."""
+    sm, nav = _make_sm()
+    sm._search_idx = 5                       # pattern kaldığı yer
+    sm.data.first_target = None
+    sm._align_phase = "REACQUIRE"
+    sm._alt_waiting = True
+    sm._alt_target = TARGET_APPROACH_ALTITUDE
+    nav.position.return_value = MagicMock(
+        relative_altitude=TARGET_APPROACH_ALTITUDE, latitude=1.0, longitude=1.0,
+        heading_deg=0.0, battery_voltage_v=0.0, battery_percent=-1,
+    )
+
+    sm._do_align_target()
+
+    assert sm.data.state == MissionState.SEARCHING_FIRST_TARGET
+    assert nav.set_max_speed.call_args[0][0] == SEARCH_SPEED_MPS, "search hızı geri gelmeli"
+    assert sm._locked_color == TargetColor.RED, "kilit korunmalı (beklenen tür)"
+    assert sm._locked_shape == "TRIANGLE"
+    assert sm._search_idx == 5, "arama kaldığı yerden devam etmeli"
+
+
+def test_reacquire_keeps_search_points_for_second_target():
+    """İkinci hedef aranırken kaybolursa → SEARCHING_SECOND_TARGET'e döner."""
+    from models import Target, TargetType
+
+    sm, nav = _make_sm()
+    sm.data.first_target = Target(
+        target_id=1, shape=TargetType.TRIANGLE, color=TargetColor.RED,
+        latitude=1.0, longitude=1.0, confidence=0.9,
+    )
+    sm._search_points = [object(), object(), object()]
+    sm._search_idx = 2
+    sm._align_phase = "REACQUIRE"
+    sm._alt_waiting = True
+    sm._alt_target = TARGET_APPROACH_ALTITUDE
+    nav.position.return_value = MagicMock(
+        relative_altitude=TARGET_APPROACH_ALTITUDE, latitude=1.0, longitude=1.0,
+        heading_deg=0.0, battery_voltage_v=0.0, battery_percent=-1,
+    )
+
+    sm._do_align_target()
+
+    assert sm.data.state == MissionState.SEARCHING_SECOND_TARGET
+    assert len(sm._search_points) == 3
+    assert sm._search_idx == 2
+
+
+def test_no_blind_drop_without_real_detection():
+    """Çekirdek garanti: gerçek tespit olmadan TARGET_ALIGNED'e asla geçilmez."""
+    sm, _nav = _make_sm()
+    sm._no_detection_count = sm._NO_DETECTION_LIMIT + 1
+
+    for _ in range(5):
+        sm._do_align_target()
+
+    # Yükselme mock'ta anında biter → yeniden aramaya dönülür; asla bırakmaya değil.
+    assert sm.data.state != MissionState.TARGET_ALIGNED, "kör bırakma yok"
+    assert sm.data.state in (MissionState.SEARCHING_FIRST_TARGET,
+                             MissionState.SEARCHING_SECOND_TARGET), \
+        "yeniden aramaya dönülür"
 
 
 # ── Yaw kilidi: hizalama komutlarında İHA burnu sabitlenir ─────────────────── #

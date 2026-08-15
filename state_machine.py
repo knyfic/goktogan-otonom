@@ -145,6 +145,7 @@ class MissionStateMachine:
         # ---- Lawnmower tarama ----
         self._search_points: list = []
         self._search_idx: int = 0
+        self._search_count: int = 0   # 1. / 2. search loglarını ayırt etmek için
         # Yarışma alanı frame'i — _init_search'te COMPETITION_CORNERS'ten kurulur.
         self._search_field: CompetitionField | None = None
         self._search_origin_lat: float | None = None
@@ -598,25 +599,35 @@ class MissionStateMachine:
     #  Lawnmower tarama
     # ==================================================================== #
 
-    def _init_search(self) -> None:
+    def _init_search(self, reference_lat=None, reference_lon=None) -> None:
         """Yarışma alanı frame'inde dinamik search rotası kurar.
 
-        1. İHA'nın runtime GPS konumu competition frame'e çevrilir.
-        2. İHA alan dışındaysa search başlatılmaz → hata + RTL.
+        reference_lat/lon verilirse O GPS referans alınır — ikinci search,
+        launch konumu yerine İLK PAYLOAD BIRAKMA konumundan başlar. Verilmezse
+        İHA'nın o anki GPS'i (launch) kullanılır. Her iki durumda da aynı
+        CompetitionField + LawnmowerPlanner + reorder_search_from_drone kullanılır.
+
+        1. Referans GPS → competition frame'e çevrilir.
+        2. Referans alan dışındaysa search başlatılmaz → hata + RTL.
         3. Lawnmower planner competition frame'de çalıştırılır (pattern aynı).
-        4. Rota, İHA'ya EN YAKIN search hattından başlatılır (zigzag korunur).
+        4. Rota, referansa EN YAKIN search hattından başlatılır (zigzag korunur).
         """
-        pos = self.nav.fresh_position(timeout=1.0)
-        self._search_origin_lat = pos.latitude
-        self._search_origin_lon = pos.longitude
+        self._search_count += 1
+        if reference_lat is None or reference_lon is None:
+            pos = self.nav.fresh_position(timeout=1.0)
+            ref_lat, ref_lon = pos.latitude, pos.longitude
+        else:
+            ref_lat, ref_lon = reference_lat, reference_lon
+        self._search_origin_lat = ref_lat
+        self._search_origin_lon = ref_lon
 
         field = CompetitionField(COMPETITION_CORNERS)
-        lx, ly = field.gps_to_local(pos.latitude, pos.longitude)
+        lx, ly = field.gps_to_local(ref_lat, ref_lon)
         if not field.contains_local(lx, ly):
             self.log.error(
-                "Launch position is outside competition area: "
+                "Search referansı competition alanı dışında: "
                 "GPS=(%.7f, %.7f) local=(%.1f, %.1f) — alan [0..%.0f]x[0..%.0f] m",
-                pos.latitude, pos.longitude, lx, ly,
+                ref_lat, ref_lon, lx, ly,
                 field.width_m, field.length_m,
             )
             self.data.mission_failed = True
@@ -630,16 +641,22 @@ class MissionStateMachine:
         # Planner ortalanmış x eksenini ([-w/2, w/2]) competition frame'e (0..w)
         # kaydır; y ekseni zaten competition frame ile aynıdır (alt kenar tabanlı).
         points = [SearchPoint(p.x_m + field.width_m / 2.0, p.y_m) for p in points]
-        # İHA'ya en yakın search hattından başla — zigzag sırası korunur.
+        # Referansa en yakın search hattından başla — zigzag sırası korunur.
         self._search_points = reorder_search_from_drone(points, lx, ly)
         self._search_field = field
         self._search_idx = 0
+        # SEARCH_SPEED_MPS — yalnızca search rotasında geçerli (config'ten).
         self.nav.set_max_speed(SEARCH_SPEED_MPS, VERTICAL_SPEED_MPS)
+        start = self._search_points[0] if self._search_points else None
         self.log.info(
-            "Competition search başlatıldı: %d nokta, alan %.0fx%.0f m, "
-            "İHA GPS=(%.7f, %.7f) local=(%.1f, %.1f)",
-            len(self._search_points), field.width_m, field.length_m,
-            pos.latitude, pos.longitude, lx, ly,
+            "SEARCH #%d başlatıldı: %d nokta, alan %.0fx%.0f m | "
+            "referans GPS=(%.7f, %.7f) local=(%.1f, %.1f) | "
+            "ilk waypoint local=(%.1f, %.1f) | hız=%.1f m/s",
+            self._search_count, len(self._search_points),
+            field.width_m, field.length_m,
+            ref_lat, ref_lon, lx, ly,
+            start.x_m if start else 0.0, start.y_m if start else 0.0,
+            SEARCH_SPEED_MPS,
         )
 
     def _advance_search(self) -> None:
@@ -1281,7 +1298,18 @@ class MissionStateMachine:
             "%.1fm irtifaya ulaşıldı. İkinci hedef aranıyor.",
             self.nav.position().relative_altitude,
         )
-        self._init_search()
+        if self.data.first_target is None:
+            self.log.error(
+                "İkinci search için ilk hedef (drop) konumu yok! Search başlatılamıyor."
+            )
+            self.data.mission_failed = True
+            self._goto(MissionState.RTL)
+            return
+        # İkinci search, launch konumu yerine İLK PAYLOAD BIRAKMA konumundan başlar.
+        self._init_search(
+            self.data.first_target.latitude,
+            self.data.first_target.longitude,
+        )
         self._goto(MissionState.SEARCHING_SECOND_TARGET)
 
     # ------------------------------------------------------------------ #

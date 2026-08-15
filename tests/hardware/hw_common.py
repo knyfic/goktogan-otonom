@@ -151,3 +151,46 @@ def flight_mode_name(master, hb_msg) -> str | None:
 def recv_telemetry(master, types, timeout_s: float = 3.0):
     """Belirtilen türde bir MAVLink mesajı bekler (READ-ONLY). None = gelmedi."""
     return master.recv_match(type=types, blocking=True, timeout=timeout_s)
+
+
+def build_real_navigation(cfg: dict):
+    """payload/config.yaml → mevcut Navigation (REAL: Cube Orange TELEM2 serial).
+
+    main.py'nin REAL moddaki birebir kurulumu: device/baudrate/flow_control
+    yalnızca config'ten gelir (kod içinde hard-code yok). Bağlantıyı açar ve
+    HEARTBEAT bekler. UÇUŞ KOMUTU GÖNDERMEZ.
+    """
+    from flight.navigation import Navigation
+
+    conn = cfg.get("flight_controller", {}).get("connection", {}) or {}
+    device = conn.get("device", "/dev/ttyAMA0")
+    baud = conn.get("baudrate", 921600)
+    flow_control = bool(conn.get("flow_control", False))
+    return Navigation(device, baud=baud, flow_control=flow_control)
+
+
+def collect_battery_telemetry(nav, duration_s: float) -> tuple[float, int]:
+    """Mevcut Navigation üzerinden batarya telemetrisi toplar (READ-ONLY).
+
+    nav.position() BATTERY_STATUS / SYS_STATUS mesajlarını canlı işler ve
+    VehiclePosition.battery_voltage_v / battery_percent alanlarını doldurur.
+
+    (voltaj, yüzde) döner — veri gelmediyse (0.0, -1). Voltaj geldikten sonra
+    SYS_STATUS yüzdesine ekstra 3 sn şans tanınır (FC yüzde bildirmiyorsa
+    gereksiz beklenmez).
+    """
+    deadline = time.monotonic() + duration_s
+    best_v = 0.0
+    best_pct = -1
+    while True:
+        pos = nav.position()
+        if pos.battery_voltage_v > best_v:
+            best_v = pos.battery_voltage_v
+        if pos.battery_percent > best_pct:
+            best_pct = pos.battery_percent
+        if best_v > 0 and (best_pct != -1 or time.monotonic() >= deadline - 3.0):
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.1)
+    return best_v, best_pct

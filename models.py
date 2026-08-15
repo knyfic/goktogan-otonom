@@ -73,6 +73,8 @@ class VehiclePosition:
     longitude: float = 0.0
     relative_altitude: float = 0.0
     heading_deg: float = 0.0
+    battery_voltage_v: float = 0.0   # BATTERY_STATUS hücre toplamı (0 = henüz bilinmiyor)
+    battery_percent: int = -1        # SYS_STATUS battery_remaining (-1 = bilinmiyor)
 
 
 @dataclass

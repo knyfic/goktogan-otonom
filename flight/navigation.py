@@ -74,14 +74,10 @@ class Navigation:
         """Geçerli bir GPS konumu gelene kadar bekler."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            msg = self.master.recv_match(
-                type="GLOBAL_POSITION_INT",
-                blocking=True,
-                timeout=1,
-            )
+            msg = self.master.recv_match(blocking=True, timeout=1)
             if msg is None:
                 continue
-            self._update_position(msg)
+            self._dispatch_telemetry(msg)
             if self._position.latitude != 0.0:
                 return self._position
         raise TimeoutError("GLOBAL_POSITION_INT alınamadı.")
@@ -98,17 +94,46 @@ class Navigation:
             self.home_lat = self._position.latitude
             self.home_lon = self._position.longitude
 
+    def _update_battery_status(self, msg) -> None:
+        """BATTERY_STATUS: hücre voltajlarının (mV) toplamı → toplam voltaj.
+
+        65535 = kullanılmayan hücre. Birden çok pil varsa ilk görülen
+        (genellikle battery_id=0) güncel kalır.
+        """
+        cells = [v / 1000.0 for v in msg.voltages if v not in (0xFFFF, 0)]
+        if cells:
+            self._position.battery_voltage_v = sum(cells)
+        if getattr(msg, "battery_remaining", -1) != -1:
+            self._position.battery_percent = msg.battery_remaining
+
+    def _update_sys_status(self, msg) -> None:
+        """SYS_STATUS: yüzde bilgisi fallback kaynağı (voltaj yoksa da gösterilir)."""
+        if getattr(msg, "battery_remaining", -1) != -1:
+            self._position.battery_percent = msg.battery_remaining
+
+    def _dispatch_telemetry(self, msg) -> None:
+        """Gelen telemetri mesajını türüne göre işler (pozisyon + batarya)."""
+        t = msg.get_type()
+        if t == "GLOBAL_POSITION_INT":
+            self._update_position(msg)
+        elif t == "BATTERY_STATUS":
+            self._update_battery_status(msg)
+        elif t == "SYS_STATUS":
+            self._update_sys_status(msg)
+
     def position(self) -> VehiclePosition:
         """
         Son bilinen pozisyonu döndürür.
-        Yeni MAVLink mesajı varsa önce onu işler (non-blocking).
+        Yeni MAVLink mesajları varsa önce onları işler (non-blocking) —
+        pozisyon ve batarya telemetrisi buradan canlı güncellenir.
         """
-        msg = self.master.recv_match(
-            type="GLOBAL_POSITION_INT",
-            blocking=False,
-        )
-        if msg is not None:
-            self._update_position(msg)
+        # Her çağrıda buffer'dan en fazla 10 mesaj işle — hem pozisyon hem
+        # batarya (BATTERY_STATUS ~1-2 Hz) gecikmesiz işlensin.
+        for _ in range(10):
+            msg = self.master.recv_match(blocking=False)
+            if msg is None:
+                break
+            self._dispatch_telemetry(msg)
         return self._position
 
     def fresh_position(self, timeout: float = 1.0) -> VehiclePosition:
@@ -119,13 +144,11 @@ class Navigation:
         """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            msg = self.master.recv_match(
-                type="GLOBAL_POSITION_INT",
-                blocking=True,
-                timeout=0.1,
-            )
-            if msg is not None:
-                self._update_position(msg)
+            msg = self.master.recv_match(blocking=True, timeout=0.1)
+            if msg is None:
+                continue
+            self._dispatch_telemetry(msg)
+            if msg.get_type() == "GLOBAL_POSITION_INT":
                 return self._position
         return self._position
 

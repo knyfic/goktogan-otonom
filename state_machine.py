@@ -497,15 +497,33 @@ class MissionStateMachine:
         return base
 
     def _hud_lines(self, extra: str = "") -> tuple[str, str]:
-        """Standart HUD satırları: STATE + irtifa / heading + GPS."""
+        """Standart HUD satırları: STATE + irtifa / heading / batarya / GPS."""
         pos = self.nav.position()
         line1 = (
             f"{self.data.state.value}"
             + (f"  |  {extra}" if extra else "")
         )
+        # Batarya alanları her kaynakta olmayabilir (mock/test/yaşlı telemetri) —
+        # güvenli varsayılanla düş.
+        try:
+            battery_v = float(pos.battery_voltage_v)
+        except (TypeError, ValueError):
+            battery_v = 0.0
+        try:
+            battery_pct = int(pos.battery_percent)
+        except (TypeError, ValueError):
+            battery_pct = -1
+
+        if battery_v > 0:
+            bat_str = f"Bat {battery_v:.1f}V"
+        else:
+            bat_str = "Bat --.-V"
+        if battery_pct >= 0:
+            bat_str += f" {battery_pct}%"
         line2 = (
             f"Alt {pos.relative_altitude:.1f}m  "
             f"Hdg {pos.heading_deg:.0f}°  "
+            f"{bat_str}  "
             f"({pos.latitude:.5f}, {pos.longitude:.5f})"
             f"  T:{self._mission_timer_str()}"
         )

@@ -37,6 +37,7 @@ from config import (
     COMPETITION_CORNERS,
     ALIGNMENT_DESCENT_STEP_M,
     ALIGNED_FRAMES_REQUIRED,
+    TARGET_ALIGNED_FRAMES_REQUIRED,
     CAMERA_TO_MECHANISM_OFFSET_M,
     DROP_OFFSET_M,
     MISSION_TIMEOUT_S,
@@ -810,17 +811,25 @@ class MissionStateMachine:
         # yapmayız; Gazebo dahil tüm kaynaklarda renk sınıflandırması stabil kalır.
         detections = self.target_detector.detect(frame)
 
-        # İkinci hedef ararken birincisini filtrele
+        # İkinci hedef: birinci hedefin TERSİ olan tür aranır — başka hiçbir
+        # tür kabul edilmez (geçersiz kombinasyon / birinci hedef / gürültü
+        # zaman kilidini kirletemez).
         if (self.data.state == MissionState.SEARCHING_SECOND_TARGET
                 and self.data.first_target is not None):
             known = self.data.first_target
+            if known.shape == TargetType.HEXAGON:
+                expected_color, expected_shape = TargetColor.RED, "TRIANGLE"
+            else:
+                expected_color, expected_shape = TargetColor.BLUE, "HEXAGON"
             detections = [
                 d for d in detections
-                if not (d.color == known.color
-                        and d.shape == known.shape.value)
+                if d.color == expected_color and d.shape == expected_shape
             ]
-            # İkinci hedef için kilidi sıfırla (birinciye ait kilit kalmış olabilir)
-            if self._locked_shape == known.shape.value and self._locked_color == known.color:
+            # Beklenen tür dışında kalan kilit kalıntısını temizle (birinciye
+            # ait kilit vb.) — ikinci arama temiz kilit ile başlasın.
+            if (self._locked_color is not None
+                    and (self._locked_color, self._locked_shape)
+                        != (expected_color, expected_shape)):
                 self._locked_color = None
                 self._locked_shape = None
                 self.target_detector.history.clear()
@@ -873,6 +882,19 @@ class MissionStateMachine:
 
         # Tespit var ama henüz kararlı değil — dur, taramayı ilerletme
         if detections:
+            # Kilit varken YALNIZCA kilitli tür taramayı durdurur (stabilize
+            # olsun diye); diğer türler (örn. öteki hedef) taramayı ENGELLEMEZ —
+            # aksi halde yanlış tür üzerinde asılı kalınır.
+            if (self._locked_color is not None
+                    and self._locked_shape is not None):
+                matching = [
+                    d for d in detections
+                    if d.color == self._locked_color
+                    and d.shape == self._locked_shape
+                ]
+                if not matching:
+                    self._advance_search()
+                return
             return
 
         self._advance_search()
@@ -1170,7 +1192,11 @@ class MissionStateMachine:
             self._aligned_frame_count += 1
         else:
             self._aligned_frame_count = 0
-        aligned = self._aligned_frame_count >= ALIGNED_FRAMES_REQUIRED
+        # Yük bırakma hedefi: SIKI ardışık onay (TARGET_ALIGNED_FRAMES_REQUIRED).
+        # Search irtifasında yalpa/yaw ile şansa merkeze denk gelen birkaç frame
+        # "hizalı" sanılıp erken irtifa düşüşü üretmemeli — şekil BİR SÜRE
+        # aralıksız ortada kaldıktan sonra inişe geçilir.
+        aligned = self._aligned_frame_count >= TARGET_ALIGNED_FRAMES_REQUIRED
 
         dx = detection.center_x - frame.shape[1] / 2
         dy = detection.center_y - frame.shape[0] / 2
@@ -1179,7 +1205,7 @@ class MissionStateMachine:
             "ALIGN HORIZONTAL: merkez=(%.0f,%.0f) dx=%.0f dy=%.0f heading=%.0f° "
             "onay=%d/%d → hizalı=%s",
             detection.center_x, detection.center_y, dx, dy, heading,
-            self._aligned_frame_count, ALIGNED_FRAMES_REQUIRED, aligned,
+            self._aligned_frame_count, TARGET_ALIGNED_FRAMES_REQUIRED, aligned,
         )
 
         if not aligned:
@@ -1935,8 +1961,12 @@ class MissionStateMachine:
             )
 
         # Hizalandı VEYA timeout → bir sonraki basamağa in
-        # Eğer zaten son hizalama irtifasına (~0.4m) indiysek offset correction'a geç
-        if pos.relative_altitude <= PAYLOAD_ALIGN_ALTITUDE_M + ALTITUDE_TOLERANCE_M:
+        # Yalnızca tasarlanan hizalama irtifasına (PAYLOAD_ALIGN_ALTITUDE_M ≈ 0.4m)
+        # İNDİĞİNDE offset correction'a geç. Eski eşik (+ALTITUDE_TOLERANCE_M)
+        # iniş bandının ÜST SINIRINI (0.6m) kullanıyordu — yüksekten inmeden
+        # offset yapılıyor, sonraki adımda payload görüşten çıkıyordu.
+        # Daha yüksekten daha aşağıya in (bir basamak daha) ve offset'i alçakta yap.
+        if pos.relative_altitude <= PAYLOAD_ALIGN_ALTITUDE_M:
             self.log.info(
                 "Payload ~%.1fm'de hizalandı. Kamera-mekanizma offset düzeltmesine "
                 "(%.0fcm ileri) geçiliyor.",
@@ -2356,6 +2386,38 @@ class MissionStateMachine:
             self._do_start_rtl()
             return
 
+        # --- OFFSET: son hizalama bitti; mekanizma ARKADA → İHA hedef merkez
+        # doğrultusunda DROP_OFFSET_M İLERİ gider (ilk bırakmalarla AYNI adım). ---
+        if self._align_phase == "OFFSET":
+            if self._offset_correction_start is None:
+                self._offset_correction_start = time.monotonic()
+                self.log.info(
+                    "Geri yük OFFSET (bırakma): İleri %.0fcm gidiliyor...",
+                    DROP_OFFSET_M * 100,
+                )
+                self.nav.goto_body_offset(
+                    forward_m=DROP_OFFSET_M, right_m=0.0
+                )
+                # Görüntü işleme penceresinde bildirim (ilk bırakma ile aynı)
+                self._set_display_offset(
+                    f"OFFSET (geri yük): hedefe {DROP_OFFSET_M:.1f}m ileri gidiliyor"
+                )
+                return
+            elapsed = time.monotonic() - self._offset_correction_start
+            if elapsed < OFFSET_CORRECTION_WAIT_S:
+                return
+            # Offset tamam → görüntü işlemesiz dik iniş: 3m → 1m
+            self._offset_correction_start = None
+            self.log.info(
+                "Geri yük OFFSET bitti. Dik iniş: → %.1fm (yük bırakılacak).",
+                PAYLOAD_DROP_ALTITUDE,
+            )
+            self._reset_altitude_state()
+            self._align_phase = "DROPPING"
+            self._no_detection_count = 0
+            self._send_altitude(PAYLOAD_DROP_ALTITUDE, timeout=20.0)
+            return
+
         # --- DROPPING: hizalama sonrası görüntü işleme olmadan sabit iniş ---
         if self._align_phase == "DROPPING":
             if frame is not None:
@@ -2463,12 +2525,14 @@ class MissionStateMachine:
             self._send_altitude(next_alt, timeout=25.0)
         else:
             self.log.info(
-                "Geri yük bırakma: %.1fm'de 2. hedef merkezinde → %.1fm'ye sabit iniş başlıyor.",
-                pos.relative_altitude, PAYLOAD_DROP_ALTITUDE,
+                "Geri yük bırakma: %.1fm'de 2. hedef merkezinde → OFFSET "
+                "düzeltmesi başlıyor (%.0fcm ileri — mekanizma hedefin ortasına).",
+                pos.relative_altitude, DROP_OFFSET_M * 100,
             )
-            self._align_phase = "DROPPING"
+            self._align_phase = "OFFSET"
+            self._offset_correction_start = None
             self.nav.set_max_speed(ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS)
-            self._send_altitude(PAYLOAD_DROP_ALTITUDE, timeout=20.0)
+            return
 
     # ------------------------------------------------------------------ #
     def _do_start_rtl(self) -> None:

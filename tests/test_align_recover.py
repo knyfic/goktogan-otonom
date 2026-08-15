@@ -230,10 +230,57 @@ def test_align_target_big_bbox_skips_command():
     sm.position_controller.align_detection.assert_not_called()
     assert sm._align_phase == "HORIZONTAL"
 
-    # Ardışık onay (ALIGNED_FRAMES_REQUIRED) dolunca kademeli iniş fazına geçilir
-    from config import ALIGNED_FRAMES_REQUIRED
-    for _ in range(ALIGNED_FRAMES_REQUIRED - 1):
+    # Ardışık onay (TARGET_ALIGNED_FRAMES_REQUIRED) dolunca kademeli iniş fazına geçilir
+    from config import TARGET_ALIGNED_FRAMES_REQUIRED
+    for _ in range(TARGET_ALIGNED_FRAMES_REQUIRED - 1):
         sm._last_align_cmd_t = 0.0
         sm._do_align_target()
     sm.position_controller.align_detection.assert_not_called()
+    assert sm._align_phase == "DESCENDING"
+
+
+def test_align_target_premature_centering_does_not_descend():
+    """Şansa birkaç frame merkezde kalma (eski 3 onay) inişi BAŞLATMAMALI —
+    yalnızca TARGET_ALIGNED_FRAMES_REQUIRED (8) ARDIŞIK onaydan sonra inilir."""
+    import state_machine as sm_mod
+    from config import ALIGNED_FRAMES_REQUIRED, TARGET_ALIGNED_FRAMES_REQUIRED
+    from models import MissionState
+
+    nav = MagicMock()
+    nav.position.return_value = MagicMock(
+        relative_altitude=4.0, latitude=1.0, longitude=1.0, heading_deg=0.0,
+    )
+    camera = MagicMock()
+    camera.latest.return_value = np.zeros((704, 1920, 3), dtype=np.uint8)
+
+    sm = sm_mod.MissionStateMachine(
+        navigation=nav, camera=camera, payload=MagicMock(),
+        logger=logging.getLogger("t"),
+    )
+    sm.data.state = MissionState.ALIGNING_TARGET
+    sm._align_phase = "HORIZONTAL"
+    sm._last_align_cmd_t = 0.0
+    sm._target_rough_lat = 1.0
+    sm._target_rough_lon = 1.0
+    sm.position_controller = MagicMock()
+    sm.position_controller.align_detection.return_value = True
+
+    det = MagicMock()
+    det.center_x = 960.0
+    det.center_y = 352.0
+    det.bbox_width_px = 200.0   # küçük bbox → pixel-center yoluna girer
+    det.confidence = 0.9
+    sm.data.pending_detection = det
+
+    # Eski eşik (3 onay) kadar merkezde kalma → YENİ eşik (8) dolmaz, iniş YOK
+    for _ in range(ALIGNED_FRAMES_REQUIRED):
+        sm._last_align_cmd_t = 0.0
+        sm._do_align_target()
+    assert sm._align_phase == "HORIZONTAL", "erken merkezleme iniş başlatmamalı"
+    assert sm._aligned_frame_count == ALIGNED_FRAMES_REQUIRED
+
+    # Kalan onaylar tamamlanınca (8) kademeli iniş başlar
+    for _ in range(TARGET_ALIGNED_FRAMES_REQUIRED - ALIGNED_FRAMES_REQUIRED):
+        sm._last_align_cmd_t = 0.0
+        sm._do_align_target()
     assert sm._align_phase == "DESCENDING"

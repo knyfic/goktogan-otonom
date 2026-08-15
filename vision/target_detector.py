@@ -581,11 +581,31 @@ class TargetDetector:
             if key not in self._first_seen:
                 self._first_seen[key] = now
 
-        for (color, shape), first_t in self._first_seen.items():
-            if now - first_t >= TARGET_LOCK_DURATION_S:
-                self.time_locked_color = color
-                self.time_locked_shape = shape
+        mature = [
+            (color, shape)
+            for (color, shape), first_t in self._first_seen.items()
+            if now - first_t >= TARGET_LOCK_DURATION_S
+        ]
+        if not mature:
+            return
+
+        if len(mature) > 1:
+            # Her iki tür de aynı anda görünürlük eşiğini aştıysa EN SAĞLIKLI
+            # (en yüksek güven) olan birinci hedef olarak kilitlenir; diğeri
+            # ikinci hedef kalır. (Tek tür varsa ilk olgunlaşan kilitlenir.)
+            best = max(
+                (d for d in detections if (d.color, d.shape) in mature),
+                key=lambda d: d.confidence,
+                default=None,
+            )
+            if best is not None:
+                self.time_locked_color = best.color
+                self.time_locked_shape = best.shape
                 return
+
+        color, shape = mature[0]
+        self.time_locked_color = color
+        self.time_locked_shape = shape
 
     def reset_time_lock(self) -> None:
         self.time_locked_color = None

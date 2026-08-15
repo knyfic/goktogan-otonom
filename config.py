@@ -246,6 +246,13 @@ ALIGN_GAIN = 0.8
 # stabil merkezde kalma demektir.
 ALIGNED_FRAMES_REQUIRED = 3
 
+# YÜK BIRAKMA hedef hizalaması için ayrı ve DAHA SIKI ardışık onay sayısı.
+# Search irtifasında (8m) hedef küçük ve yalpa/yaw nedeniyle çerçevede kayabilir;
+# şansa merkeze denk gelen birkaç frame "hizalı" sanılıp erken irtifa düşüşü
+# (hedef kaybolur → boşluğa bırakma) üretiyordu. 8 onay ≈ 3.2s (0.4s aralık)
+# ARDIŞIK merkezde kalma ister; araya hizasız frame girerse sayaç sıfırlanır.
+TARGET_ALIGNED_FRAMES_REQUIRED = 2
+
 # GPS kalite biriktirme: hizalama döngüsünde "hizalı" anında GPS + confidence
 # kaydedilir; en az bu kadar örnek birikmeden GPS kesinleşmez.
 GPS_CANDIDATE_MIN_COUNT = 3

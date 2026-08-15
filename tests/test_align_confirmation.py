@@ -16,6 +16,7 @@ import numpy as np
 from config import (
     ALIGN_ON_TARGET_TIMEOUT_S,
     ALIGNED_FRAMES_REQUIRED,
+    TARGET_ALIGNED_FRAMES_REQUIRED,
     PAYLOAD_DESCENT_STEP_M,
     PAYLOAD_PICKUP_VISION_MIN_S,
     PAYLOAD_RELEASE_ALTITUDE,
@@ -76,7 +77,7 @@ def test_align_target_single_centered_frame_is_not_aligned():
 
 
 def test_align_target_requires_consecutive_frames():
-    """ALIGNED_FRAMES_REQUIRED ardışık onay dolmadan OFFSET/inişe geçilmez."""
+    """TARGET_ALIGNED_FRAMES_REQUIRED ardışık onay dolmadan OFFSET/inişe geçilmez."""
     sm, nav = _real_sm()
     sm.position_controller = MagicMock()
     sm.position_controller.align_detection.return_value = True
@@ -87,7 +88,7 @@ def test_align_target_requires_consecutive_frames():
     sm._aligned_frame_count = 0
 
     # 2.5m'de (PAYLOAD_RELEASE_ALTITUDE) olduğu için onay dolunca → OFFSET
-    for _ in range(ALIGNED_FRAMES_REQUIRED - 1):
+    for _ in range(TARGET_ALIGNED_FRAMES_REQUIRED - 1):
         sm._last_align_cmd_t = 0.0
         sm._do_align_target()
         assert sm._align_phase == "HORIZONTAL", "onay dolmadan faz değişmemeli"

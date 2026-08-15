@@ -130,21 +130,51 @@ Ubuntu → payload.release_payload() → Wi-Fi → RPi → GPIO → Mıknatıs
 
 ## Gerçek uçuşa geçince ne değişir?
 
-Ubuntu yoktur. Raspberry Pi hem uçuş kodunu hem payload kodunu çalıştırır.
+> GÜNCEL DURUM: Bu bölüm eski mimariyi anlatıyordu; artık REAL mod
+> `main.py` üzerinden tam destekleniyor. Detaylı prosedür için
+> `raspberry-pi-5/README.md` (REAL deployment + donanım testleri) ve
+> `tools/check_real_system.py` (pre-flight kontrol) dosyalarına bak.
 
-Şu an `raspberry-pi-5/main.py` sadece TCP server. Gerçek uçuşta buraya `state_machine.py`'yi de taşıman gerekir — ama bu ayrı bir konu, şimdi buna gerek yok.
+REAL modda Ubuntu yoktur: Raspberry Pi hem uçuş kodunu (state machine +
+MAVLink + vision) hem payload kodunu hem de GStreamer yayınını tek başına
+çalıştırır. Değişen TEK ŞEY `payload/config.yaml`'dır:
 
-Şu an için akış:
-```
-Ubuntu (state machine + Gazebo + mission) → HIL → RPi (GPIO)
+```yaml
+backend: real          # hil → real
+
+flight_controller:
+  connection:
+    device: /dev/serial0   # Cube Orange TELEM2 → RPi UART
+    baudrate: 921600
+
+video_stream:
+  enabled: true
+  host: <ground_station_ip>   # GStreamer yayın hedefi
+  port: 5000
 ```
 
-Yarışmada büyük ihtimalle yine Ubuntu laptop'tan uçuracaksın:
+Akış (REAL):
 ```
-Laptop (mission) → Wi-Fi → RPi (GPIO)
+RPi (main.py)
+  ├── Cube Orange ← TELEM2 UART (MAVLink)
+  ├── Camera Module 3 (CSI) → vision → HUD → display frame
+  │     ├── GStreamer → ground station (işlenmiş görüntü + HUD + telemetri)
+  │     └── (yerel pencere YOK — headless)
+  └── Payload (mıknatıs GPIO — LocalRPiBackend)
 ```
 
-Bu zaten HIL modu, ekstra bir şey değiştirmene gerek yok.
+HIL'de çalışan tüm donanım kodu (`RPiCam3`, `LocalRPiBackend`,
+`payload/hardware/*`) REAL'de AYNEN kullanılır — fark yalnızca giriş noktası
+(`main.py`), MAVLink adresi ve yayın hedefidir.
+
+REAL uçuş öncesi pre-flight kontrolü (READ-ONLY — arm/takeoff GÖNDERMEZ):
+
+```bash
+python3 tools/check_real_system.py
+```
+
+Uçuştan önce değiştirmen gereken değerlerin tam listesi:
+`raspberry-pi-5/README.md → REAL CONFIGURATION` tablosu.
 
 ---
 

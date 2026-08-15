@@ -224,6 +224,17 @@ def main():
         payload_cfg = _load_payload_config()
         mode = payload_cfg.get("backend", "simulation")
 
+        # ── Config ön doğrulaması (yalnızca UYARI — görevi asla engellemez) ──
+        # tools/check_real_system.py ile aynı mantık: gerçek uçuşta fiziksel
+        # risk yaratabilecek değerleri başlangıçta görünür yapar.
+        try:
+            from tools.check_real_system import validate_real_config
+
+            for issue in validate_real_config(payload_cfg):
+                logger.warning("CONFIG UYARISI: %s", issue)
+        except ImportError:
+            pass  # tools paketi yoksa mission etkilenmez
+
         navigation = _build_navigation(mode, payload_cfg, logger)
         camera     = _build_camera(mode, payload_cfg, logger)
         # Vision kırpma: payload mekanizmasının kapladığı alt bölge atılır.

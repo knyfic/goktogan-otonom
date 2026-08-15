@@ -2681,9 +2681,14 @@ class MissionStateMachine:
     def _return_search(self) -> None:
         self.target_detector.history.clear()
         self.data.pending_detection = None
+        # Yaklaşma (APPROACH) / hizalama (ALIGN) fazından dönüşte düşük hız
+        # search'te kalmasın — her iki search de her zaman SEARCH_SPEED_MPS
+        # ile çalışmalı (yalnızca konum referansı farklıdır).
         if self.data.first_target is None:
+            self.nav.set_max_speed(SEARCH_SPEED_MPS, VERTICAL_SPEED_MPS)
             self._goto(MissionState.SEARCHING_FIRST_TARGET)
         elif self.data.second_target is None:
+            self.nav.set_max_speed(SEARCH_SPEED_MPS, VERTICAL_SPEED_MPS)
             self._goto(MissionState.SEARCHING_SECOND_TARGET)
         else:
             self._goto(MissionState.SEARCHING_PAYLOAD)

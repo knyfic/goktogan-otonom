@@ -204,7 +204,7 @@ MIN_DETECTION_CONFIDENCE = 0.60
 # kalibrasyonuyla takas kararı verir (gürültülü sahnede yanlış tetiklenebilir).
 TARGET_DETECTOR_AUTO_SWAP = False
 
-SCAN_LINE_SPACING = 8.0
+SCAN_LINE_SPACING = 10
 SEARCH_MARGIN = 2.0
 
 # Arama sırası yatay hız

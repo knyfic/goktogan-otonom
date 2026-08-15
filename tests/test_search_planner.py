@@ -418,3 +418,90 @@ def test_second_search_missing_drop_goes_rtl():
     assert sm.data.state == MissionState.RTL
     assert sm._search_points == []
     assert sm._search_field is None
+
+
+# ── 14) Search hızı her search girişinde aynı ─────────────────────────────── #
+def test_first_and_second_search_use_same_speed(monkeypatch):
+    """SEARCH #1 ve SEARCH #2 aynı SEARCH_SPEED_MPS değerini kullanmalı."""
+    import state_machine as sm_mod
+    from config import COMPETITION_CORNERS, TAKEOFF_ALTITUDE
+    from models import Target, TargetColor, TargetType
+
+    monkeypatch.setattr(sm_mod, "SEARCH_SPEED_MPS", 8.0)
+    field = CompetitionField(COMPETITION_CORNERS)
+    launch_lat, launch_lon = field.local_to_gps(15.0, 50.0)
+    drop_lat, drop_lon = field.local_to_gps(27.0, 90.0)
+
+    nav = MagicMock()
+    nav.fresh_position.return_value = MagicMock(
+        latitude=launch_lat, longitude=launch_lon,
+    )
+    sm = _make_sm(nav)
+
+    # SEARCH #1 (launch referansı)
+    sm._init_search()
+    first_speed = nav.set_max_speed.call_args[0][0]
+    assert first_speed == 8.0
+
+    # SEARCH #2 (ilk drop referansı)
+    nav.set_max_speed.reset_mock()
+    sm.data.first_target = Target(
+        target_id=1, shape=TargetType.TRIANGLE, color=TargetColor.RED,
+        latitude=drop_lat, longitude=drop_lon, confidence=0.9,
+    )
+    _enter_second_search(sm, drop_lat, drop_lon, nav)
+    second_speed = nav.set_max_speed.call_args[0][0]
+    assert second_speed == 8.0
+    assert first_speed == second_speed
+
+
+def test_return_search_restores_speed_first_target():
+    """Birinci hedef aranırken yaklaşma fazından dönüş → SEARCH_SPEED_MPS geri gelir."""
+    import state_machine as sm_mod
+    from config import APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS
+    from models import MissionState
+
+    nav = MagicMock()
+    sm = _make_sm(nav)
+    sm.data.state = MissionState.SEARCHING_FIRST_TARGET
+    sm.data.first_target = None
+
+    # Yaklaşma fazı hızı düşürdü (senaryo simülasyonu)
+    nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
+    nav.set_max_speed.reset_mock()
+
+    sm._return_search()
+
+    assert sm.data.state == MissionState.SEARCHING_FIRST_TARGET
+    args = nav.set_max_speed.call_args[0]
+    assert args[0] == sm_mod.SEARCH_SPEED_MPS
+    assert args[1] == VERTICAL_SPEED_MPS
+
+
+def test_return_search_restores_speed_second_target():
+    """İkinci hedef aranırken hizalama fazından dönüş → SEARCH_SPEED_MPS geri gelir."""
+    import state_machine as sm_mod
+    from config import ALIGN_SPEED_MPS, COMPETITION_CORNERS, VERTICAL_SPEED_MPS
+    from models import MissionState, Target, TargetColor, TargetType
+
+    field = CompetitionField(COMPETITION_CORNERS)
+    drop_lat, drop_lon = field.local_to_gps(27.0, 90.0)
+
+    nav = MagicMock()
+    sm = _make_sm(nav)
+    sm.data.first_target = Target(
+        target_id=1, shape=TargetType.TRIANGLE, color=TargetColor.RED,
+        latitude=drop_lat, longitude=drop_lon, confidence=0.9,
+    )
+    sm.data.state = MissionState.SEARCHING_SECOND_TARGET
+
+    # Hizalama fazı hızı düşürdü (0.8 m/s — ikinci search'teki yavaşlama senaryosu)
+    nav.set_max_speed(ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS)
+    nav.set_max_speed.reset_mock()
+
+    sm._return_search()
+
+    assert sm.data.state == MissionState.SEARCHING_SECOND_TARGET
+    args = nav.set_max_speed.call_args[0]
+    assert args[0] == sm_mod.SEARCH_SPEED_MPS
+    assert args[1] == VERTICAL_SPEED_MPS

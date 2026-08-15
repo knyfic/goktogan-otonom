@@ -66,6 +66,17 @@ class Navigation:
         # False döner. Mesaj tüketmez (alma buffer'ını kirletmez).
         self._last_message_s = time.monotonic()
 
+        # ---- Pre-arm / SYS_STATUS / STATUSTEXT durumu ----
+        # ArduPilot'un SYS_STATUS sağlık bitleri (onboard_control_sensors_health)
+        # üzerinden "arm edilebilir mi?" takip edilir; STATUSTEXT'teki
+        # 'PreArm: ...' mesajları son nedeni HUD'da göstermek için saklanır.
+        self._sys_status_health = 0
+        self._sys_status_present = 0
+        self._sys_status_last_t = 0.0
+        self._status_text = ""
+        self._prearm_reason: str | None = None
+        self._prearm_reason_t = 0.0
+
     # ------------------------------------------------------------------ #
     #  Pozisyon
     # ------------------------------------------------------------------ #
@@ -107,12 +118,39 @@ class Navigation:
             self._position.battery_percent = msg.battery_remaining
 
     def _update_sys_status(self, msg) -> None:
-        """SYS_STATUS: yüzde bilgisi fallback kaynağı (voltaj yoksa da gösterilir)."""
+        """SYS_STATUS: sağlık bitleri + yüzde (pre-arm takibi için).
+
+        ArduPilot'un onboard_control_sensors_health maskesi, "şu an arm
+        edilebilir mi?" sorusunun resmî cevabıdır (GCS'ler bunu kullanır):
+          • MAV_SYS_STATUS_AHRS          (bit 21) — AHRS/EKF sağlıklı
+          • MAV_SYS_STATUS_GPS           (bit 5)  — GPS 3D fix
+          • MAV_SYS_STATUS_PREARM_CHECK  (bit 28) — pre-arm kontrolleri geçti
+        """
+        self._sys_status_present = getattr(msg, "onboard_control_sensors_present", 0)
+        self._sys_status_health = getattr(msg, "onboard_control_sensors_health", 0)
+        self._sys_status_last_t = time.monotonic()
         if getattr(msg, "battery_remaining", -1) != -1:
             self._position.battery_percent = msg.battery_remaining
 
+    def _update_status_text(self, msg) -> None:
+        """STATUSTEXT: son mesaj + 'PreArm:' ön ekli mesajları sakla.
+
+        ArduPilot pre-arm hatalarını 'PreArm: <neden>' biçiminde
+        MAV_SEVERITY_CRITICAL ile yayınlar — neden HUD'da gösterilir.
+        """
+        text = getattr(msg, "text", b"")
+        if isinstance(text, bytes):
+            text = text.decode(errors="replace")
+        text = str(text).strip()
+        if not text:
+            return
+        self._status_text = text
+        if "prearm" in text.lower():
+            self._prearm_reason = text
+            self._prearm_reason_t = time.monotonic()
+
     def _dispatch_telemetry(self, msg) -> None:
-        """Gelen telemetri mesajını türüne göre işler (pozisyon + batarya)."""
+        """Gelen telemetri mesajını türüne göre işler (pozisyon + batarya + durum)."""
         t = msg.get_type()
         if t == "GLOBAL_POSITION_INT":
             self._update_position(msg)
@@ -120,6 +158,8 @@ class Navigation:
             self._update_battery_status(msg)
         elif t == "SYS_STATUS":
             self._update_sys_status(msg)
+        elif t == "STATUSTEXT":
+            self._update_status_text(msg)
 
     def position(self) -> VehiclePosition:
         """
@@ -173,6 +213,47 @@ class Navigation:
         sırasında bağlantı sağlığının en güvenilir göstergesidir.
         """
         return self.last_message_age_s <= timeout_s
+
+    # ------------------------------------------------------------------ #
+    #  Pre-arm durumu (ArduPilot)
+    # ------------------------------------------------------------------ #
+
+    # MAV_SYS_STATUS bitleri (pymavlink mavlink enums ile aynı değerler)
+    _SYS_AHRS         = 1 << 21   # AHRS / EKF sağlıklı
+    _SYS_GPS          = 1 << 5    # GPS 3D fix
+    _SYS_PREARM_CHECK = 1 << 28   # pre-arm kontrolleri geçti
+
+    # "Arm edilebilir" için gereken sağlık bitleri. PREARM_CHECK biti
+    # ArduPilot'un kendi arming-check özetidir; AHRS + GPS ayrıca istenir
+    # (ikisi de bu görev için zorunlu — search GPS'e dayanır).
+    _PREARM_REQUIRED_HEALTH = _SYS_AHRS | _SYS_GPS | _SYS_PREARM_CHECK
+
+    # SYS_STATUS ~1-2 Hz akar; bu süre içinde tazelenmediyse veri bayat kabul edilir.
+    _SYS_STATUS_FRESH_S = 5.0
+
+    def prearm_good(self) -> bool | None:
+        """
+        ArduPilot şu an ARM komutunu kabul edecek kadar sağlıklı mı?
+
+          True  → pre-arm kontrolleri geçti (arm edilebilir)
+          False → geçmedi (bir engel var — prearm_reason() ile nedeni gör)
+          None  → henüz güvenilir veri yok (SYS_STATUS gelmedi / bayat)
+
+        Kırılgan "son PreArm mesajı kesildi → GOOD" mantığı KULLANILMAZ;
+        sinyal, ArduPilot'un SYS_STATUS sağlık bitleridir (GCS standardı).
+        """
+        if self._sys_status_last_t == 0.0:
+            return None
+        if time.monotonic() - self._sys_status_last_t > self._SYS_STATUS_FRESH_S:
+            return None   # bayat — güvenme
+        return (
+            (self._sys_status_health & self._PREARM_REQUIRED_HEALTH)
+            == self._PREARM_REQUIRED_HEALTH
+        )
+
+    def prearm_reason(self) -> str | None:
+        """Son bilinen 'PreArm: ...' STATUSTEXT mesajı (HUD için). None = yok."""
+        return self._prearm_reason
 
     # ------------------------------------------------------------------ #
     #  Mod & Arm

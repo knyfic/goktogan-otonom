@@ -4,6 +4,10 @@ from typing import Optional
 
 
 class MissionState(str, Enum):
+    # ArduPilot pre-arm kontrolleri geçmeden görev başlatılmaz.
+    # Bu state'te kamera/vision/HUD/GStreamer CANLI çalışır; yalnızca
+    # uçuş görevleri (arm/takeoff/nav) kilitlidir. Pre-arm GOOD → INIT.
+    WAITING_FOR_PREARM = "WAITING_FOR_PREARM"
     INIT = "INIT"
     TAKEOFF = "TAKEOFF"
     SEARCHING_FIRST_TARGET = "SEARCHING_FIRST_TARGET"

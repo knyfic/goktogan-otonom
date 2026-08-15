@@ -141,6 +141,11 @@ class MissionStateMachine:
         self.rtl_controller = RTLController(navigation)
 
         self.data = MissionData()
+        # Görev, ArduPilot pre-arm kontrolleri geçmeden BAŞLAMAZ. Bu state'te
+        # kamera/vision/HUD/GStreamer canlı çalışır; yalnızca uçuş görevleri
+        # (arm/takeoff/nav) kilitlidir. Pre-arm GOOD → INIT → mevcut akış.
+        self.data.state = MissionState.WAITING_FOR_PREARM
+        self._prearm_reason: str | None = None   # HUD'da gösterilecek son neden
 
         # ---- Lawnmower tarama ----
         self._search_points: list = []
@@ -307,7 +312,9 @@ class MissionStateMachine:
                 return
 
         s = self.data.state
-        if s == MissionState.INIT:
+        if s == MissionState.WAITING_FOR_PREARM:
+            self._do_wait_prearm()
+        elif s == MissionState.INIT:
             self._do_init()
         elif s == MissionState.TAKEOFF:
             self._do_takeoff()
@@ -527,7 +534,29 @@ class MissionStateMachine:
             f"({pos.latitude:.5f}, {pos.longitude:.5f})"
             f"  T:{self._mission_timer_str()}"
         )
+        pre_str = self._prearm_hud_str()
+        if pre_str:
+            line2 = f"{pre_str}  |  {line2}"
         return line1, line2
+
+    def _prearm_hud_str(self) -> str:
+        """Pre-arm bekleme state'inde HUD satırı; diğer state'lerde boş.
+
+        Örn: 'PRE-ARM: WAITING | GPS 1: Bad fix'  veya  'PRE-ARM: GOOD'.
+        """
+        state = getattr(getattr(self, "data", None), "state", None)
+        if not (isinstance(state, MissionState)
+                and state == MissionState.WAITING_FOR_PREARM):
+            return ""
+        try:
+            good = self.nav.prearm_good()
+        except Exception:
+            good = None
+        if good is True:
+            return "PRE-ARM: GOOD"
+        reason = getattr(self, "_prearm_reason", None) or ""
+        base = "PRE-ARM: WAITING"
+        return f"{base} | {reason}" if reason else base
 
     def _base_overlay(self, frame: np.ndarray) -> np.ndarray:
         l1, l2 = self._hud_lines()
@@ -695,6 +724,42 @@ class MissionStateMachine:
     # ==================================================================== #
     #  State handler'lar
     # ==================================================================== #
+
+    # ------------------------------------------------------------------ #
+    def _do_wait_prearm(self) -> None:
+        """
+        ArduPilot pre-arm kontrolleri geçene kadar görevi beklet.
+
+        NON-BLOCKING: kamera frame'i alınır, vision çalışır, HUD hazırlanır
+        (run() → _pump_preview üzerinden ekrana + GStreamer'a gider) ve
+        telemetri (GPS/batarya/heading) güncellenir. Uçuş komutu GÖNDERİLMEZ.
+
+        Sinyal: Navigation.prearm_good() — SYS_STATUS sağlık bitleri
+        (AHRS + GPS + PREARM_CHECK). STATUSTEXT'teki 'PreArm: ...' mesajı
+        HUD'da neden olarak gösterilir. Timeout YOK — gerektiği kadar bekler.
+        """
+        # Vision canlı: kareyi işle ve display frame'i hazırla
+        # (GStreamer dahil tüm çıktılar _pump_preview üzerinden güncellenir).
+        frame = self.camera.latest()
+        if frame is not None:
+            detections = self.target_detector.detect(frame)
+            self._set_display_detections(frame, detections)
+
+        self._prearm_reason = self.nav.prearm_reason()
+        good = self.nav.prearm_good()
+
+        if good is None:
+            # Henüz SYS_STATUS yok / bayat — bekle (mission başlatma).
+            return
+        if not good:
+            # Pre-arm geçmedi — neden HUD'da; bekle.
+            return
+
+        self.log.info(
+            "Pre-arm GOOD — görev başlatılıyor (son neden: %s).",
+            self._prearm_reason or "-",
+        )
+        self._goto(MissionState.INIT)
 
     # ------------------------------------------------------------------ #
     def _do_init(self) -> None:

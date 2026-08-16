@@ -1,6 +1,16 @@
 import math
 
-from config import ALIGN_GAIN, PIXEL_ALIGNMENT_TOLERANCE_PX
+from config import (
+    ALIGN_ALT_GAIN_REF_M,
+    ALIGN_ALT_MODE_HI_M,
+    ALIGN_ALT_MODE_LO_M,
+    ALIGN_GAIN,
+    ALIGN_GAIN_FULL_ERROR_PX,
+    ALIGN_MAX_STEP_LARGE_M,
+    ALIGN_MAX_STEP_M,
+    ALIGN_STEP_FULL_ERROR_PX,
+    PIXEL_ALIGNMENT_TOLERANCE_PX,
+)
 from flight.navigation import Navigation
 from vision.geometry import CameraModel
 
@@ -54,11 +64,56 @@ class PositionController:
             return True
 
         # Adım 1: Piksel → araç gövde ekseni (body frame)
-        # ALIGN_GAIN: tam düzeltme (1.0) İHA'nın hedefi aşıp etrafında dönmesine
-        # yol açar; yarım düzeltme (0.5) geometrik yakınsama sağlar (daire yok).
         mpp_x, mpp_y = self.camera.meters_per_pixel(altitude_m)
-        forward_m = -dy * mpp_y * ALIGN_GAIN   # image +Y → araç gerisi → forward negatif
-        right_m   =  dx * mpp_x * ALIGN_GAIN   # image +X → araç sağı   → right pozitif
+        error_px = math.hypot(dx, dy)
+
+        # ── Davranış modu ────────────────────────────────────────────────────
+        # 8m ve ALTINDA: ESKİ alignment hesabı birebir korunur — sabit
+        # ALIGN_GAIN, adım sınırı YOK (8m altında stabil çalışan davranış
+        # değişmez; ALIGN_SPEED_MPS / ALIGN_CMD_INTERVAL_S de değişmez).
+        # 8m ÜSTÜNDE (11.5m): yüksek-irtifa adaptive hesap — hata oranı kazancı
+        # + irtifa kompanzasyonu + piksel hatasıyla büyüyen adım sınırı.
+        # 8–9m arasında iki hesap ağırlıkla KARIŞTIRILIR (yumuşak geçiş).
+        if altitude_m <= ALIGN_ALT_MODE_LO_M:
+            w = 0.0   # tamamen eski hesap
+        elif altitude_m >= ALIGN_ALT_MODE_HI_M:
+            w = 1.0   # tamamen adaptive hesap
+        else:
+            w = (altitude_m - ALIGN_ALT_MODE_LO_M) / (
+                ALIGN_ALT_MODE_HI_M - ALIGN_ALT_MODE_LO_M
+            )
+
+        # Yüksek-irtifa kazanç bileşenleri:
+        #   a) Hata oranı: hata ALIGN_GAIN_FULL_ERROR_PX üzerindeyken kazanç tam
+        #      ALIGN_GAIN'dir; hedefe yaklaştıkça (hata/eşik) oranında küçülür →
+        #      adımlar otomatik küçülür (uzak hedef → büyük adım, yakın → küçük).
+        #   b) İrtifa kompanzasyonu: mpp'nin irtifayla büyümesini dengeler.
+        ratio_gain = min(1.0, error_px / ALIGN_GAIN_FULL_ERROR_PX)
+        alt_gain = min(
+            1.0, ALIGN_ALT_GAIN_REF_M / max(altitude_m, ALIGN_ALT_GAIN_REF_M)
+        )
+        # Eski kazanç (ALIGN_GAIN) ↔ yeni kazanç (ALIGN_GAIN·ratio·alt) karışımı
+        gain = ALIGN_GAIN * (1.0 - w) + ALIGN_GAIN * ratio_gain * alt_gain * w
+
+        forward_m = -dy * mpp_y * gain   # image +Y → araç gerisi → forward negatif
+        right_m   =  dx * mpp_x * gain   # image +X → araç sağı   → right pozitif
+
+        # Adım sınırı — yalnızca yüksek-irtifa davranışı (w > 0): piksel hatasıyla
+        # büyüyen adaptive sınır (ALIGN_MAX_STEP_M → ALIGN_MAX_STEP_LARGE_M,
+        # yani ~0.25 → ~0.5m). Geçiş bandında sınır ağırlıkla açılır; 8m'de
+        # sınır YOKTUR (eski davranış birebir korunur).
+        step_m = math.hypot(forward_m, right_m)
+        if w > 0.0:
+            step_frac = min(1.0, error_px / ALIGN_STEP_FULL_ERROR_PX)
+            max_step_m = ALIGN_MAX_STEP_M + (
+                ALIGN_MAX_STEP_LARGE_M - ALIGN_MAX_STEP_M
+            ) * step_frac
+            if w < 1.0:
+                max_step_m = max_step_m / w   # 8m'ye yaklaştıkça gevşer
+            if step_m > max_step_m:
+                scale = max_step_m / step_m
+                forward_m *= scale
+                right_m *= scale
 
         # Adım 2: Body → NED  (araç heading'i ile rotate)
         pos = self.navigation.position()

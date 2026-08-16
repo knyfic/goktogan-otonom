@@ -240,6 +240,36 @@ ALIGN_CMD_INTERVAL_S = 0.4
 # hedef görüntüyü doldurduğunda 'hedef üzerinde' kabul edilip inişe geçilir.
 ALIGN_GAIN = 0.8
 
+# ── Uyarlanabilir hizalama kazancı (yüksek irtifa salınımını önleme) ─────────
+# 11.5m'de aynı piksel hatası çok daha büyük bir fiziksel adıma karşılık gelir;
+# İHA komut aralığında (ALIGN_CMD_INTERVAL_S) adımı bitiremezse hareket halinde
+# alınan yeni ölçümle hedef aşılır → sağ-sol salınımı. Bu davranış YALNIZCA
+# 8m ÜSTÜNDE devreye girer; 8m ve altında ESKİ/stabil alignment hesabı birebir
+# korunur (sabit ALIGN_GAIN, adım sınırı yok).
+#   0) Davranış modu eşikleri: 8m ve altında eski hesap; 8–9m arasında iki hesap
+#      ağırlıkla KARIŞTIRILIR (yumuşak geçiş — ani davranış sıçraması olmaz);
+#      9m ve üstünde tam adaptive hesap.
+ALIGN_ALT_MODE_LO_M = 9.0
+ALIGN_ALT_MODE_HI_M = 10.0
+#   1) Hata oranı: piksel hatası bu eşiğin ÜZERİNDEYSE kazanç tam ALIGN_GAIN'dir;
+#      altına indikçe kazanç (hata/eşik) oranında küçülür → hedefe yaklaştıkça
+#      adımlar otomatik küçülür.
+ALIGN_GAIN_FULL_ERROR_PX = 150.0
+#   2) İrtifa: bu irtifanın ALTINDA kazanç tam ALIGN_GAIN'dir; ÜSTÜNDE kazanç
+#      (ref_alt / irtifa) oranında küçülür — yüksek irtifada daha küçük adım.
+ALIGN_ALT_GAIN_REF_M = 3.0
+#   3) Adım sınırı: tek düzeltme komutunda hedefe en fazla bu kadar metre
+#      yaklaşılır (komut aralığında tamamlanabilecek fiziksel adım).
+ALIGN_MAX_STEP_M = 0.5
+# Adım sınırı PİKSEL HATAYA GÖRE UYARLANIR (adaptive step): uzak hedef için
+# büyük adım, hedefe yaklaştıkça otomatik küçülen adım. Sınır, hatanın
+# ALIGN_STEP_FULL_ERROR_PX'e oranıyla ALIGN_MAX_STEP_M (0.25m) →
+# ALIGN_MAX_STEP_LARGE_M (0.5m) arasında doğrusal büyür; eşiğin üstünde
+# doygunluğa ulaşır. Böylece: büyük hata → ~0.4-0.5m, orta hata → ~0.25-0.35m,
+# küçük hata → gain zaten küçük adım ürettiği için sınırın altında kalır.
+ALIGN_MAX_STEP_LARGE_M = 1
+ALIGN_STEP_FULL_ERROR_PX = 250.0
+
 # "Hizalı" kararı için GEREKLİ ardışık frame sayısı (temporal confirmation).
 # Tek bir frame'de hedefin milisaniyelik merkeze denk gelmesi (jitter / tesadüfi
 # geçiş) İHA'yı yanlış "ortaladım" sonucuna götürmesin diye, hedefin merkezde

@@ -1045,6 +1045,8 @@ class MissionStateMachine:
         # REACQUIRE: hedef görüntüden kayboldu → güvenli irtifaya (4m) yüksel;
         # irtifaya varınca beklenen tür (kilit korunur) aranır — bulunamazsa
         # arama pattern'i kaldığı yerden devam eder. KÖR BIRAKMA YOK.
+        # (Yalnızca 4m ALTINDA tetiklenir — 4m ve üstünde hedef kaybında irtifa
+        # korunur ve kaydedilmiş kaba GPS'e dönülür; bkz. HORIZONTAL kayıp dalı.)
         if self._align_phase == "REACQUIRE":
             result = self._altitude_ok()
             if result is False:
@@ -1167,18 +1169,36 @@ class MissionStateMachine:
         # Yüksel, beklenen türü (kilit: renk/şekil) yeniden ara; bulunamazsa
         # arama pattern'i kaldığı yerden devam eder (search noktaları korunur).
         if self._no_detection_count > self._NO_DETECTION_LIMIT:
-            self.log.warning(
-                "ALIGN: %d tick üst üste tespit yok. Yükselip hedef yeniden "
-                "aranıyor (beklenen: %s/%s) — kör bırakma yapılmayacak.",
-                self._no_detection_count,
-                self._locked_color.value if self._locked_color else "-",
-                self._locked_shape or "-",
-            )
-            self._no_detection_count = 0
-            self._aligned_frame_count = 0
-            self._align_phase = "REACQUIRE"
-            self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
-            self._send_altitude(TARGET_APPROACH_ALTITUDE, timeout=20.0)
+            if pos.relative_altitude >= TARGET_APPROACH_ALTITUDE:
+                # Search/approach irtifasında (≥4m) hedef kayboldu → İRTİFA
+                # DÜŞÜRME. Kaydedilmiş kaba GPS'e MEVCUT irtifada dön (11.5m
+                # korunur); orada yeniden ara/merkezle. (Eski davranış hedef
+                # kaybında 4m'ye iniyordu — search irtifasında yanlış alçalma.)
+                self.log.warning(
+                    "ALIGN: %d tick üst üste tespit yok (%.1fm). İrtifa "
+                    "korunuyor; kaydedilmiş kaba GPS'e dönülüyor — "
+                    "kör bırakma yapılmayacak.",
+                    self._no_detection_count, pos.relative_altitude,
+                )
+                self._no_detection_count = 0
+                self._aligned_frame_count = 0
+                self._recover_to_rough_position()
+            else:
+                # 4m altı (drop dizisi): eski davranış — güvenli irtifaya (4m)
+                # yüksel, beklenen türü yeniden ara; bulunamazsa arama pattern'i
+                # kaldığı yerden devam eder. KÖR BIRAKMA YOK.
+                self.log.warning(
+                    "ALIGN: %d tick üst üste tespit yok. Yükselip hedef yeniden "
+                    "aranıyor (beklenen: %s/%s) — kör bırakma yapılmayacak.",
+                    self._no_detection_count,
+                    self._locked_color.value if self._locked_color else "-",
+                    self._locked_shape or "-",
+                )
+                self._no_detection_count = 0
+                self._aligned_frame_count = 0
+                self._align_phase = "REACQUIRE"
+                self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
+                self._send_altitude(TARGET_APPROACH_ALTITUDE, timeout=20.0)
             return
 
         if detection is None:
@@ -2679,7 +2699,12 @@ class MissionStateMachine:
             self._goto(MissionState.TASK_2_FAILED)
 
     def _safe_reacquire(self) -> None:
-        """Hedef tamamen kayboldu — güvenli irtifaya çık ve aramaya dön."""
+        """Hedef tamamen kayboldu — güvenli irtifaya çık ve aramaya dön.
+
+        İrtifa DÜŞÜRME: hedef kaybında mevcut irtifanın ALTINA inilmez.
+        Arama irtifasında (11.5m) kayıp → irtifa korunur, arama 11.5m'de
+        devam eder; drop dizisinde (4m altı) → eski davranış: 4m'ye yüksel.
+        """
         self.log.warning("Hedef tamamen kaybedildi. Güvenli irtifaya çıkılıyor.")
         self._reset_altitude_state()
         self.target_detector.history.clear()
@@ -2693,8 +2718,10 @@ class MissionStateMachine:
         self._no_detection_count = 0
         self._last_recover_t = 0.0
         self._last_align_status_log_t = 0.0
+        pos = self.nav.position()
+        reacquire_alt = max(TARGET_APPROACH_ALTITUDE, pos.relative_altitude)
         self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
-        self._send_altitude(TARGET_APPROACH_ALTITUDE, timeout=20.0)
+        self._send_altitude(reacquire_alt, timeout=20.0)
         self._return_search()
 
     def _next_step_down_altitude(self, current_alt: float, floor_alt: float) -> float | None:

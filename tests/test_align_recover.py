@@ -1,28 +1,35 @@
 """
-Hedef kaybı → REACQUIRE (kör bırakma YOK) davranışı testleri.
+Hedef kaybı → recovery (kör bırakma YOK) davranışı testleri.
 
-Eski davranış: İHA hedef kaba GPS'ine yakınken tespit kaybını "hedef üzerinde"
-KABUL EDİP sentetik merkez tespitiyle inişe/kör bırakmaya geçiyordu (hedef aslında
-orada olmasa bile).
-
-Yeni davranış: tespit limit dolunca — nerede olursa olsun — güvenli irtifaya (4m)
-yüksel, beklenen türü (kilit: renk/şekil) yeniden ara; bulunamazsa arama pattern'i
-kaldığı yerden devam eder. Tespit olmadan bırakma yapılmaz.
+Davranış (hedef kaybında İRTİFA DÜŞÜRME YOK):
+  - Search/approach irtifasında (≥4m, ör. 11.5m arama) hedef kaybolursa:
+    irtifa KORUNUR ve kaydedilmiş kaba GPS'e dönülüp orada yeniden aranır
+    (asla 4m'ye inilmez — eski regresyon: 11.5m → 4.3m alçalması).
+  - 4m ALTINDA (drop dizisi): güvenli irtifaya (4m) yüksel, beklenen türü
+    (kilit: renk/şekil) yeniden ara; bulunamazsa arama pattern'i kaldığı
+    yerden devam eder.
+  - Tespit olmadan bırakma yapılmaz (kör bırakma YOK).
 """
 import logging
 from unittest.mock import MagicMock
 
 import numpy as np
 
-from config import APPROACH_SPEED_MPS, SEARCH_SPEED_MPS, TARGET_APPROACH_ALTITUDE, VERTICAL_SPEED_MPS
-from models import MissionState, TargetColor
+from config import (
+    APPROACH_SPEED_MPS,
+    SEARCH_SPEED_MPS,
+    TAKEOFF_ALTITUDE,
+    TARGET_APPROACH_ALTITUDE,
+    VERTICAL_SPEED_MPS,
+)
+from models import MissionState, Target, TargetColor, TargetType
 from state_machine import MissionStateMachine
 
 
-def _make_sm(nav=None, rough_lat=1.0, rough_lon=1.0):
+def _make_sm(nav=None, rough_lat=2.0, rough_lon=2.0, altitude=TAKEOFF_ALTITUDE):
     nav = nav or MagicMock()
     nav.position.return_value = MagicMock(
-        relative_altitude=4.0, latitude=1.0, longitude=1.0, heading_deg=0.0,
+        relative_altitude=altitude, latitude=1.0, longitude=1.0, heading_deg=0.0,
         battery_voltage_v=0.0, battery_percent=-1,
     )
     camera = MagicMock()
@@ -43,34 +50,74 @@ def _make_sm(nav=None, rough_lat=1.0, rough_lon=1.0):
     return sm, nav
 
 
-def test_lost_target_over_rough_triggers_reacquire_no_blind_drop():
-    """Tespit kaybı + limit doldu → KÖR BIRAKMA YOK: REACQUIRE'a geç (4m yüksel)."""
-    sm, nav = _make_sm()   # drone kaba GPS'te (hedefin üstünde)
+# ── Search irtifasında hedef kaybı: irtifa KORUNUR, kaba GPS'e dön ────────── #
+def test_lost_target_at_search_altitude_keeps_altitude_returns_to_rough():
+    """FIRST hedef: 11.5m'de hedef kayboldu → 4m'ye İNMEZ; kaba GPS'e 11.5m'de döner."""
+    sm, nav = _make_sm(rough_lat=2.0, rough_lon=2.0, altitude=TAKEOFF_ALTITUDE)
     sm._no_detection_count = sm._NO_DETECTION_LIMIT + 1
 
     sm._do_align_target()
 
-    assert sm._align_phase == "REACQUIRE", "tespit yokken inişe/bırakmaya geçilmemeli"
-    assert sm.data.state == MissionState.ALIGNING_TARGET, "TARGET_ALIGNED'e geçilmemeli (kör bırakma)"
+    # İrtifa komutu YOK — asla TARGET_APPROACH_ALTITUDE (4m) ile alçalma
+    nav.set_relative_altitude.assert_not_called()
+    # Kaba GPS'e MEVCUT irtifada dönüş (11.5m korunur)
+    nav.goto_global.assert_called_once()
+    args = nav.goto_global.call_args[0]
+    assert args[0] == 2.0, "kaydedilmiş hedef GPS lat'i korunmalı"
+    assert args[1] == 2.0, "kaydedilmiş hedef GPS lon'u korunmalı"
+    assert args[2] == TAKEOFF_ALTITUDE, "recovery irtifası search irtifası olmalı"
+    # Kör bırakma yok; state align'de kalır (hedef orada yeniden aranır)
+    assert sm.data.state == MissionState.ALIGNING_TARGET
     assert sm.data.pending_detection is None, "sentetik merkez tespiti ÜRETİLMEMELİ"
-    # Kilit korunur → yeniden arama yalnızca beklenen türü arar (kırmızı üçgen)
-    assert sm._locked_color == TargetColor.RED
+    assert sm._locked_color == TargetColor.RED, "kilit korunmalı (beklenen tür)"
     assert sm._locked_shape == "TRIANGLE"
-    # Yükselme komutu: APPROACH hızı + TARGET_APPROACH_ALTITUDE
-    assert nav.set_max_speed.call_args[0][0] == APPROACH_SPEED_MPS
-    nav.set_relative_altitude.assert_called_once_with(TARGET_APPROACH_ALTITUDE)
 
 
-def test_lost_target_far_from_rough_also_reacquires():
-    """Kaba GPS'ten uzakta kaybolsa da → yüksel + yeniden ara (kaba GPS'e dönüş YOK)."""
-    sm, nav = _make_sm(rough_lat=1.01, rough_lon=1.01)   # ~1.4km uzaklıkta kaba GPS
+def test_lost_target_second_search_keeps_altitude_returns_to_rough():
+    """SECOND hedef: aynı davranış ikinci aramada da geçerli (11.5m korunur)."""
+    sm, nav = _make_sm(rough_lat=3.0, rough_lon=4.0, altitude=TAKEOFF_ALTITUDE)
+    sm.data.first_target = Target(
+        target_id=1, shape=TargetType.TRIANGLE, color=TargetColor.RED,
+        latitude=1.0, longitude=1.0, confidence=0.9,
+    )
+    sm._locked_color = TargetColor.BLUE
+    sm._locked_shape = "HEXAGON"
     sm._no_detection_count = sm._NO_DETECTION_LIMIT + 1
 
     sm._do_align_target()
 
-    assert sm._align_phase == "REACQUIRE"
+    nav.set_relative_altitude.assert_not_called()   # 4m'ye inme YOK
+    nav.goto_global.assert_called_once()
+    args = nav.goto_global.call_args[0]
+    assert args[0] == 3.0 and args[1] == 4.0, "kaydedilmiş hedef GPS kullanılmalı"
+    assert args[2] == TAKEOFF_ALTITUDE, "recovery irtifası 11.5m olmalı"
+
+
+def test_lost_target_no_detection_never_commands_4m():
+    """Hedef hiç görünmese bile irtifa komutu 4m'ye (4.3m) düşemez."""
+    sm, nav = _make_sm(altitude=TAKEOFF_ALTITUDE)
+    sm._no_detection_count = sm._NO_DETECTION_LIMIT + 1
+
+    for _ in range(5):
+        sm._do_align_target()
+
+    nav.set_relative_altitude.assert_not_called()
+    assert sm.data.state != MissionState.TARGET_ALIGNED, "kör bırakma yok"
+
+
+# ── Drop dizisi (4m altı): eski REACQUIRE davranışı korunur ───────────────── #
+def test_lost_target_below_reacquire_altitude_ascends_to_4m():
+    """4m ALTINDA hedef kaybolursa (drop dizisi) → eski davranış: 4m'ye yüksel."""
+    sm, nav = _make_sm(rough_lat=1.01, rough_lon=1.01, altitude=2.0)
+    sm._no_detection_count = sm._NO_DETECTION_LIMIT + 1
+
+    sm._do_align_target()
+
+    assert sm._align_phase == "REACQUIRE", "4m altında yükseliş + yeniden arama"
     assert sm.data.state == MissionState.ALIGNING_TARGET
     nav.goto_global.assert_not_called()   # kaba GPS'e geri gitme — yüksel + ara
+    assert nav.set_max_speed.call_args[0][0] == APPROACH_SPEED_MPS
+    nav.set_relative_altitude.assert_called_once_with(TARGET_APPROACH_ALTITUDE)
 
 
 def test_reacquire_ascend_done_returns_to_search_keeping_lock():
@@ -97,8 +144,6 @@ def test_reacquire_ascend_done_returns_to_search_keeping_lock():
 
 def test_reacquire_keeps_search_points_for_second_target():
     """İkinci hedef aranırken kaybolursa → SEARCHING_SECOND_TARGET'e döner."""
-    from models import Target, TargetType
-
     sm, nav = _make_sm()
     sm.data.first_target = Target(
         target_id=1, shape=TargetType.TRIANGLE, color=TargetColor.RED,
@@ -123,17 +168,17 @@ def test_reacquire_keeps_search_points_for_second_target():
 
 def test_no_blind_drop_without_real_detection():
     """Çekirdek garanti: gerçek tespit olmadan TARGET_ALIGNED'e asla geçilmez."""
-    sm, _nav = _make_sm()
+    sm, _nav = _make_sm(altitude=TAKEOFF_ALTITUDE)
     sm._no_detection_count = sm._NO_DETECTION_LIMIT + 1
 
     for _ in range(5):
         sm._do_align_target()
 
-    # Yükselme mock'ta anında biter → yeniden aramaya dönülür; asla bırakmaya değil.
+    # Search irtifasında kayıp → kaba GPS'e dönüş döngüsü (irtifa düşmez);
+    # asla bırakmaya (TARGET_ALIGNED) geçilmez.
     assert sm.data.state != MissionState.TARGET_ALIGNED, "kör bırakma yok"
-    assert sm.data.state in (MissionState.SEARCHING_FIRST_TARGET,
-                             MissionState.SEARCHING_SECOND_TARGET), \
-        "yeniden aramaya dönülür"
+    assert sm.data.state == MissionState.ALIGNING_TARGET, \
+        "search irtifasında recovery kaba GPS'e dönüşle devam eder"
 
 
 # ── Yaw kilidi: hizalama komutlarında İHA burnu sabitlenir ─────────────────── #

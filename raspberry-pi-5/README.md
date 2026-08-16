@@ -145,6 +145,24 @@ gst-launch-1.0 udpsrc port=5000 caps="application/x-rtp,media=video,encoding-nam
 > ~1.5-2 Mbps, `tune=zerolatency` + leaky queue (encoder yavaşsa frame
 > düşer, görev asla bloklanmaz). GStreamer'ın kopması uçuşu durdurmaz.
 
+**Görüntü işleme + yayın TEST scripti (yalnızca yayın — uçuş komutu YOK):**
+
+Görev akışından bağımsız, yalnızca görüntü işleyip yayın yapan script
+(`vision_stream_only.py`, repo kökü):
+
+```bash
+# İHA 11.5m'de Mission Planner ile HOLD'da iken (ikinci terminal):
+python3 vision_stream_only.py
+```
+
+- Projenin gerçek kamerayı (RPiCam3) ve mevcut tespit pipeline'ını
+  (TargetDetector) kullanır; MAVİ ALTIGEN + KIRMIZI ÜÇGEN tespit eder ve
+  tespit overlay + HUD bandını `payload/config.yaml → video_stream.host`
+  adresine GStreamer ile yayınlar.
+- **MAVLink AÇMAZ / hiçbir hareket komutu gönderemez** (flight/payload
+  import etmez), pencere açmaz (headless). Ground station alıcı komutu
+  yukarıdaki ile aynıdır.
+
 **Görüntü kalitesi ayarı (tuning):**
 
 | Sorun | Çözüm |

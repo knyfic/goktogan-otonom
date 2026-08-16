@@ -1,20 +1,20 @@
 """
 PositionController.align_detection uyarlanabilir kazanç testleri.
 
-Overshoot kök nedeni: yüksek irtifada (11.5m) aynı piksel hatası çok daha
-büyük bir fiziksel adıma karşılık gelir (mpp ∝ irtifa); İHA komut aralığında
+Overshoot kök nedeni: yüksek irtifada aynı piksel hatası çok daha büyük bir
+fiziksel adıma karşılık gelir (mpp ∝ irtifa); İHA komut aralığında
 (ALIGN_CMD_INTERVAL_S) adımı bitiremezse hareket halinde alınan yeni ölçümle
 hedef aşılır → sağ-sol salınımı.
 
-Davranış modu: 8m ve ALTINDA ESKİ/stabil alignment hesabı birebir korunur
-(sabit ALIGN_GAIN, adım sınırı YOK). Yalnızca 8m ÜSTÜNDE (11.5m) adaptive
-hesap devreye girer; 8–9m arasında iki hesap yumuşakça karıştırılır.
+Davranış modu (config eşikleri): ALIGN_ALT_MODE_LO_M ve ALTINDA ESKİ/stabil
+hesap (sabit ALIGN_GAIN, adım sınırı YOK); eşikler arasında iki hesap yumuşakça
+karıştırılır; ALIGN_ALT_MODE_HI_M ve ÜSTÜNDE tam adaptive hesap.
 
 Test edilen davranışlar:
-  1. 7m / 8m'de eski davranış DEĞİŞMEZ (tam ALIGN_GAIN, clamp yok).
-  2. 10m / 11.5m'de adaptive davranış (hata oranı + irtifa + adaptive step).
-  3. 8–9m geçiş bandında adım monoton küçülür (süreksizlik yok).
-  4. 11.5m'de büyük piksel hatası büyük adım kullanır (0.25 clamp yok).
+  1. Mod eşiğinin ALTINDA eski davranış DEĞİŞMEZ (tam ALIGN_GAIN, clamp yok).
+  2. Eşiğin ÜSTÜNDE (11.5m) adaptive davranış (hata oranı + irtifa + adaptive step).
+  3. Geçiş bandında adım monoton küçülür (süreksizlik yok).
+  4. 11.5m'de büyük piksel hatası büyük adım kullanır.
   5. Hedef yaklaştıkça adım küçülür.
   6. Deadband (tolerans) korunur.
 """
@@ -67,6 +67,11 @@ def _mpp_x(alt_m: float) -> float:
     return w / _FW
 
 
+def _legacy_step(err_px: float, alt_m: float) -> float:
+    """ESKİ (mod eşiği altı) hesap: sabit ALIGN_GAIN, adım sınırı yok."""
+    return err_px * _mpp_x(alt_m) * ALIGN_GAIN
+
+
 # ── 1) Hata küçüldükçe adım küçülür (oransal kazanç) ──────────────────────── #
 def test_smaller_error_smaller_step():
     """Aynı irtifada 80px hata, 150px hatadan KÜÇÜK adım üretmeli.
@@ -93,60 +98,66 @@ def test_high_altitude_keeps_step_bounded():
     assert step <= ALIGN_MAX_STEP_M * 1.001
 
 
-# ── 2b) 8m ve altında ESKİ davranış birebir korunur ─────────────────────────── #
-def test_7m_uses_legacy_behavior():
-    """7m'de eski hesap: sabit ALIGN_GAIN, adım sınırı YOK — büyük hata büyük
-    (clamp'sız) adım üretir, kazanç hata oranına/irtifaya bağlı DEĞİLDİR."""
+# ── 2b) Mod eşiğinin ALTINDA ESKİ davranış birebir korunur ────────────────── #
+def test_below_mode_threshold_uses_legacy_behavior():
+    """Mod eşiği (ALIGN_ALT_MODE_LO_M) ALTINDA eski hesap: sabit ALIGN_GAIN,
+    adım sınırı YOK — büyük hata clamp'sız büyük adım üretir."""
+    alt = ALIGN_ALT_MODE_LO_M - 1.0   # eşiğin 1m altı
     for err in (150.0, 500.0):
-        expected = err * _mpp_x(7.0) * ALIGN_GAIN
-        got = _command_step(err, 0.0, 7.0)
+        expected = _legacy_step(err, alt)
+        got = _command_step(err, 0.0, alt)
         assert got == pytest.approx(expected, rel=0.01), \
-            f"7m'de eski hesap bozuldu (err={err:.0f}px)"
+            f"{alt:.1f}m'de eski hesap bozuldu (err={err:.0f}px)"
+    # Büyük hata adımı üst sınırı aşar → clamp'ın OLMADIĞINI kanıtlar
+    assert _command_step(500.0, 0.0, alt) > ALIGN_MAX_STEP_LARGE_M, \
+        "clamp olmamalı (eski davranış)"
 
 
-def test_8m_uses_legacy_behavior():
-    """8m sınırında da eski davranış: tam ALIGN_GAIN ve clamp YOK."""
-    expected = 500.0 * _mpp_x(8.0) * ALIGN_GAIN
-    got = _command_step(500.0, 0.0, 8.0)
+def test_at_mode_threshold_uses_legacy_behavior():
+    """Eşiğin KENDİSİNDE (ALIGN_ALT_MODE_LO_M) de eski davranış: tam gain, clamp yok."""
+    expected = _legacy_step(500.0, ALIGN_ALT_MODE_LO_M)
+    got = _command_step(500.0, 0.0, ALIGN_ALT_MODE_LO_M)
     assert got == pytest.approx(expected, rel=0.01), \
-        "8m'de eski hesap bozuldu — adaptive devreye GİRMEMELİ"
-    assert got > ALIGN_MAX_STEP_LARGE_M, "8m'de clamp olmamalı (eski davranış)"
+        "eşikte eski hesap bozuldu — adaptive devreye GİRMEMELİ"
 
 
-def test_8m_boundary_no_jump():
-    """8m sınırının HEMEN altı ve üstünde adımda ani sıçrama yoktur."""
-    step_79 = _command_step(500.0, 0.0, 7.9)
-    step_80 = _command_step(500.0, 0.0, 8.0)
-    # 7.9m ve 8.0m ikisi de eski hesap (w=0) → adımlar yakın (sadece mpp farkı)
-    assert step_79 == pytest.approx(step_80, rel=0.05), \
-        "8m sınırında davranış sıçraması olmamalı"
+def test_mode_boundary_no_jump():
+    """Mod sınırının HEMEN altı ve üstünde adımda ani sıçrama yoktur."""
+    lo = ALIGN_ALT_MODE_LO_M
+    step_below = _command_step(500.0, 0.0, lo - 0.1)
+    step_at = _command_step(500.0, 0.0, lo)
+    # ikisi de eski hesap (w=0) → adımlar yakın (yalnızca mpp farkı)
+    assert step_below == pytest.approx(step_at, rel=0.05), \
+        "mod sınırında davranış sıçraması olmamalı"
 
 
-def test_8_to_9m_smooth_transition():
-    """8–9m geçiş bandında adım monoton küçülür (süreksizlik yok)."""
-    s8 = _command_step(500.0, 0.0, 8.0)
-    s85 = _command_step(500.0, 0.0, 8.5)
-    s9 = _command_step(500.0, 0.0, 9.0)
-    assert s9 < s85 < s8, "geçiş bandında adım kademeli küçülmeli"
-    # 9m'de tam adaptive: 500px → ~0.5m
-    assert s9 == pytest.approx(ALIGN_MAX_STEP_LARGE_M, rel=0.02)
+def test_transition_band_monotonic():
+    """Geçiş bandında (LO→HI) adım monoton küçülür (süreksizlik yok)."""
+    s_lo = _command_step(500.0, 0.0, ALIGN_ALT_MODE_LO_M)
+    s_mid = _command_step(500.0, 0.0, (ALIGN_ALT_MODE_LO_M + ALIGN_ALT_MODE_HI_M) / 2.0)
+    s_hi = _command_step(500.0, 0.0, ALIGN_ALT_MODE_HI_M)
+    assert s_hi < s_mid < s_lo, "geçiş bandında adım kademeli küçülmeli"
+    # HI eşiğinde tam adaptive: adım eski hesabın belirgin altında
+    assert s_hi < _legacy_step(500.0, ALIGN_ALT_MODE_HI_M) * 0.5
 
 
-def test_10m_11_5m_use_adaptive():
-    """10m ve 11.5m'de tam adaptive davranış: büyük hata → ~0.5m üst sınır."""
+def test_high_altitude_uses_adaptive():
+    """10m ve 11.5m'de tam adaptive: büyük hata adımı eski hesabın çok altında
+    ve üst sınıra (ALIGN_MAX_STEP_LARGE_M) bağlı."""
     for alt in (10.0, 11.5):
         step = _command_step(500.0, 0.0, alt)
-        assert step == pytest.approx(ALIGN_MAX_STEP_LARGE_M, rel=0.02), \
-            f"{alt}m'de adaptive adım sınırı uygulanmalı"
+        assert step < _legacy_step(500.0, alt) * 0.5, \
+            f"{alt}m'de adaptive davranış uygulanmalı (step={step:.3f}m)"
+        assert step <= ALIGN_MAX_STEP_LARGE_M * 1.001
 
 
-# ── 2c) 11.5m'de büyük hata yavaşlamasın (0.25 clamp kalktı) ───────────────── #
+# ── 2c) 11.5m'de büyük hata yavaşlamasın (küçük clamp kalktı) ─────────────── #
 def test_11_5m_large_error_not_slow():
-    """11.5m'de 500px hata ~0.5m adıma ulaşır — sabit 0.25m clamp yüzünden
-    aşırı yavaşlama YOK."""
+    """11.5m'de 500px hata ALIGN_MAX_STEP_M'yi AŞAN büyük adım kullanır —
+    küçük sabit clamp yüzünden aşırı yavaşlama YOK."""
     step = _command_step(500.0, 0.0, 11.5)
-    assert step >= ALIGN_MAX_STEP_M * 1.9, \
-        f"büyük hata büyük adım kullanmalı (step={step:.3f}m)"
+    assert step > ALIGN_MAX_STEP_M, \
+        f"büyük hata büyük adım kullanmalı (step={step:.3f}m, alt sınır {ALIGN_MAX_STEP_M}m)"
 
 
 def test_altitude_gain_scales_with_ref_ratio():
@@ -162,9 +173,8 @@ def test_altitude_gain_scales_with_ref_ratio():
 
 # ── 3) Adım sınırı (adaptive — yalnızca yüksek irtifa) ───────────────────── #
 def test_step_never_exceeds_max():
-    """11.5m'de çok büyük hata (500px) tek komutta ALIGN_MAX_STEP_LARGE_M'yi
-    aşamaz (adaptive üst sınır)."""
-    step = _command_step(500.0, 0.0, 11.5)
+    """11.5m'de çok büyük hata tek komutta ALIGN_MAX_STEP_LARGE_M'yi aşamaz."""
+    step = _command_step(5000.0, 0.0, 11.5)
     assert step <= ALIGN_MAX_STEP_LARGE_M * 1.001, \
         f"adım sınırı aşıldı: {step:.3f}m > {ALIGN_MAX_STEP_LARGE_M}m"
 
@@ -184,10 +194,10 @@ def test_adaptive_step_scales_with_error():
 
 
 def test_large_error_uses_large_step():
-    """Büyük hata (500px) büyük adım kullanır — ALIGN_MAX_STEP_LARGE_M doygunluğu."""
-    step = _command_step(500.0, 0.0, 11.5)
+    """Çok büyük hata (2000px) büyük adım kullanır — ALIGN_MAX_STEP_LARGE_M doygunluğu."""
+    step = _command_step(2000.0, 0.0, 11.5)
     assert step == pytest.approx(ALIGN_MAX_STEP_LARGE_M, rel=0.01), \
-        "büyük hata ~0.5m adıma ulaşmalı (sabit 0.25 değil)"
+        "çok büyük hata ~ALIGN_MAX_STEP_LARGE_M adıma ulaşmalı (sabit küçük clamp değil)"
 
 
 def test_small_error_below_small_step_limit():

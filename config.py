@@ -210,7 +210,7 @@ SCAN_LINE_SPACING = 10
 SEARCH_MARGIN = 2.0
 
 # Arama sırası yatay hız
-SEARCH_SPEED_MPS = 3.0
+SEARCH_SPEED_MPS = 1.0
 # Hedefe yaklaşma hızı (kaba)
 APPROACH_SPEED_MPS = 2.0
 # Hizalama sırası yatay hız (ince)

@@ -774,6 +774,11 @@ class MissionStateMachine:
 
     # ------------------------------------------------------------------ #
     def _do_takeoff(self) -> None:
+        # Takeoff FC'nin kendi WPNAV_SPEED varsayılanıyla (≈10 m/s) yapılırsa
+        # ilk arama takeoff sonrası YÜKSEK HIZ ATALETİYLE başlar (fren mesafesi
+        # büyür, dönüşlerde overshoot). Arama hız limitini takeoff'tan ÖNCE
+        # uygula — hem yatay (SEARCH_SPEED_MPS) hem dikey (VERTICAL_SPEED_MPS).
+        self.nav.set_max_speed(SEARCH_SPEED_MPS, VERTICAL_SPEED_MPS)
         self.nav.takeoff(TAKEOFF_ALTITUDE)
         deadline = time.monotonic() + TAKEOFF_TIMEOUT
         while time.monotonic() < deadline:

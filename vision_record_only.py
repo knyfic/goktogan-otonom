@@ -37,6 +37,8 @@ from __future__ import annotations
 import datetime
 import logging
 import os
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -172,19 +174,106 @@ def recording_path(
     return d / f"vision_{ts}.mp4"
 
 
+def _ffmpeg_command(
+    path: str | os.PathLike,
+    width: int,
+    height: int,
+    fps: int,
+    bitrate: int,
+) -> list[str]:
+    """ffmpeg CLI komutu — garanti H.264 (libx264) + yuv420p + faststart MP4.
+
+    Tarayıcı uyumluluğu için H.264/yuv420p zorunludur; cv2'nin 'mp4v'
+    fallback'i (MPEG-4 Part 2) tarayıcılarda oynatılamaz.
+    """
+    br = max(int(bitrate), 500_000)
+    return [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-s", f"{int(width)}x{int(height)}", "-r", str(max(int(fps), 1)),
+        "-i", "-",
+        "-c:v", "libx264", "-preset", "veryfast",
+        "-b:v", str(br), "-maxrate", str(br), "-bufsize", str(br * 2),
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        "-f", "mp4", str(path),
+    ]
+
+
+class _FfmpegWriter:
+    """ffmpeg CLI tabanlı H.264/MP4 yazıcı (bgr24 rawvideo pipe).
+
+    Arayüz cv2.VideoWriter ile aynıdır (write / isOpened / release) — ana
+    döngü hangi yazıcının kullanıldığını bilmez. Encoder ölürse write()
+    hatasız döner (log basar) ve isOpened() False olur → ana döngü durur.
+    """
+
+    def __init__(self, path, width, height, fps, bitrate, logger=None):
+        self._log = logger or logging.getLogger(__name__)
+        self._dead = False
+        self._proc = subprocess.Popen(
+            _ffmpeg_command(path, width, height, fps, bitrate),
+            stdin=subprocess.PIPE,
+        )
+        self._log.info(
+            "Video encoder: ffmpeg/libx264 (h264, yuv420p, faststart) → %s",
+            Path(path).name,
+        )
+
+    def isOpened(self) -> bool:
+        return not self._dead and self._proc.poll() is None
+
+    def write(self, frame) -> None:
+        if not self.isOpened():
+            return
+        try:
+            self._proc.stdin.write(np.ascontiguousarray(frame).tobytes())
+        except (BrokenPipeError, OSError) as exc:
+            if not self._dead:
+                self._dead = True
+                self._log.warning("ffmpeg encoder kapandı (%s) — kayıt duruyor.", exc)
+
+    def release(self) -> None:
+        try:
+            if self._proc.stdin is not None and not self._proc.stdin.closed:
+                self._proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            self._proc.wait(timeout=10)
+        except Exception:
+            try:
+                self._proc.kill()
+            except Exception:
+                pass
+
+
 def open_writer(
     path: str | os.PathLike,
     width: int,
     height: int,
     fps: int,
+    bitrate: int = VISION_RECORDING_BITRATE,
     logger: logging.Logger | None = None,
-) -> tuple[cv2.VideoWriter, str]:
-    """VideoWriter'ı fourcc zinciriyle açar (avc1 → h264 → x264 → mp4v).
+) -> tuple[object, str]:
+    """Video yazıcıyı açar — ÖNCELİK: ffmpeg CLI (garanti H.264).
 
-    İlki açılırsa onu kullanır. Hiçbiri açılamazsa RuntimeError fırlatır.
-    Dönen: (writer, seçilen fourcc tag'i).
+    • ffmpeg varsa: _FfmpegWriter (libx264, yuv420p, faststart, gerçek bitrate)
+      → tarayıcıda kesin oynar.
+    • ffmpeg yoksa: cv2.VideoWriter fourcc zinciri (avc1 → h264 → x264 → mp4v).
+      Sonuç 'mp4v' olursa tarayıcı oynatamaz — bu yalnızca son çare fallback'idir
+      (Pi'de 'sudo apt install ffmpeg' ile çözülür).
+
+    Dönen: (writer, etiket). Hiçbiri açılamazsa RuntimeError.
     """
     log = logger or logging.getLogger(__name__)
+    if shutil.which("ffmpeg"):
+        return _FfmpegWriter(path, width, height, fps, bitrate, log), "ffmpeg-h264"
+
+    log.warning(
+        "ffmpeg bulunamadı — cv2.VideoWriter fallback'i kullanılıyor; "
+        "kodc 'mp4v' olursa tarayıcı oynatamaz. Öneri: sudo apt install ffmpeg"
+    )
     last_err: Exception | None = None
     for tag in _VIDEO_FOURCC_ORDER:
         try:
@@ -266,6 +355,9 @@ def main() -> int:
 
     try:
         while True:
+            if not writer.isOpened():
+                logger.error("Video encoder kapandı — kayıt durduruluyor.")
+                break
             t_frame = time.monotonic()
             frame = camera.latest()
             if frame is None:

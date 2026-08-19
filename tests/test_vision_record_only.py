@@ -85,8 +85,9 @@ def test_detection_summary_formats_targets():
     assert vr.detection_summary([]) == "tespit yok"
 
 
-def test_open_writer_real_encoder_writes_mp4(tmp_path):
-    """Gerçek cv2 encoder (host'ta avc1/H.264): açılır, frame yazar, finalize eder."""
+def test_open_writer_real_encoder_writes_mp4(tmp_path, monkeypatch):
+    """cv2 fallback yolu (ffmpeg yokken): açılır, frame yazar, finalize eder."""
+    monkeypatch.setattr(vr.shutil, "which", lambda _: None)  # ffmpeg'i yoksay
     out = tmp_path / "real.mp4"
     writer, tag = vr.open_writer(out, 320, 240, 10)
     assert writer.isOpened()
@@ -96,8 +97,10 @@ def test_open_writer_real_encoder_writes_mp4(tmp_path):
     writer.release()
     assert out.exists() and out.stat().st_size > 0, "MP4 finalize edilmeli"
 
+
 def test_open_writer_falls_back_to_mp4v(monkeypatch, tmp_path):
     """avc1/h264/x264 açılamazsa mp4v'e düşer — fourcc zinciri testi."""
+    monkeypatch.setattr(vr.shutil, "which", lambda _: None)  # ffmpeg'i yoksay
     calls: list = []
 
     class FakeWriter:
@@ -131,6 +134,8 @@ def _det(color, shape, conf):
 
 
 def test_open_writer_raises_when_none_open(monkeypatch, tmp_path):
+    monkeypatch.setattr(vr.shutil, "which", lambda _: None)  # ffmpeg'i yoksay
+
     class FakeWriter:
         def __init__(self, *a, **k):
             pass
@@ -144,3 +149,84 @@ def test_open_writer_raises_when_none_open(monkeypatch, tmp_path):
     monkeypatch.setattr(vr.cv2, "VideoWriter", FakeWriter)
     with pytest.raises(RuntimeError):
         vr.open_writer(tmp_path / "x.mp4", 960, 352, 30)
+
+
+# ── ffmpeg yolu (birincil encoder) ────────────────────────────────────────── #
+
+class _FakeStdin:
+    def __init__(self):
+        self.data = b""
+        self.closed = False
+
+    def write(self, b: bytes) -> int:
+        self.data += b
+        return len(b)
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeProc:
+    def __init__(self, cmd):
+        self.cmd = cmd
+        self.stdin = _FakeStdin()
+        self.waited = False
+        self.killed = False
+
+    def poll(self):
+        return None
+
+    def wait(self, timeout=None):
+        self.waited = True
+        return 0
+
+    def kill(self):
+        self.killed = True
+
+
+def test_open_writer_prefers_ffmpeg(monkeypatch, tmp_path):
+    """ffmpeg varsa birincil yol kullanılır; komut H.264/bitrate/faststart içerir."""
+    procs: list = []
+
+    def fake_popen(cmd, **kwargs):
+        p = _FakeProc(cmd)
+        procs.append(p)
+        return p
+
+    monkeypatch.setattr(vr.shutil, "which", lambda _: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(vr.subprocess, "Popen", fake_popen)
+
+    writer, tag = vr.open_writer(tmp_path / "x.mp4", 960, 352, 30, bitrate=10_000_000)
+    assert tag == "ffmpeg-h264"
+    cmd = procs[0].cmd
+    assert "libx264" in cmd
+    assert "yuv420p" in cmd
+    assert "+faststart" in cmd
+    assert cmd[cmd.index("-b:v") + 1] == "10000000"
+    assert cmd[cmd.index("-s") + 1] == "960x352"
+
+    frame = np.zeros((352, 960, 3), dtype=np.uint8)
+    writer.write(frame)
+    assert len(procs[0].stdin.data) == 352 * 960 * 3, "bgr24 frame ffmpeg'e yazılmalı"
+    writer.release()
+    assert procs[0].stdin.closed and procs[0].waited
+
+
+def test_ffmpeg_writer_dead_on_broken_pipe(monkeypatch, tmp_path):
+    """ffmpeg ölürse write() hatasız döner ve isOpened() False olur."""
+    class DeadStdin(_FakeStdin):
+        def write(self, b):
+            raise BrokenPipeError("encoder öldü")
+
+    def fake_popen(cmd, **kwargs):
+        p = _FakeProc(cmd)
+        p.stdin = DeadStdin()
+        return p
+
+    monkeypatch.setattr(vr.shutil, "which", lambda _: "/usr/bin/ffmpeg")
+    monkeypatch.setattr(vr.subprocess, "Popen", fake_popen)
+
+    writer, _ = vr.open_writer(tmp_path / "x.mp4", 320, 240, 15)
+    writer.write(np.zeros((240, 320, 3), dtype=np.uint8))  # hata yutmamalı
+    assert not writer.isOpened()
+    writer.release()  # çift kapanış güvenli olmalı

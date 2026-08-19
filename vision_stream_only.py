@@ -125,16 +125,23 @@ def detection_summary(detections: list) -> str:
     )
 
 
-def process_frame(frame_bgr: np.ndarray, detector: TargetDetector) -> tuple[np.ndarray, list, str]:
+def process_frame(
+    frame_bgr: np.ndarray,
+    detector: TargetDetector,
+    fps: float = 0.0,
+    proc_ms: float = 0.0,
+) -> tuple[np.ndarray, list, str]:
     """Tek frame: tespit → overlay → HUD → yayın frame'i.
 
     Dönen: (yayın frame'i, detections, tespit özeti) — tespit ASLA aksiyon
-    üretmez, yalnızca görselleştirilir.
+    üretmez, yalnızca görselleştirilir. HUD bandında canlı işleme FPS'i ve
+    ortalama frame süresi gösterilir (performans takibi).
     """
     detections = detector.detect(frame_bgr)
     disp = TargetDetector.draw_detections(frame_bgr, detections)
     summary = detection_summary(detections)
-    disp = _draw_hud(disp, "VISION-ONLY STREAM", f"TESPIT: {summary}")
+    hud1 = f"VISION-ONLY STREAM | FPS {fps:.1f} | {proc_ms:.0f} ms"
+    disp = _draw_hud(disp, hud1, f"TESPIT: {summary}")
     return _scale_for_display(disp), detections, summary
 
 
@@ -209,15 +216,29 @@ def main() -> int:
     fps_display = 0.0
     status_t = time.monotonic()
     last_summary = "tespit yok"
+    # HUD için canlı FPS (EMA) + son frame işleme süresi
+    fps_ema = 0.0
+    last_t = time.monotonic()
+    last_proc_ms = 0.0
 
     try:
         while True:
+            now = time.monotonic()
+            dt = now - last_t
+            last_t = now
+            if dt > 0.0:
+                fps_ema = fps_ema * 0.9 + (1.0 / dt) * 0.1   # yumuşatılmış FPS
+
+            t_frame = time.monotonic()
             frame = camera.latest()
             if frame is None:
                 time.sleep(0.02)
                 continue
 
-            disp, _detections, summary = process_frame(frame, detector)
+            disp, _detections, summary = process_frame(
+                frame, detector, fps=fps_ema, proc_ms=last_proc_ms,
+            )
+            last_proc_ms = (time.monotonic() - t_frame) * 1000.0
             streamer.push(disp)
             last_summary = summary
 

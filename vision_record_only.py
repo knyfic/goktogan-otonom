@@ -140,16 +140,20 @@ def process_frame(
     frame_bgr: np.ndarray,
     detector: TargetDetector,
     width_px: int = VISION_RECORDING_WIDTH_PX,
+    fps: float = 0.0,
+    proc_ms: float = 0.0,
 ) -> tuple[np.ndarray, list, str]:
     """Tek frame: tespit → overlay → HUD → kayıt frame'i.
 
     Dönen: (kayıt frame'i, detections, tespit özeti) — tespit ASLA aksiyon
-    üretmez, yalnızca görselleştirilir.
+    üretmez, yalnızca görselleştirilir. HUD bandında canlı işleme FPS'i ve
+    ortalama frame süresi gösterilir (performans takibi).
     """
     detections = detector.detect(frame_bgr)
     disp = TargetDetector.draw_detections(frame_bgr, detections)
     summary = detection_summary(detections)
-    disp = _draw_hud(disp, "VISION-ONLY RECORD", f"TESPIT: {summary}")
+    hud1 = f"VISION-ONLY RECORD | FPS {fps:.1f} | {proc_ms:.0f} ms"
+    disp = _draw_hud(disp, hud1, f"TESPIT: {summary}")
     return _scale_for_display(disp, width_px), detections, summary
 
 
@@ -352,19 +356,32 @@ def main() -> int:
     proc_accum = 0.0
     last_summary = "tespit yok"
     rec_start = time.monotonic()
+    # HUD için canlı FPS (EMA) + son frame işleme süresi
+    fps_ema = 0.0
+    last_t = time.monotonic()
+    last_proc_ms = 0.0
 
     try:
         while True:
             if not writer.isOpened():
                 logger.error("Video encoder kapandı — kayıt durduruluyor.")
                 break
+            now = time.monotonic()
+            dt = now - last_t
+            last_t = now
+            if dt > 0.0:
+                fps_ema = fps_ema * 0.9 + (1.0 / dt) * 0.1   # yumuşatılmış FPS
+
             t_frame = time.monotonic()
             frame = camera.latest()
             if frame is None:
                 time.sleep(0.02)
                 continue
 
-            disp, _detections, summary = process_frame(frame, detector)
+            disp, _detections, summary = process_frame(
+                frame, detector, fps=fps_ema, proc_ms=last_proc_ms,
+            )
+            last_proc_ms = (time.monotonic() - t_frame) * 1000.0
             writer.write(disp)
             last_summary = summary
             proc_accum += (time.monotonic() - t_frame)

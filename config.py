@@ -301,6 +301,17 @@ PREVIEW_WINDOW_NAME = "İHA Kamera"
 # gösterimi bu genişliğe küçültülür → imshow/HUD maliyeti ~4x azalır.
 PREVIEW_DISPLAY_WIDTH_PX = 480
 
+# ── Vision kayıt (vision_record_only.py — debug recorder, SD kart) ───────────
+# Yalnızca recorder tarafından kullanılır; görev akışı bu değerleri okumaz.
+VISION_RECORDING_DIR = "recordings"      # proje root'una göre (çalışma konumundan bağımsız)
+# Kayıt hedef kalitesi (bps) — canlı stream'den (2 Mbps) yüksek debug kaydı.
+# cv2.VideoWriter bitrate'i doğrudan ayarlamaz; gerçek çıktı dosya boyutundan
+# ölçülüp kayıt sonunda loglanır (1920x704 avc1 ile ölçülen tipik ~19 Mbps).
+VISION_RECORDING_BITRATE = 10_000_000
+# Kayıt çözünürlüğü: tespit TAM çözünürlükte yapılır; yalnızca YAZILAN frame bu
+# genişliğe ölçeklenir (canlı yayın 480 px; debug kaydı için 960 px önerilir).
+VISION_RECORDING_WIDTH_PX = 960
+
 # RTL sırasında önizleme güncelleme hızı (Hz).
 # 4 Hz çok seyrek (pencere takılıyor); 15 Hz akıcı ve küçültülmüş
 # gösterimle CPU/GPU için ucuzdur.

@@ -89,3 +89,10 @@ yani ana kodun bu kısmında "2026-08-09 15:51:31,744 | INFO     | iha_mission |
 **oneri32**: ornegin ilk kırmızı hedefe yoneldikten sonra araması gereken seyin mavi altıgen oldugunu kodunbilmesi gerekior payload bırakma gorevi sırasında. cunku iki adet alanımız var birisi kırmızı cugen diger mavi altıgen eyer ilk yuku zaten kırmızı ucgene bırakmıssı ikinci alanı mavi altıgen olmak zorunda. kafa karısıklıgı yasmamalı baska bir kırmızı ucgen goruncu ona yonelmemeli cunku aradıgı sey artık mavi altıgen. aynısı tam tersi icinde gecerli
 
 **soneri33**: step sasyısı ve step yonu ayarlanmalı
+
+gorev basladıktan hemen sonra  arm olmak yerine belirli bir sure gorev beklemelibu sayede mıktanısların yukleri tuttugundan emin olunur.
+
+arducopterin parametrelerini değiştiren veya aşan kodlar bulunabilri bunlar tespit edilmeli.
+
+fps yazılacak
+kamera kaydı gerceye yakın alınacak

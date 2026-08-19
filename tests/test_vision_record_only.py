@@ -6,7 +6,6 @@ HUD → MP4 yazıcı zinciri kurar. Testler bağımsız parçaları doğrular
 (uygulama döngüsü/donanım başlatılmaz; encoder gerçek cv2 ile denenir).
 """
 import datetime
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -19,11 +18,28 @@ import vision_record_only as vr
 
 
 def test_module_does_not_import_flight_payload_state_machine():
-    """Güvenlik: recorder flight/payload/state_machine/pymavlink çekmemeli."""
-    import vision_record_only  # noqa: F401  (modül zaten import edildi)
-    for forbidden in ("flight", "payload", "state_machine", "pymavlink"):
-        assert forbidden not in sys.modules, \
-            f"vision_record_only {forbidden!r} import ediyor — uçuş kontrolü yasak"
+    """Güvenlik: recorder flight/payload/state_machine/pymavlink çekmemeli.
+
+    sys.modules kontrolü temiz bir alt-süreçte yapılır — full suite içinde
+    başka testler bu modülleri zaten import etmiş olabilir (yanlış pozitif).
+    """
+    import subprocess
+    import sys
+
+    root = str(Path(__file__).resolve().parent.parent)
+    code = (
+        "import sys; import vision_record_only; "
+        "bad = sorted({m.split('.')[0] for m in sys.modules} "
+        "& {'flight','payload','state_machine','pymavlink'}); "
+        "print('BAD=' + ','.join(bad))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, cwd=root, timeout=60,
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "BAD=", \
+        f"vision_record_only şunları import ediyor: {out.stdout.strip()}"
 
 
 def test_recording_path_creates_dir_and_timestamp(tmp_path):

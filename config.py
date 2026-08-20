@@ -198,12 +198,6 @@ DETECTION_HISTORY_SIZE = 5
 MIN_STABLE_DETECTIONS = 3
 MIN_DETECTION_CONFIDENCE = 0.60
 
-# Detection ÇALIŞMA çözünürlüğü: giriş frame'i (1920x704) bu genişliğe ölçeklenir
-# (1920 → 960 = 4x daha az piksel; LAB-CLAHE'siz pipeline ile ~2-3x hız kazancı).
-# Detection koordinatları her zaman ORİJİNAL frame çözünürlüğüne geri ölçeklenir;
-# state machine / align / meters_per_pixel hesabı (1920 bazlı) değişmez.
-VISION_DETECT_WIDTH_PX = 960
-
 # Detektör seviyesinde B↔R kanal takası (yalnızca acil durum ağı).
 # Varsayılan KAPALI: kanal takasının sahibi kamera katmanıdır
 # (RPiCam3 — IMX708 için sabit B↔R takası).

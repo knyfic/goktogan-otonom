@@ -308,12 +308,14 @@ class TargetDetector:
         return 4.0 * math.pi * area / (perimeter ** 2)
 
     @staticmethod
-    def _count_vertices_robust(contour) -> tuple[int, int]:
+    def _count_vertices_robust(contour, logger=None) -> tuple[int, int]:
         """5 farklı epsilon ile approxPolyDP → (köşe_sayısı, tutarlılık).
 
         Referans algoritmadan: 0.02/0.03/0.04/0.06/0.08 epsilon katsayılarıyla
         yaklaşımlar yapılır, çoğunluk oyu köşe sayısı olarak alınır. Tutarlılık
         (oy miktarı) mevcut sistemin _MIN_VERTEX_AGREEMENT şartıyla korunur.
+
+        logger verilirse per-epsilon oylar DEBUG olarak loglanır (teşhis).
         """
         perimeter = cv2.arcLength(contour, True)
         if perimeter <= 0:
@@ -323,6 +325,14 @@ class TargetDetector:
             approx = cv2.approxPolyDP(contour, eps * perimeter, True)
             votes.append(len(approx))
         (count, agreement) = Counter(votes).most_common(1)[0]
+        if logger is not None:
+            eps_str = ", ".join(
+                f"{e:.2f}:{v}" for e, v in zip(_VERTEX_EPSILONS, votes)
+            )
+            logger.debug(
+                "approxPolyDP oyları [%s] -> seçilen köşe=%d uyum=%d/%d",
+                eps_str, count, agreement, len(votes),
+            )
         return count, agreement
 
     @staticmethod
@@ -373,38 +383,73 @@ class TargetDetector:
     # Yardımcı: kontur listesinden tespit çıkarımı
     # ──────────────────────────────────────────────────────────────
 
-    def _detections_from_contours(self, contours, frame_hsv, purity_min=_MIN_COLOR_PURITY):
+    def _detections_from_contours(self, contours, frame_hsv, purity_min=_MIN_COLOR_PURITY,
+                                  mask_color=None):
         """Kontur listesinden güvenilir tespitler üretir.
 
         Renk, konturun İÇİNDEKİ gerçek HSV piksel dağılımından (color purity)
         belirlenir — maskeden çıktı diye rengi varsaymaz (false positive kaynağı).
         Şekil; köşe sayısı tutarlılığı + extent (alan/bbox) ile doğrulanır.
+
+        mask_color: bu konturların hangi renk maskesinden geldiği (teşhis için;
+        None = gri fallback). Yalnızca loga yazılır, filtre mantığını etkilemez.
+
+        TEŞHİS: her kontur için tek satır [CANDIDATE] ölçüm logu ve her REJECT
+        noktasında neden + gerçek değer + eşik DEBUG seviyesinde yazılır.
+        (VISION_DEBUG=1 ile etkinleşir.) Bu loglar yalnızca teşhis amaçlıdır;
+        filtre mantığı ve eşikler aynıdır.
         """
         detections = []
+        mask_str = mask_color.value if mask_color is not None else "fallback(gri)"
         for contour in contours:
             area = cv2.contourArea(contour)
+            bx, by, bw, bh = cv2.boundingRect(contour)
+            perimeter = cv2.arcLength(contour, True)
+            hull = cv2.convexHull(contour)
+            hull_area = cv2.contourArea(hull)
+            solidity = float(area) / hull_area if hull_area > 0 else 0.0
+            aspect = float(bw) / bh if bh > 0 else 0.0
+            compactness = (perimeter ** 2) / area if area > 0 else 0.0
+
+            self._log.debug(
+                "[CANDIDATE mask=%s] area=%.0f solidity=%.3f aspect=%.3f "
+                "compactness=%.1f bbox=%dx%d perimeter=%.0f",
+                mask_str, area, solidity, aspect, compactness, bw, bh, perimeter,
+            )
+
             if area < MIN_TARGET_AREA_PX:
+                self._log.debug(
+                    "REJECT alan: area=%.0f < MIN_TARGET_AREA_PX=%.0f",
+                    area, MIN_TARGET_AREA_PX,
+                )
                 continue
 
             if not self._is_valid_shape(contour, area):
-                self._log.debug("REJECT: invalid shape (solidity/aspect) area=%.0f", area)
+                self._log.debug(
+                    "REJECT _is_valid_shape: solidity=%.3f (eşik ≥0.82) "
+                    "aspect=%.3f (bant 0.5–2.0) compactness=%.1f (eşik ≤%.0f)",
+                    solidity, aspect, compactness, _MAX_COMPACTNESS,
+                )
                 continue
 
-            x, y, w, h = cv2.boundingRect(contour)
-            if w <= 2 or h <= 2:
+            if bw <= 2 or bh <= 2:
+                self._log.debug(
+                    "REJECT bbox: bbox=%dx%d çok küçük (w/h > 2 gerekli)", bw, bh,
+                )
                 continue
 
-            count, agreement = self._count_vertices_robust(contour)
+            count, agreement = self._count_vertices_robust(contour, logger=self._log)
             shape = self._classify_shape(count, agreement)
             if shape is None:
                 self._log.debug(
-                    "REJECT: unstable vertex count votes=(%d,%d) area=%.0f",
-                    count, agreement, area,
+                    "REJECT _classify_shape: köşe=%d uyum=%d/%d — gerekli uyum ≥%d; "
+                    "geçerli köşeler üçgen=3, altıgen=5-7",
+                    count, agreement, len(_VERTEX_EPSILONS), _MIN_VERTEX_AGREEMENT,
                 )
                 continue
 
             # Şekle özgü extent doğrulaması (üçgen ≈ 0.50, altıgen ≈ 0.75)
-            extent = float(area) / float(w * h)
+            extent = float(area) / float(bw * bh)
             if shape == "TRIANGLE":
                 expected_vertices, expected_extent = 3, 0.50
                 ext_lo, ext_hi = _TRIANGLE_EXTENT
@@ -415,26 +460,29 @@ class TargetDetector:
                 circ_lo, circ_hi = _HEXAGON_CIRCULARITY
             if not (ext_lo <= extent <= ext_hi):
                 self._log.debug(
-                    "REJECT: extent out of range shape=%s extent=%.2f area=%.0f",
-                    shape, extent, area,
+                    "REJECT extent: shape=%s extent=%.3f (bant %.2f–%.2f) area=%.0f",
+                    shape, extent, ext_lo, ext_hi, area,
                 )
                 continue
 
             # Şekle özgü dairesellik bandı (referans algoritma): üçgen 0.45–0.72,
-            # altıgen 0.72–0.94 — kenar pürüzlülüğüne duyarlı ikinci doğrulama.
+            # altıgen 0.62–0.96 — kenar pürüzlülüğüne duyarlı ikinci doğrulama.
             circularity = self._circularity(contour, area)
             if not (circ_lo <= circularity <= circ_hi):
                 self._log.debug(
-                    "REJECT: circularity out of range shape=%s circ=%.2f area=%.0f",
-                    shape, circularity, area,
+                    "REJECT circularity: shape=%s circ=%.3f (bant %.2f–%.2f) area=%.0f",
+                    shape, circularity, circ_lo, circ_hi, area,
                 )
                 continue
 
             # Renk: kontur içi gerçek piksel dağılımı (color purity)
-            color_info = self._color_purity_from_contour(frame_hsv, contour, purity_min)
+            color_info = self._color_purity_from_contour(
+                frame_hsv, contour, purity_min, logger=self._log
+            )
             if color_info is None:
                 self._log.debug(
-                    "REJECT: color purity too low area=%.0f", area,
+                    "REJECT purity: area=%.0f purity_min=%.2f — oranlar yukarıda",
+                    area, purity_min,
                 )
                 continue
             color, purity = color_info
@@ -442,7 +490,9 @@ class TargetDetector:
             # Yalnızca görev hedefleri: mavi altıgen + kırmızı üçgen.
             if (color, shape) not in _VALID_TARGET_COMBINATIONS:
                 self._log.debug(
-                    "REJECT: görev dışı kombinasyon %s+%s", color.value, shape,
+                    "REJECT kombinasyon: %s+%s — geçerli: %s",
+                    color.value, shape,
+                    ", ".join(f"{c.value}+{s}" for c, s in _VALID_TARGET_COMBINATIONS),
                 )
                 continue
 
@@ -453,8 +503,10 @@ class TargetDetector:
             confidence = 0.45 * shape_score + 0.20 * area_score + 0.35 * purity
             if confidence < MIN_DETECTION_CONFIDENCE:
                 self._log.debug(
-                    "REJECT: confidence too low %.2f shape=%s purity=%.2f area=%.0f",
-                    confidence, shape, purity, area,
+                    "REJECT confidence: %.3f < %.2f (shape_score=%.3f area_score=%.3f "
+                    "purity=%.3f) shape=%s area=%.0f",
+                    confidence, MIN_DETECTION_CONFIDENCE, shape_score, area_score,
+                    purity, shape, area,
                 )
                 continue
 
@@ -465,10 +517,10 @@ class TargetDetector:
             cy = moments["m01"] / moments["m00"]
 
             self._log.debug(
-                "DETECT %s %s conf=%.2f purity=%.2f vertices=%d area=%.0f "
-                "solidity/aspect ok extent=%.2f center=(%.0f,%.0f)",
-                color.value, shape, confidence, purity, count, area,
-                extent, cx, cy,
+                "DETECT %s %s conf=%.2f purity=%.3f vertices=%d(uyum %d) area=%.0f "
+                "solidity=%.2f aspect=%.2f extent=%.2f circ=%.2f center=(%.0f,%.0f)",
+                color.value, shape, confidence, purity, count, agreement, area,
+                solidity, aspect, extent, circularity, cx, cy,
             )
 
             detections.append(
@@ -478,8 +530,8 @@ class TargetDetector:
                     center_x=cx,
                     center_y=cy,
                     area_px=area,
-                    bbox_width_px=w,
-                    bbox_height_px=h,
+                    bbox_width_px=bw,
+                    bbox_height_px=bh,
                     confidence=confidence,
                     color_purity=purity,
                 )
@@ -487,17 +539,21 @@ class TargetDetector:
         return detections
 
     @staticmethod
-    def _color_purity_from_contour(hsv, contour, purity_min: float):
+    def _color_purity_from_contour(hsv, contour, purity_min: float, logger=None):
         """Kontur içindeki canlı piksellerden baskın renk ve oranını döndürür.
 
         BGR maskesinden gelen konturlarda bile rengi körlemesine kabul etmek
         yerine, konturun İÇİNDEKİ piksellerin ne kadarı gerçekten mavi/kırmızı
         olduğuna bakar. Baskın renk oranı purity_min altındaysa None (gürültü).
 
+        logger verilirse mavi/kırmızı oranları DEBUG olarak loglanır (teşhis).
+
         Returns: (TargetColor, purity_ratio) veya None.
         """
         x, y, w, h = cv2.boundingRect(contour)
         if w <= 2 or h <= 2:
+            if logger is not None:
+                logger.debug("purity: bbox=%dx%d çok küçük", w, h)
             return None
 
         contour_mask = np.zeros((h, w), dtype=np.uint8)
@@ -507,6 +563,8 @@ class TargetDetector:
         crop = hsv[y:y + h, x:x + w]
         interior = crop[contour_mask == 255]
         if interior.size == 0:
+            if logger is not None:
+                logger.debug("purity: iç bölge boş")
             return None
 
         hue = interior[:, 0]
@@ -515,20 +573,38 @@ class TargetDetector:
         vivid = (sat >= _PURITY_SAT_MIN) & (val >= _PURITY_VAL_MIN)
         n = int(vivid.sum())
         if n == 0:
+            if logger is not None:
+                logger.debug(
+                    "purity: canlı piksel yok (S>=%d ve V>=%d eşiği altında)",
+                    _PURITY_SAT_MIN, _PURITY_VAL_MIN,
+                )
             return None
 
         blue = vivid & (hue >= _BLUE_HUE_LO) & (hue <= _BLUE_HUE_HI)
         red = vivid & ((hue <= _RED_HUE_MAX) | (hue >= _RED_HUE_MIN))
         blue_ratio = int(blue.sum()) / n
         red_ratio = int(red.sum()) / n
+        if logger is not None:
+            logger.debug(
+                "purity: canlı=%d blue=%.3f red=%.3f (purity_min=%.2f, baskınlık 1.3x)",
+                n, blue_ratio, red_ratio, purity_min,
+            )
 
-        # Baskın renk: eşiğin üstünde OLMALI ve diğer renge açıkça üstün olmalı
-        # (≥1.3x). 50/50 veya yakın karışık blob'lar kabul edilmez.
         if blue_ratio >= red_ratio:
             if blue_ratio < purity_min or blue_ratio < red_ratio * 1.3:
+                if logger is not None:
+                    logger.debug(
+                        "purity REJECT: blue=%.3f < min %.2f VEYA blue=%.3f < red*1.3=%.3f",
+                        blue_ratio, purity_min, blue_ratio, red_ratio * 1.3,
+                    )
                 return None
             return TargetColor.BLUE, blue_ratio
         if red_ratio < purity_min or red_ratio < blue_ratio * 1.3:
+            if logger is not None:
+                logger.debug(
+                    "purity REJECT: red=%.3f < min %.2f VEYA red=%.3f < blue*1.3=%.3f",
+                    red_ratio, purity_min, red_ratio, blue_ratio * 1.3,
+                )
             return None
         return TargetColor.RED, red_ratio
 
@@ -559,7 +635,9 @@ class TargetDetector:
                 mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
 
-            all_detections.extend(self._detections_from_contours(contours, hsv))
+            all_detections.extend(
+                self._detections_from_contours(contours, hsv, mask_color=color)
+            )
 
         if all_detections:
             return sorted(all_detections, key=lambda d: d.confidence, reverse=True)

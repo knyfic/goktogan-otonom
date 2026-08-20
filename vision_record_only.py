@@ -166,18 +166,20 @@ def process_frame(
 def recording_path(
     recordings_dir: str | os.PathLike = VISION_RECORDING_DIR,
     now: datetime.datetime | None = None,
+    prefix: str = "vision",
 ) -> Path:
     """recordings/ dizinini oluşturur ve timestamp'li MP4 yolu döndürür.
 
     Yol, proje root'una göre çözülür (çalıştırma konumuna bağımlı değildir):
     recordings_dir göreli ise bu dosyanın bulunduğu klasörün altına alınır.
+    prefix ile dosya adı farklılaştırılabilir (örn. 'vision_mask').
     """
     d = Path(recordings_dir)
     if not d.is_absolute():
         d = Path(__file__).resolve().parent / d
     d.mkdir(parents=True, exist_ok=True)
     ts = (now or datetime.datetime.now()).strftime("%Y-%m-%d_%H-%M-%S")
-    return d / f"vision_{ts}.mp4"
+    return d / f"{prefix}_{ts}.mp4"
 
 
 def _ffmpeg_command(

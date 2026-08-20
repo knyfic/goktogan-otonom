@@ -23,30 +23,31 @@ from models import Detection, TargetColor
 # (açık mavi, buz mavisi, MOR/eflatun dahil) görünen ALTIGEN → BLUE hedef;
 # kırmızının tonlarında (turuncu, pembe, macenta dahil) görünen ÜÇGEN → RED
 # hedef kabul edilir. Işık/hava koşulu rengi HSV'de ne kadar kaydırırsa
-# kaydırsın ton bantlardan düşmesin:
-#   MAVİ     → H≈70-155 (cyan/buz mavisi + saf mavi + MOR/eflatun) — S/V alçak
-#   KIRMIZI  → H≈0-28 (kırmızı + turuncu) ve H≈156-179 (pembe/macenta + kırmızı)
+# kaydırsın ton bantlardan düşmesin; S/V eşikleri de gölge/açık koşullar için
+# alçak tutulur:
+#   MAVİ     → H≈60-155 (cyan/buz mavisi + saf mavi + MOR) — S≥40, V≥40
+#   KIRMIZI  → H≈0-28 (kırmızı + turuncu) ve H≈156-179 (pembe/macenta)
 # Sınır bilinçli: saf sarı (H≥30) ve yeşil DIŞARIDA; mavi (≤155) ile kırmızı
 # (≥156) arasında ÇAKIŞMA YOK — çakışma olsaydı mor (H 142-155) her iki banda
 # girip purity'de elenirdi.
 # DİKKAT: Maske bantları ile _color_purity_from_contour içindeki purity
 # bantları BİREBİR aynı olmalı — aksi halde geniş maskeyle bulunan kontur dar
 # purity bandında reddedilir.
-_BLUE_MASK_LO   = np.array([70, 60, 50], dtype=np.uint8)
+_BLUE_MASK_LO   = np.array([60, 40, 40], dtype=np.uint8)
 _BLUE_MASK_HI   = np.array([155, 255, 255], dtype=np.uint8)
-_RED_LOW_LO     = np.array([0, 60, 50], dtype=np.uint8)     # kırmızı + turuncu
+_RED_LOW_LO     = np.array([0, 40, 40], dtype=np.uint8)     # kırmızı + turuncu
 _RED_LOW_HI     = np.array([28, 255, 255], dtype=np.uint8)
-_RED_HIGH_LO    = np.array([156, 60, 50], dtype=np.uint8)   # pembe/macenta + kırmızı
+_RED_HIGH_LO    = np.array([156, 40, 40], dtype=np.uint8)   # pembe/macenta + kırmızı
 _RED_HIGH_HI    = np.array([179, 255, 255], dtype=np.uint8)
 
 # Purity eşleştirme (hue) — maske ile aynı genişlik
-_BLUE_HUE_LO, _BLUE_HUE_HI = 70, 155
+_BLUE_HUE_LO, _BLUE_HUE_HI = 60, 155
 _RED_HUE_MAX = 28    # hue <= 28 (kırmızı + turuncu)
 _RED_HUE_MIN = 156   # hue >= 156 (pembe/macenta + kırmızı)
 # Purity "canlı piksel" eşiği (S/V) — maske ile aynı taban; karanlık/açık
 # koşullarda bile kontur içi renk oranı ölçülebilsin.
-_PURITY_SAT_MIN = 60
-_PURITY_VAL_MIN = 50
+_PURITY_SAT_MIN = 40
+_PURITY_VAL_MIN = 40
 
 
 _KAPAMA_KERNEL_Buyuk = 7
@@ -55,10 +56,13 @@ _KAPAMA_KERNEL_Kucuk = 3
 # ── Harici (referans) algoritmadan alınan şekil sağlamlığı sabitleri ────────
 # Compactness (çevre²/alan) üst sınırı — tırtıklı/karmaşık konturları eler.
 _MAX_COMPACTNESS = 40.0
-# Dairesellik (4πA/P²) bantları: düzgün üçgen ≈ 0.60, düzgün altıgen ≈ 0.83.
-# Extent doğrulamasıyla birlikte şekle özgü ikinci bir sağlamlık ölçüsüdür.
+# Dairesellik (4πA/P²) bantları: düzgün üçgen ≈ 0.60, düzgün altıgen ≈ 0.91.
+# ALTIGEN bandının ALT SINIRI bilinçli olarak gevşektir (0.62): kamera eğik/
+# perspektifli baktığında altıgen trapez gibi görünür ve dairesellik 0.7'ye
+# kadar düşer — tespit kaybolmasın diye. Gürültü (blob) zaten köşe oyu
+# tutarlılığında elenir.
 _TRIANGLE_CIRCULARITY = (0.45, 0.72)
-_HEXAGON_CIRCULARITY = (0.72, 0.94)
+_HEXAGON_CIRCULARITY = (0.62, 0.96)
 # Köşe sayımı epsilon katsayıları — 5 farklı epsilon, çoğunluk oyu (referans kod).
 _VERTEX_EPSILONS = (0.02, 0.03, 0.04, 0.06, 0.08)
 
@@ -314,13 +318,19 @@ class TargetDetector:
         Referans algoritmadan: 0.02/0.03/0.04/0.06/0.08 epsilon katsayılarıyla
         yaklaşımlar yapılır, çoğunluk oyu köşe sayısı olarak alınır. Tutarlılık
         (oy miktarı) mevcut sistemin _MIN_VERTEX_AGREEMENT şartıyla korunur.
+
+        ÖNEMLİ: Sayım DÖNÜŞBÜKEY ZARF (convexHull) ÜZERİNDEN yapılır.
+        Gerçek kamerada kenarlar anti-aliasing/morfoloji ile hafifçe yuvarlanır;
+        ham konturda küçük epsilonda fazladan köşe çıkar, oylar dağılır.
+        Zarf bu yuvarlanmayı giderir — altıgen her koşulda 6 köşe verir.
         """
-        perimeter = cv2.arcLength(contour, True)
+        hull = cv2.convexHull(contour)
+        perimeter = cv2.arcLength(hull, True)
         if perimeter <= 0:
             return 0, 0
         votes = []
         for eps in _VERTEX_EPSILONS:
-            approx = cv2.approxPolyDP(contour, eps * perimeter, True)
+            approx = cv2.approxPolyDP(hull, eps * perimeter, True)
             votes.append(len(approx))
         (count, agreement) = Counter(votes).most_common(1)[0]
         return count, agreement

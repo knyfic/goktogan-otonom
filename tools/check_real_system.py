@@ -246,10 +246,10 @@ def check_vision() -> tuple[bool, str]:
     """Vision pipeline smoke testi: gerçek frame üzerinde detektörler patlamaz."""
     try:
         from config import (
-            CAMERA_HEIGHT_PX,
             CAMERA_HORIZONTAL_FOV_DEG,
-            CAMERA_VERTICAL_FOV_DEG,
-            CAMERA_WIDTH_PX,
+            VISION_HEIGHT_PX,
+            VISION_WIDTH_PX,
+            VISION_VERTICAL_FOV_DEG,
         )
         import cv2
         import numpy as np
@@ -258,12 +258,13 @@ def check_vision() -> tuple[bool, str]:
         from vision.payload_detector import PayloadDetector
         from vision.target_detector import TargetDetector
 
-        frame = np.zeros((704, 1920, 3), dtype=np.uint8)
+        # Vision pipeline'ın gördüğü frame boyutları (kırpma + yarı çözünürlük)
+        frame = np.zeros((VISION_HEIGHT_PX, VISION_WIDTH_PX, 3), dtype=np.uint8)
         det = TargetDetector()
         _ = det.detect(frame)
         model = CameraModel(
-            CAMERA_WIDTH_PX, CAMERA_HEIGHT_PX,
-            CAMERA_HORIZONTAL_FOV_DEG, CAMERA_VERTICAL_FOV_DEG,
+            VISION_WIDTH_PX, VISION_HEIGHT_PX,
+            CAMERA_HORIZONTAL_FOV_DEG, VISION_VERTICAL_FOV_DEG,
         )
         pd = PayloadDetector(model)
         _ = pd.detect(frame, 3.0, "RED")

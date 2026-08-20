@@ -43,9 +43,12 @@ from vision.payload_detector import PayloadDetection
 HISTORY_LEN       = 8    # Her track için kaç frame geçmişi tutulsun
 MISS_THRESHOLD    = 5    # Bu kadar frame kaybolursa track silinir
 IOU_MATCH_THRESH  = 0.15 # Track eşleştirme için minimum IoU
-DIST_MATCH_THRESH = 80   # IoU düşükse merkez piksel mesafesi eşiği
+# Merkez piksel mesafesi eşiği — yarı çözünürlükte (960x352) aynı fiziksel
+# mesafe piksel cinsinden yarıya iner; davranışın aynı kalması için 80 → 40.
+DIST_MATCH_THRESH = 40
 LOCK_SWITCH_MARGIN = 0.15 # Rakibin score'u bu kadar üstüne çıkmalı ki geçiş olsun
-BORDER_MARGIN_PX  = 8    # Bu piksel içindeyse "border'a temas" sayılır
+# Border'a temas eşiği (px) — yarı çözünürlükte aynı fiziksel temas için 8 → 4.
+BORDER_MARGIN_PX  = 4
 MIN_AGE_FOR_LOCK  = 2    # En az bu kadar frame görülmeden lock olmaz
 
 # Score ağırlıkları
@@ -154,8 +157,9 @@ class _Track:
             for i in range(1, len(hist))
         ]
         avg_motion = sum(diffs) / len(diffs)
-        # 0px hareket → 1.0, 50px+ hareket → 0.0
-        return max(0.0, 1.0 - avg_motion / 50.0)
+        # 0px hareket → 1.0, 25px+ hareket → 0.0
+        # (yarı çözünürlük: aynı fiziksel hareket piksel cinsinden yarıya iner)
+        return max(0.0, 1.0 - avg_motion / 25.0)
 
 
 # ------------------------------------------------------------------ #

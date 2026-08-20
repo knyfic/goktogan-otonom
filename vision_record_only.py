@@ -27,8 +27,8 @@ KULLANIM (Raspberry Pi'de, İHA 11.5m'de Mission Planner ile HOLD'da iken):
 KONFIG:
   config.py:
     CAMERA_WIDTH_PX / CAMERA_HEIGHT_PX / REAL_CAMERA_FPS / RPI_CAMERA_NUM
-    VISION_HEIGHT_PX / VISION_RECORDING_DIR / VISION_RECORDING_BITRATE
-    / VISION_RECORDING_WIDTH_PX
+    VISION_CROP_HEIGHT_PX / VISION_WIDTH_PX / VISION_HEIGHT_PX
+    / VISION_RECORDING_DIR / VISION_RECORDING_BITRATE / VISION_RECORDING_WIDTH_PX
   payload/config.yaml:
     camera.orientation → fiziksel kamera montaj yönü (REAL: 'ROTATE_180')
 """
@@ -53,7 +53,9 @@ from config import (
     CAMERA_WIDTH_PX,
     REAL_CAMERA_FPS,
     RPI_CAMERA_NUM,
+    VISION_CROP_HEIGHT_PX,
     VISION_HEIGHT_PX,
+    VISION_WIDTH_PX,
     VISION_RECORDING_BITRATE,
     VISION_RECORDING_DIR,
     VISION_RECORDING_WIDTH_PX,
@@ -330,7 +332,7 @@ def main() -> int:
         logger=logger,
         orientation=str(cam_cfg.get("orientation", CAMERA_ORIENTATION)),
     )
-    camera = VisionCropCamera(camera, VISION_HEIGHT_PX)
+    camera = VisionCropCamera(camera, VISION_CROP_HEIGHT_PX)
     detector = TargetDetector()
 
     # ── Kayıt hedefi: recordings/vision_<timestamp>.mp4 ─────────────────────
@@ -338,15 +340,16 @@ def main() -> int:
     writer, fourcc = open_writer(
         out_path,
         VISION_RECORDING_WIDTH_PX,
-        int(round(VISION_HEIGHT_PX * VISION_RECORDING_WIDTH_PX / CAMERA_WIDTH_PX)),
+        int(round(VISION_HEIGHT_PX * VISION_RECORDING_WIDTH_PX / VISION_WIDTH_PX)),
         REAL_CAMERA_FPS,
         logger=logger,
     )
 
     logger.info(
-        "Camera: %dx%d @ %d FPS | vision height: %d | "
+        "Camera: %dx%d @ %d FPS | vision: %dx%d | "
         "output: %s | bitrate hedef: %.1f Mbps | codec: %s",
-        CAMERA_WIDTH_PX, CAMERA_HEIGHT_PX, REAL_CAMERA_FPS, VISION_HEIGHT_PX,
+        CAMERA_WIDTH_PX, CAMERA_HEIGHT_PX, REAL_CAMERA_FPS,
+        VISION_WIDTH_PX, VISION_HEIGHT_PX,
         out_path, VISION_RECORDING_BITRATE / 1e6, fourcc,
     )
     logger.info("Recording active — tespit: MAVİ ALTIGEN + KIRMIZI ÜÇGEN.")

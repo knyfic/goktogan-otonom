@@ -27,7 +27,8 @@ KONFIG:
     video_stream.port / bitrate / fps / preset
   config.py (tek kaynak — main.py ile aynı):
     CAMERA_WIDTH_PX / CAMERA_HEIGHT_PX / REAL_CAMERA_FPS / RPI_CAMERA_NUM
-    VISION_HEIGHT_PX / PREVIEW_DISPLAY_WIDTH_PX
+    VISION_CROP_HEIGHT_PX / VISION_WIDTH_PX / VISION_HEIGHT_PX
+    / PREVIEW_DISPLAY_WIDTH_PX
 """
 from __future__ import annotations
 
@@ -46,7 +47,9 @@ from config import (
     PREVIEW_DISPLAY_WIDTH_PX,
     REAL_CAMERA_FPS,
     RPI_CAMERA_NUM,
+    VISION_CROP_HEIGHT_PX,
     VISION_HEIGHT_PX,
+    VISION_WIDTH_PX,
 )
 from services.video_streamer import VideoStreamer
 from utils.logging import setup_logging
@@ -186,7 +189,7 @@ def main() -> int:
         logger=logger,
         orientation=str(cam_cfg.get("orientation", CAMERA_ORIENTATION)),
     )
-    camera = VisionCropCamera(camera, VISION_HEIGHT_PX)
+    camera = VisionCropCamera(camera, VISION_CROP_HEIGHT_PX)
     detector = TargetDetector()
 
     # ── GStreamer yayını (tek amaç) ─────────────────────────────────────────
@@ -205,9 +208,10 @@ def main() -> int:
         return 2
 
     logger.info(
-        "Yayın hedefi udp://%s:%d | kamera %dx%d → vision %d satır | "
+        "Yayın hedefi udp://%s:%d | kamera %dx%d → vision %dx%d | "
         "tespit: MAVİ ALTIGEN + KIRMIZI ÜÇGEN | yayın genişliği %d px",
-        host, port, CAMERA_WIDTH_PX, CAMERA_HEIGHT_PX, VISION_HEIGHT_PX,
+        host, port, CAMERA_WIDTH_PX, CAMERA_HEIGHT_PX,
+        VISION_WIDTH_PX, VISION_HEIGHT_PX,
         PREVIEW_DISPLAY_WIDTH_PX,
     )
 

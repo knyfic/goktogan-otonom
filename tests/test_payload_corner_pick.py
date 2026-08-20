@@ -55,7 +55,7 @@ def test_low_alt_includes_corner_and_picks_highest_score():
     alt = PAYLOAD_CORNER_PICK_ALT_M - 0.2   # eşiğin altı (0.3m)
 
     corner_big = _candidate(sm, alt, cx=80.0, cy=90.0, area_factor=0.8, purity=0.90)
-    center_small = _candidate(sm, alt, cx=960.0, cy=352.0, area_factor=0.25, purity=0.50)
+    center_small = _candidate(sm, alt, cx=480.0, cy=176.0, area_factor=0.25, purity=0.50)
 
     result = sm._filter_payload_results([center_small, corner_big], alt)
 
@@ -68,7 +68,7 @@ def test_low_alt_picks_larger_area_when_purity_equal():
     alt = PAYLOAD_CORNER_PICK_ALT_M - 0.2
 
     corner_small = _candidate(sm, alt, cx=60.0, cy=70.0, area_factor=0.3, purity=0.8)
-    corner_large = _candidate(sm, alt, cx=1800.0, cy=1000.0, area_factor=0.9, purity=0.8)
+    corner_large = _candidate(sm, alt, cx=800.0, cy=280.0, area_factor=0.9, purity=0.8)
 
     result = sm._filter_payload_results([corner_small, corner_large], alt)
 
@@ -81,7 +81,7 @@ def test_above_low_alt_still_excludes_corner():
     alt = PAYLOAD_CORNER_PICK_ALT_M + 1.0   # 1.5m (verify bandı dışı)
 
     corner = _candidate(sm, alt, cx=80.0, cy=90.0, area_factor=0.8, purity=0.90)
-    center = _candidate(sm, alt, cx=960.0, cy=352.0, area_factor=0.8, purity=0.90)
+    center = _candidate(sm, alt, cx=480.0, cy=176.0, area_factor=0.8, purity=0.90)
 
     result = sm._filter_payload_results([corner, center], alt)
 

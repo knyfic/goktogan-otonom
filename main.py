@@ -27,7 +27,7 @@ from config import (
     PREVIEW_WINDOW_NAME,
     REAL_CAMERA_FPS,
     RPI_CAMERA_NUM,
-    VISION_HEIGHT_PX,
+    VISION_CROP_HEIGHT_PX,
 )
 from flight.navigation import Navigation
 from payload.payload_controller import PayloadController
@@ -237,9 +237,10 @@ def main():
 
         navigation = _build_navigation(mode, payload_cfg, logger)
         camera     = _build_camera(mode, payload_cfg, logger)
-        # Vision kırpma: payload mekanizmasının kapladığı alt bölge atılır.
-        # Kamera 1920x1080 üretmeye devam eder; pipeline 1920x704 görür.
-        camera     = VisionCropCamera(camera, VISION_HEIGHT_PX)
+        # Vision kırpma + yarı çözünürlük: payload mekanizmasının kapladığı alt
+        # bölge atılır, kalan içerik 2x küçültülür. Kamera 1920x1080 üretmeye
+        # devam eder; pipeline 960x352 görür (ölçek aynı — işleme ~4x ucuz).
+        camera     = VisionCropCamera(camera, VISION_CROP_HEIGHT_PX)
         backend    = _build_backend(mode, payload_cfg, logger)
         # Renk haritası: hangi renk payload hangi mıknatısta
         color_map  = payload_cfg.get("payload_color_map", {})
@@ -248,7 +249,7 @@ def main():
 
         # ── REAL: GStreamer video akışı (ground station'a) ─────────────────
         # StreamCamera, state machine'in kamera arayüzünü sarmalar:
-        #   show(frame) → streamer.push(frame)   (960x540 HUD frame)
+        #   show(frame) → streamer.push(frame)   (480x176 HUD frame)
         #   pump()      → no-op
         #   close_preview() → streamer.stop() + kamera kapanışı
         # GStreamer başlatılamazsa / çökerse görev ASLA durmaz (bağımsız servis).

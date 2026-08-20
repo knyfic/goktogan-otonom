@@ -34,22 +34,30 @@ class CameraLike(Protocol):
 
 class VisionCropCamera:
     """
-    Kameranın latest() çıktısını üst height_px satırına kırpar.
+    Kameranın latest() çıktısını üst crop_height_px satırına kırpar ve pipeline
+    için YARI çözünürlüğe küçültür (1920x704 → 960x352 — performans).
 
     Payload mekanizması kadrajın altını kapladığı için, görüntü işleme
-    pipeline'ına mekanizmayı hiç görmeyen 1920x704 bir frame gider.
-    Kamera 1920x1080 üretmeye devam eder; FOV/geometri değişmez.
+    pipeline'ına mekanizmayı hiç görmeyen 960x352 bir frame gider.
+    Kamera 1920x1080 üretmeye devam eder; FOV/geometri değişmez (içerik
+    birebir aynı — yalnızca piksel sayısı 1/4, işleme ~4x ucuzlar).
     """
 
-    def __init__(self, camera: CameraLike, height_px: int):
+    def __init__(self, camera: CameraLike, crop_height_px: int, downscale: float = 0.5):
         self._camera = camera
-        self._height_px = height_px
+        self._crop_height_px = crop_height_px
+        self._downscale = downscale
 
     def latest(self) -> Optional[np.ndarray]:
         frame = self._camera.latest()
         if frame is None:
             return None
-        return frame[: self._height_px, :]
+        frame = frame[: self._crop_height_px, :]
+        if self._downscale < 1.0:
+            nw = max(1, int(round(frame.shape[1] * self._downscale)))
+            nh = max(1, int(round(frame.shape[0] * self._downscale)))
+            frame = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
+        return frame
 
     def show(self, frame: np.ndarray) -> None:
         self._camera.show(frame)

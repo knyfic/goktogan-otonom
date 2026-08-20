@@ -44,8 +44,9 @@ _MIN_VERTEX_AGREEMENT = 2
 # Şekle özgü extent (alan/bbox_alan) bantları: üçgen ≈ 0.50, altıgen ≈ 0.75.
 _TRIANGLE_EXTENT = (0.35, 0.70)
 _HEXAGON_EXTENT = (0.55, 0.95)
-# area_score referansı (büyük hedef alanı)
-_AREA_REF_PX = 15000.0
+# area_score referansı (büyük hedef alanı) — yarı çözünürlükte alan 1/4'e
+# indiği için referans da 1/4'e ölçeklenir (aynı fiziksel hedef aynı skoru verir).
+_AREA_REF_PX = 3750.0
 
 # Görev hedefleri — yarışma kuralı: yalnızca MAVİ ALTIGEN ve KIRMIZI ÜÇGEN.
 # Bu ikisi dışındaki renk+şekil kombinasyonları (örn. BLUE+TRIANGLE) detector

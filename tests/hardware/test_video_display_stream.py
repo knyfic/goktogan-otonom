@@ -5,7 +5,7 @@ Gerçek Pi + Camera Module 3: display frame (vision + HUD) → GStreamer zinciri
 Mission'ın REAL mod akışını birebir izler:
 
   kamera (1920x1080)
-    → VisionCropCamera (1920x704 — payload mekanizması kırpılır)
+    → VisionCropCamera (960x352 — kırpma + yarı çözünürlük)
     → HUD/annotation (state_machine._draw_hud — mission ile AYNI çizim)
     → display frame (PREVIEW_DISPLAY_WIDTH_PX'e küçültülür — mission ile aynı)
     → StreamCamera.show(display) → VideoStreamer (GStreamer UDP/H.264)
@@ -161,7 +161,7 @@ def run_display_stream(
         PREVIEW_DISPLAY_WIDTH_PX,
         REAL_CAMERA_FPS,
         RPI_CAMERA_NUM,
-        VISION_HEIGHT_PX,
+        VISION_CROP_HEIGHT_PX,
     )
     from services.video_streamer import StreamCamera, VideoStreamer
     from vision.camera import VisionCropCamera
@@ -191,7 +191,7 @@ def run_display_stream(
         return False, {}
 
     # Mission'ın REAL kurulumuyla birebir aynı sarmalama zinciri
-    cropped = VisionCropCamera(cam, VISION_HEIGHT_PX)
+    cropped = VisionCropCamera(cam, VISION_CROP_HEIGHT_PX)
     streamer = _RecordingStreamer(
         VideoStreamer(host=host, port=port, bitrate=bitrate, fps=fps, logger=log)
     )
@@ -200,7 +200,7 @@ def run_display_stream(
 
     print(
         f"Display stream: {host}:{port}  display={PREVIEW_DISPLAY_WIDTH_PX}px genişlik "
-        f"(kamera {CAMERA_WIDTH_PX}x{CAMERA_HEIGHT_PX} → crop {VISION_HEIGHT_PX} → display) "
+        f"(kamera {CAMERA_WIDTH_PX}x{CAMERA_HEIGHT_PX} → vision 960x352 → display) "
         f"h264 {bitrate // 1000} kbps  fps-cap={fps}"
     )
 

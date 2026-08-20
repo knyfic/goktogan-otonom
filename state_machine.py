@@ -30,10 +30,10 @@ from config import (
     ALTITUDE_TOLERANCE_M,
     APPROACH_RADIUS_M,
     APPROACH_SPEED_MPS,
-    CAMERA_HEIGHT_PX,
     CAMERA_HORIZONTAL_FOV_DEG,
-    CAMERA_WIDTH_PX,
-    CAMERA_VERTICAL_FOV_DEG,
+    VISION_HEIGHT_PX,
+    VISION_WIDTH_PX,
+    VISION_VERTICAL_FOV_DEG,
     COMPETITION_CORNERS,
     ALIGNMENT_DESCENT_STEP_M,
     ALIGNED_FRAMES_REQUIRED,
@@ -123,11 +123,15 @@ class MissionStateMachine:
         self.camera = camera
         self.payload = payload
 
+        # Kamera modeli pipeline'ın GÖRDÜĞÜ frame'e göre kurulur: 1920x704'lük
+        # içerik 960x352'ye ölçeklendiği için model de VISION boyutlarını ve
+        # kırpılmış kadrajın dikey FOV'unu kullanır — m/piksel ve beklenen
+        # piksel boyutları bu sayede DEĞİŞMEZ (eskisiyle birebir eşdeğer).
         self.camera_model = CameraModel(
-            CAMERA_WIDTH_PX,
-            CAMERA_HEIGHT_PX,
+            VISION_WIDTH_PX,
+            VISION_HEIGHT_PX,
             CAMERA_HORIZONTAL_FOV_DEG,
-            CAMERA_VERTICAL_FOV_DEG,
+            VISION_VERTICAL_FOV_DEG,
         )
         self.target_detector = TargetDetector()
         self.payload_detector = PayloadDetector(self.camera_model)

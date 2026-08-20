@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-from config import PREVIEW_DISPLAY_WIDTH_PX, VISION_HEIGHT_PX
+from config import PREVIEW_DISPLAY_WIDTH_PX, VISION_HEIGHT_PX, VISION_WIDTH_PX
 from models import TargetColor
 from vision.target_detector import TargetDetector
 from vision_stream_only import (
@@ -20,7 +20,7 @@ from vision_stream_only import (
 )
 
 
-def _frame(w=1920, h=704):
+def _frame(w=VISION_WIDTH_PX, h=VISION_HEIGHT_PX):
     return np.zeros((h, w, 3), dtype=np.uint8)
 
 
@@ -36,7 +36,7 @@ def test_scale_for_display_reduces_width():
     frame = _frame()
     out = _scale_for_display(frame)
     assert out.shape[1] == PREVIEW_DISPLAY_WIDTH_PX
-    assert out.shape[0] == round(VISION_HEIGHT_PX * PREVIEW_DISPLAY_WIDTH_PX / 1920)
+    assert out.shape[0] == round(VISION_HEIGHT_PX * PREVIEW_DISPLAY_WIDTH_PX / VISION_WIDTH_PX)
 
 
 def test_process_frame_blank_no_detections():

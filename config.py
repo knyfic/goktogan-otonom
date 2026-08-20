@@ -1,3 +1,5 @@
+import math
+
 # Simulation/HIL MAVLink adresi (Ubuntu → Gazebo/SITL UDP).
 # REAL modda bu değer KULLANILMAZ — bağlantı payload/config.yaml →
 # flight_controller.connection'dan gelir (Cube Orange TELEM2 serial).
@@ -14,8 +16,8 @@ TAKEOFF_ALTITUDE = 11.5
 TARGET_APPROACH_ALTITUDE = 4.0
 
 # Yük bırakma: görüntü işleme ile HASSAS hizalanılan irtifa.
-# Kadraj kırpma sonrası (1920x704) görüş daraldığı için 1m gibi alçak irtifada
-# hizalama yapılamıyor → son hizalama 2.5m'de yapılır.
+# Kadraj kırpma + yarı çözünürlük sonrası (960x352) görüş daraldığı için
+# 1m gibi alçak irtifada hizalama yapılamıyor → son hizalama 2.5m'de yapılır.
 PAYLOAD_RELEASE_ALTITUDE = 3
 # Hizalama + offset düzeltmesi sonrası DİK iniş ile inilen ve yükün bırakıldığı irtifa
 PAYLOAD_DROP_ALTITUDE = 1.0
@@ -39,8 +41,10 @@ PAYLOAD_VERIFY_ALTITUDE = 1
 # Empirical pixel expectation for 1m altitude (measured in HIL tests).
 # Use these to prefer payload candidates when at PAYLOAD_VERIFY_ALTITUDE.
 # The user measured ~110..120 px width/height at 1m; use midpoint default 115px.
-PAYLOAD_EXPECTED_W_PX_AT_1M = 115.0
-PAYLOAD_EXPECTED_H_PX_AT_1M = 115.0
+# Vision YARI çözünürlükte (960x352) çalıştığı için aynı fiziksel ölçümün
+# piksel karşılığı da yarıya iner (~55..60 px → 57.5px).
+PAYLOAD_EXPECTED_W_PX_AT_1M = 57.5
+PAYLOAD_EXPECTED_H_PX_AT_1M = 57.5
 
 # Validation irtifa toleransı: bu bantın dışındaki frame'ler sayılmaz.
 # ALTITUDE_TOLERANCE_M (0.20m) yerine daha sıkı tutuyoruz.
@@ -85,7 +89,8 @@ PAYLOAD_CORNER_PICK_ALT_M = 0.5
 
 # Hizalama döngüsü: pickup esnasında piksel tolerans eşiği
 # Normal hizalamadan daha sıkı — yük çok küçük
-PAYLOAD_PIXEL_TOLERANCE_PX = 15.0
+# Yarı çözünürlükte aynı fiziksel tolerans için değer de yarıya iner.
+PAYLOAD_PIXEL_TOLERANCE_PX = 7.5
 
 # Her hizalama basamağında maksimum bekleme süresi (saniye).
 # Bu süre dolunca zorla bir basamak aşağı inilir — daha yakında daha iyi görülür.
@@ -185,15 +190,32 @@ CAMERA_ORIENTATION = 'NORMAL'
 RPI_CAMERA_NUM = 0            # CSI port (0 = CAM0)
 REAL_CAMERA_FPS    = 30
 
-# ── Vision kırpma (payload mekanizması) ─────────────────────────────────────
-# Görev mekanizması kameranın DİKEY kadrajının alt kısmını kaplıyor. Bu değer,
-# kadrajın ÜSTTEN itibaren kaç pikselinin vision pipeline'a verileceğidir:
-#   704 → vision 1920x704 kullanır (alt 376 px — mekanizma — yok sayılır),
-#   kamera yine 1920x1080 üretmeye devam eder (FOV/geometri değişmez).
-VISION_HEIGHT_PX = 704   # px — vision'a verilen frame yüksekliği (tek ayar)
+# ── Vision kırpma + YARI çözünürlük (payload mekanizması + performans) ───────
+# Görev mekanizması kameranın DİKEY kadrajının alt kısmını kaplıyor. Kamera
+# 1920x1080 üretmeye devam eder; kadrajın ÜSTTEN itibaren VISION_CROP_HEIGHT_PX
+# satırı kırpılır (alt kısım — mekanizma — yok sayılır; FOV/geometri değişmez).
+# Pipeline GÖRÜNTÜ İŞLEMEYİ YARI çözünürlükte yapar (1920x704 → 960x352 —
+# piksel sayısı 1/4, işleme ~4x ucuzlar; vision 11fps'te kalmak yerine rahatlar).
+# Ölçek (m/piksel) aynı kalır: içerik birebir korunur; yalnızca piksel boyutları
+# yarıya iner. Bu yüzden piksel cinsinden FİZİKSEL sabitler (toleranslar, alan
+# eşikleri, beklenen boyutlar) da aynı oranda ölçeklenir (aşağıdaki yorumlara bak).
+VISION_CROP_HEIGHT_PX = 704        # kameradan kırpılan satır sayısı (alt — mekanizma)
+VISION_DOWNSCALE       = 0.5       # pipeline frame küçültme oranı (2x → piksel 1/4)
+VISION_WIDTH_PX        = int(CAMERA_WIDTH_PX * VISION_DOWNSCALE)              # 960
+VISION_HEIGHT_PX       = int(VISION_CROP_HEIGHT_PX * VISION_DOWNSCALE)         # 352
+# Vision'ın GÖRDÜĞÜ kadrajın dikey FOV'u: sensörün yalnızca 704/1080'i görüldüğü
+# için m/piksel hesabında TAM sensör V-FOV'u değil, kırpılmış kadrajın V-FOV'u
+# kullanılır (VISION_WIDTH/HEIGHT_PX ile birlikte eski (1920,1080) modeline
+# birebir eşdeğer sonuç verir — ölçek gerçekten değişmez).
+VISION_VERTICAL_FOV_DEG = 2.0 * math.degrees(math.atan(
+    math.tan(math.radians(CAMERA_VERTICAL_FOV_DEG) / 2.0)
+    * VISION_CROP_HEIGHT_PX / CAMERA_HEIGHT_PX
+))
 
-MIN_TARGET_AREA_PX = 400.0
-MIN_PAYLOAD_AREA_PX = 40.0
+# Fiziksel boyut filtreleri (px²) — yarı çözünürlükte alan 1/4'e iner;
+# aynı fiziksel eşik için değerler de 1/4'e ölçeklenir.
+MIN_TARGET_AREA_PX = 100.0
+MIN_PAYLOAD_AREA_PX = 10.0
 DETECTION_HISTORY_SIZE = 5
 MIN_STABLE_DETECTIONS = 3
 MIN_DETECTION_CONFIDENCE = 0.60
@@ -229,7 +251,9 @@ ALTITUDE_TOLERANCE_M = 0.20
 # centroid jitter'ı yüzünden uzun süren ortalama üretiyor → 60px yeterli (hedef
 # 4m çap; bırakma hedefin içinde kalır). Payload alımı kendi sıkı toleransını
 # (PAYLOAD_PIXEL_TOLERANCE_PX) kullanmaya devam eder.
-PIXEL_ALIGNMENT_TOLERANCE_PX = 60.0
+# Yarı çözünürlükte aynı FİZİKSEL tolerans için değer yarıya iner (60 → 30px;
+# aksi halde aşağıdaki yorumda "jitter üretiyor" denilen rejime geri dönülürdü).
+PIXEL_ALIGNMENT_TOLERANCE_PX = 30.0
 
 # Hizalama komutu gönderme aralığı (saniye)
 # Her step'te değil, bu aralıkta bir goto_global gönderilir.
@@ -254,7 +278,9 @@ ALIGN_ALT_MODE_HI_M = 10.0
 #   1) Hata oranı: piksel hatası bu eşiğin ÜZERİNDEYSE kazanç tam ALIGN_GAIN'dir;
 #      altına indikçe kazanç (hata/eşik) oranında küçülür → hedefe yaklaştıkça
 #      adımlar otomatik küçülür.
-ALIGN_GAIN_FULL_ERROR_PX = 150.0
+#      Yarı çözünürlükte aynı FİZİKSEL hata piksel cinsinden yarıya iner;
+#      davranışın birebir aynı kalması için eşik de yarıya iner (150 → 75px).
+ALIGN_GAIN_FULL_ERROR_PX = 75.0
 #   2) İrtifa: bu irtifanın ALTINDA kazanç tam ALIGN_GAIN'dir; ÜSTÜNDE kazanç
 #      (ref_alt / irtifa) oranında küçülür — yüksek irtifada daha küçük adım.
 ALIGN_ALT_GAIN_REF_M = 3.0
@@ -268,7 +294,9 @@ ALIGN_MAX_STEP_M = 0.5
 # doygunluğa ulaşır. Böylece: büyük hata → ~0.4-0.5m, orta hata → ~0.25-0.35m,
 # küçük hata → gain zaten küçük adım ürettiği için sınırın altında kalır.
 ALIGN_MAX_STEP_LARGE_M = 1
-ALIGN_STEP_FULL_ERROR_PX = 250.0
+# Aynı gerekçeyle (yarı çözünürlük → yarı piksel hata) eşik de yarıya iner
+# (250 → 125px) — fiziksel adım davranışı değişmez.
+ALIGN_STEP_FULL_ERROR_PX = 125.0
 
 # "Hizalı" kararı için GEREKLİ ardışık frame sayısı (temporal confirmation).
 # Tek bir frame'de hedefin milisaniyelik merkeze denk gelmesi (jitter / tesadüfi
@@ -297,8 +325,8 @@ ENABLE_LIVE_PREVIEW = True
 PREVIEW_WINDOW_NAME = "İHA Kamera"
 
 # Canlı önizleme penceresi gösterim genişliği (piksel).
-# Görüntü işleme TAM çözünürlükte (1920×1080) yapılır; YALNIZCA pencere
-# gösterimi bu genişliğe küçültülür → imshow/HUD maliyeti ~4x azalır.
+# Görüntü işleme pipeline YARI çözünürlükte (960x352) yapılır; YALNIZCA pencere
+# gösterimi bu genişliğe küçültülür → imshow/HUD maliyeti ekstra ~4x azalır.
 PREVIEW_DISPLAY_WIDTH_PX = 480
 
 # ── Vision kayıt (vision_record_only.py — debug recorder, SD kart) ───────────
@@ -306,10 +334,10 @@ PREVIEW_DISPLAY_WIDTH_PX = 480
 VISION_RECORDING_DIR = "recordings"      # proje root'una göre (çalışma konumundan bağımsız)
 # Kayıt hedef kalitesi (bps) — canlı stream'den (2 Mbps) yüksek debug kaydı.
 # cv2.VideoWriter bitrate'i doğrudan ayarlamaz; gerçek çıktı dosya boyutundan
-# ölçülüp kayıt sonunda loglanır (1920x704 avc1 ile ölçülen tipik ~19 Mbps).
+# ölçülüp kayıt sonunda loglanır (960x352 avc1 ile ölçülen tipik ~5 Mbps).
 VISION_RECORDING_BITRATE = 10_000_000
-# Kayıt çözünürlüğü: tespit TAM çözünürlükte yapılır; yalnızca YAZILAN frame bu
-# genişliğe ölçeklenir (canlı yayın 480 px; debug kaydı için 960 px önerilir).
+# Kayıt çözünürlüğü: pipeline yarı çözünürlükte (960x352) çalışır; kayıt
+# genişliği de pipeline genişliğiyle aynıdır (960 → frame ölçeklenmez).
 VISION_RECORDING_WIDTH_PX = 960
 
 # RTL sırasında önizleme güncelleme hızı (Hz).

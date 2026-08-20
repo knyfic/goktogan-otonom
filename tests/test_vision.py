@@ -12,12 +12,9 @@ W, H = 1920, 1080
 
 def test_blue_hexagon_detection():
     img = np.zeros((H, W, 3), dtype=np.uint8)
-    # Hexagon: 1280×720'deki koordinatlar 1920×1080'e ölçeklenmiş
+    # Düzgün (eşkenar) altıgen: kenar 240px, 1920×1080'de ortalanmış
     pts = np.array(
-        [
-            [840, 375], [1080, 375], [1200, 540],
-            [1080, 705], [840, 705], [720, 540],
-        ],
+        [[720, 540], [840, 332], [1080, 332], [1200, 540], [1080, 748], [840, 748]],
         dtype=np.int32,
     )
     cv2.fillPoly(img, [pts], (255, 0, 0))

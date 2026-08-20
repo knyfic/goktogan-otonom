@@ -40,30 +40,34 @@ def _mk() -> np.ndarray:
 
 
 def _flat_hex(cx=960, cy=460, s=200) -> np.ndarray:
-    """Üstü düz altıgen (flat-top): yarı genişlik s, yarım yükseklik s*0.866."""
+    """Düzgün (eşkenar) flat-top altıgen: tüm kenarlar s."""
     return np.array(
         [
             [cx - s, cy],
-            [cx, cy - int(s * 0.866)],
+            [cx - s // 2, cy - int(s * 0.866)],
+            [cx + s // 2, cy - int(s * 0.866)],
             [cx + s, cy],
-            [cx + s, cy + int(s * 0.866)],
-            [cx, cy + 2 * int(s * 0.866)],
-            [cx - s, cy + int(s * 0.866)],
+            [cx + s // 2, cy + int(s * 0.866)],
+            [cx - s // 2, cy + int(s * 0.866)],
         ],
         dtype=np.int32,
     )
 
 
-def _pointy_hex(cx=960, cy=460, s=200) -> np.ndarray:
-    """Sivri uçlu altıgen (pointy-top): yarı genişlik s, yarım yükseklik s*0.866."""
+def _pointy_hex(cx=960, cy=420, s=200) -> np.ndarray:
+    """Düzgün (eşkenar) pointy-top altıgen: tüm kenarlar s (30° dönük).
+
+    Yükseklik 2s, genişlik √3·s (çevrel çember yarıçapı = kenar uzunluğu s).
+    """
+    h = int(s * 0.866)  # √3/2 · s
     return np.array(
         [
-            [cx - s, cy - int(s * 0.866)],
-            [cx, cy - 2 * int(s * 0.866)],
-            [cx + s, cy - int(s * 0.866)],
-            [cx + s, cy + int(s * 0.866)],
-            [cx, cy + 2 * int(s * 0.866)],
-            [cx - s, cy + int(s * 0.866)],
+            [cx, cy - s],
+            [cx + h, cy - s // 2],
+            [cx + h, cy + s // 2],
+            [cx, cy + s],
+            [cx - h, cy + s // 2],
+            [cx - h, cy - s // 2],
         ],
         dtype=np.int32,
     )

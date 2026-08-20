@@ -40,11 +40,12 @@ def _tri_pts(cx=480, top=20, base=280, half=150):
 
 
 def _hex_pts(cx=480, cy=240, s=120):
+    # Düzgün (eşkenar) flat-top altıgen: tüm kenarlar s.
     return np.array(
         [
-            [cx - s, cy], [cx, cy - int(s * 0.866)], [cx + s, cy],
-            [cx + s, cy + int(s * 0.866)], [cx, cy + 2 * int(s * 0.866)],
-            [cx - s, cy + int(s * 0.866)],
+            [cx - s, cy], [cx - s // 2, cy - int(s * 0.866)],
+            [cx + s // 2, cy - int(s * 0.866)], [cx + s, cy],
+            [cx + s // 2, cy + int(s * 0.866)], [cx - s // 2, cy + int(s * 0.866)],
         ],
         dtype=np.int32,
     )
@@ -183,14 +184,20 @@ def test_square_detector_scores_high_for_square():
 
 
 def test_square_detector_low_score_for_hexagon():
-    """Altıgen SquareDetector'dan DÜŞÜK skor alır (decoy skoru düşük kalmalı)."""
+    """Altıgen SquareDetector'dan DÜŞÜK skor alır (decoy skoru düşük kalmalı).
+
+    Sert açı/kenar kapısı (120° köşe vs 90° hedef) altıgeni analyze'de
+    reddedebilir → aday yoksa square_score 0'dır (en iyi durum); aday
+    üretilirse skoru kare eşiğinin çok altında kalmalıdır.
+    """
     from config import VISION_SQUARE
     from vision.shape_detector import SquareDetector
 
     sd = SquareDetector(VISION_VERTEX_EPSILONS, VISION_SHAPE_SCORING, VISION_SQUARE)
-    raw = sd.detect(_mask_from_polygon(_hex_pts()))[0]
-    cand = sd.classify(raw)
-    assert cand.shape_score < 0.85, "altıgen kare gibi skorlanmamalı"
+    cands = sd.detect(_mask_from_polygon(_hex_pts()))
+    if cands:
+        cand = sd.classify(cands[0])
+        assert cand.shape_score < 0.85, "altıgen kare gibi skorlanmamalı"
 
 
 def test_square_angle_score_high():

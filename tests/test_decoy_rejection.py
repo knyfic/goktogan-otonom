@@ -54,13 +54,14 @@ def _square(cx=960, cy=420, side=258, color=_BLUE, angle=0.0) -> np.ndarray:
 
 
 def _hexagon(cx=960, cy=420, s=258, color=_BLUE) -> np.ndarray:
+    """Düzgün (eşkenar) altıgen — tüm kenarlar s."""
     img = _mk()
     cv2.fillPoly(
         img,
         [np.array(
-            [[cx - s, cy], [cx, cy - int(s * 0.866)], [cx + s, cy],
-             [cx + s, cy + int(s * 0.866)], [cx, cy + 2 * int(s * 0.866)],
-             [cx - s, cy + int(s * 0.866)]],
+            [[cx - s, cy], [cx - s // 2, cy - int(s * 0.866)],
+             [cx + s // 2, cy - int(s * 0.866)], [cx + s, cy],
+             [cx + s // 2, cy + int(s * 0.866)], [cx - s // 2, cy + int(s * 0.866)]],
             dtype=np.int32,
         )],
         color,
@@ -177,9 +178,10 @@ def test_hexagon_with_blue_square_same_frame():
     cv2.fillPoly(
         img,
         [np.array(
-            [[680 - 180, 420], [680, 420 - int(180 * 0.866)], [680 + 180, 420],
-             [680 + 180, 420 + int(180 * 0.866)], [680, 420 + 2 * int(180 * 0.866)],
-             [680 - 180, 420 + int(180 * 0.866)]], dtype=np.int32)],
+            [[680 - 180, 420], [680 - 90, 420 - int(180 * 0.866)],
+             [680 + 90, 420 - int(180 * 0.866)], [680 + 180, 420],
+             [680 + 90, 420 + int(180 * 0.866)], [680 - 90, 420 + int(180 * 0.866)]],
+            dtype=np.int32)],
         _BLUE,
     )
     cv2.fillPoly(
@@ -192,6 +194,83 @@ def test_hexagon_with_blue_square_same_frame():
     dets = TargetDetector().detect(img)
     assert any(d.shape == "HEXAGON" for d in dets), "gerçek altıgen bulunmalı"
     assert not any(d.shape == "SQUARE" for d in dets), "decoy square üretilmemeli"
+
+
+# ── EŞKENAR OLMAYAN / YAMUK ŞEKİLLER — kullanıcı gereksinimi ────────────── #
+# Gerçek hedefler STANDART (eşkenar) üçgen ve DÜZGÜN altıgendir. 4 köşeli
+# yamuklar, eşkenar olmayan üçgenler ve düzgün olmayan 6-köşeli şekiller
+# ASLA hedef sayılmamalı (vertex + eşkenarlık + açı kapıları).
+
+
+def test_trapezoid_never_triangle():
+    """4 köşeli yamuk ASLA üçgen sayılmaz (sert köşe kapısı [3,3])."""
+    img = _mk()
+    cv2.fillPoly(
+        img, [np.array([[760, 300], [1160, 300], [1260, 480], [660, 480]])], _RED
+    )
+    assert TargetDetector().detect(img) == []
+
+
+@pytest.mark.parametrize("hgt", [200, 260, 300, 400])
+def test_isosceles_triangle_never_triangle(hgt):
+    """Eşkenar OLMAYAN (ikizkenar) üçgen ASLA üçgen sayılmaz.
+
+    Taban 600px sabit, yükseklik değişir; gerçek eşkenar yüksekliği ~520px.
+    Eşkenarlık (kenar eşitliği) + açı (60°) kapıları bu üçgenleri eler.
+    """
+    img = _mk()
+    cv2.fillPoly(
+        img,
+        [np.array([[960, 352 - hgt], [660, 352], [1260, 352]], dtype=np.int32)],
+        _RED,
+    )
+    assert TargetDetector().detect(img) == [], f"ikizkenar h={hgt} üçgen sayıldı!"
+
+
+def test_scalene_triangle_never_triangle():
+    """Dik üçgen (30-60-90) — kenarlar eşit değil, açılar 60°'den uzak → elenir."""
+    img = _mk()
+    cv2.fillPoly(
+        img,
+        [np.array([[600, 352], [1400, 352], [1400, 120]], dtype=np.int32)],
+        _RED,
+    )
+    assert TargetDetector().detect(img) == []
+
+
+def test_blue_trapezoid_never_hexagon():
+    """4 köşeli yamuk ASLA altıgen sayılmaz (köşe kapısı [5,7])."""
+    img = _mk()
+    cv2.fillPoly(
+        img, [np.array([[700, 320], [1220, 320], [1320, 480], [600, 480]])], _BLUE
+    )
+    assert TargetDetector().detect(img) == []
+
+
+def test_irregular_hexagon_rejected():
+    """6 köşeli ama DÜZGÜN olmayan şekil ASLA altıgen sayılmaz (eşkenarlık kapısı)."""
+    img = _mk()
+    cv2.fillPoly(
+        img,
+        [np.array(
+            [[830, 352], [900, 290], [1050, 300], [1100, 360],
+             [1000, 420], [880, 400]], dtype=np.int32)],
+        _BLUE,
+    )
+    assert TargetDetector().detect(img) == []
+
+
+def test_stretched_hexagon_rejected():
+    """Dikey uzatılmış (kenar eşitliği bozuk) altıgen benzeri → elenir."""
+    img = _mk()
+    cv2.fillPoly(
+        img,
+        [np.array(
+            [[840, 352], [920, 300], [1030, 290], [1100, 340],
+             [1060, 410], [930, 420]], dtype=np.int32)],
+        _BLUE,
+    )
+    assert TargetDetector().detect(img) == []
 
 
 # ── Modül seviyesi: decoy rejection kuralları ─────────────────────────────── #

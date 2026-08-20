@@ -233,9 +233,12 @@ VISION_TARGETS = {
         "hsv_ranges": [[0, 10, 60, 50], [160, 179, 60, 50]],
         "circularity_range": [0.52, 0.72],  # üçgen circ ≈ 0.60 (pikselleşmiş ölçüm 0.55); blur'da düşer/artar
         "solidity_min": 0.90,
-        "vertex_count_range": [3, 5],
+        "vertex_count_range": [3, 3],     # EŞKENAR üçgen 3 köşelidir; 4+ köşe (yamuk/kare) ASLA üçgen değil
         "max_extent": 0.85,          # üçgen extent ≈ 0.50 (blur'da ~0.60) — üstü elenir
         "angle_target_deg": 60.0,    # eşkenar üçgen iç açısı
+        "min_edge_equality": 0.80,   # EŞKENARLIK: kenar uzunlukları eşitliği (cv≤0.10). Gerçek eşkenar ≥0.90
+                                        # (blur/küçük boyutta 0.90-0.97); ikizkenar üçgen ≤0.74 → sert elenir
+        "max_angle_deviation_deg": 15.0,  # köşe açıları 60°'ye yakın olmalı (gerçek ≤7°; ikizkenar ≥21°)
         "area_tolerance": [0.60, 1.40],
     },
     "BLUE_HEXAGON": {
@@ -245,9 +248,12 @@ VISION_TARGETS = {
         "hsv_ranges": [[90, 130, 60, 50]],
         "circularity_range": [0.80, 0.92],
         "solidity_min": 0.90,
-        "vertex_count_range": [5, 7],   # 8+ köşe = eğri kontur (daire/elips) → sert elenir
+        "vertex_count_range": [5, 7],   # 8+ köşe = eğri kontur; 4- köşe = altıgen değil (sert)
         "max_extent": 0.92,          # altıgen extent ≈ 0.75-0.83; kare 1.0 → ELENİR
         "angle_target_deg": 120.0,   # düzgün altıgen iç açısı
+        "min_edge_equality": 0.72,   # EŞKENARLIK: 6 kenar eşitliği. Gerçek düzgün altıgen ≥0.85
+                                        # (blur/küçük boyutta 0.83-0.95, tilt 5° 0.87); bozuk 6-köşe ≤0.61 → elenir
+        "max_angle_deviation_deg": 15.0,  # köşe açıları 120°'ye yakın olmalı (gerçek ≤9°; bozuk şekil ≥20°)
         "area_tolerance": [0.60, 1.40],
     },
 }
@@ -282,8 +288,10 @@ VISION_SQUARE = {
     "vertex_score_map": {4: 1.0, 3: 0.5, 5: 0.2, 6: 0.0},  # kareye özgü köşe skoru
     "max_extent": 1.05,                  # kare extent ≈ 1.0 → skorlanabilmeli
     "minimum_score": 0.45,
+    "min_edge_equality": 0.50,           # kare 4 eşit kenar (dikdörtgen elensin)
     "angle_target_deg": 90.0,            # kare iç açısı
     "angle_tolerance_deg": 35.0,         # DAR — altıgenin 120° köşeleri uzak kalır
+    "max_angle_deviation_deg": 25.0,     # sert açı kapısı: 120°'lik altıgen köşeleri kare analyze'den geçemez
     "aspect_target": 1.0,
     "aspect_tolerance": 0.30,            # axis-aligned bbox aspect sapması
     "min_rect_aspect_tolerance": 0.35,   # minAreaRect aspect sapması (rotated kare sağlam)

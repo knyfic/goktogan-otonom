@@ -61,12 +61,12 @@ def _mk() -> np.ndarray:
 
 
 def _flat_hex(cx=700, cy=450, s=258) -> np.ndarray:
-    """Gerçek 2m altıgen: 11.5m'de kenar ≈ 129px @960 = 258px @1920."""
+    """Gerçek 2m DÜZGÜN altıgen: 11.5m'de kenar ≈ 129px @960 = 258px @1920."""
     return np.array(
         [
-            [cx - s, cy], [cx, cy - int(s * 0.866)], [cx + s, cy],
-            [cx + s, cy + int(s * 0.866)], [cx, cy + 2 * int(s * 0.866)],
-            [cx - s, cy + int(s * 0.866)],
+            [cx - s, cy], [cx - s // 2, cy - int(s * 0.866)],
+            [cx + s // 2, cy - int(s * 0.866)], [cx + s, cy],
+            [cx + s // 2, cy + int(s * 0.866)], [cx - s // 2, cy + int(s * 0.866)],
         ],
         dtype=np.int32,
     )

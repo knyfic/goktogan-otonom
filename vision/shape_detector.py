@@ -56,6 +56,7 @@ class ShapeCandidate:
     centroid_y: float
     corner_angles: Optional[list[float]] = None  # approxPolyDP iç açıları (derece)
     min_rect_aspect: float = 0.0       # minAreaRect w/h (≥1) — rotated şekillerde sağlam
+    edge_equality: float = 0.0         # [0,1] — kenar uzunluklarının eşitliği (eşkenarlık)
     shape: Optional[str] = None      # "TRIANGLE" | "HEXAGON" | "SQUARE" | None
     shape_score: float = 0.0         # [0,1] — config ağırlıklarıyla
 
@@ -91,6 +92,8 @@ class ShapeDetector:
         self._solidity_min = float(target_cfg["solidity_min"])
         self._max_extent = float(target_cfg["max_extent"])
         self._angle_target = float(target_cfg["angle_target_deg"])
+        self._min_edge_equality = float(target_cfg["min_edge_equality"])
+        self._max_angle_deviation = float(target_cfg["max_angle_deviation_deg"])
         v_lo, v_hi = target_cfg["vertex_count_range"]
         self._vert_lo, self._vert_hi = int(v_lo), int(v_hi)
 
@@ -140,9 +143,10 @@ class ShapeDetector:
             return None  # aşırı uzun/dar
 
         count, agreement, approx = self._count_vertices(contour, perimeter)
-        # Sert köşe üst sınırı: hedef aralığın üstündeki köşe sayısı eğri
-        # kontur demektir (daire/elips 8+ köşe üretir; altıgen blur'da bile ≤ 7).
-        if count > self._vert_hi:
+        # Sert köşe sınırları: hedef aralığın DIŞINDAKI köşe sayısı hedef şekil
+        # değildir (üçgen 3 köşe; 4 köşe = yamuk/kare → ASLA üçgen değil;
+        # altıgen 5-7; 4- = yamuk/kare).
+        if count < self._vert_lo or count > self._vert_hi:
             return None
 
         moments = cv2.moments(contour)
@@ -153,8 +157,23 @@ class ShapeDetector:
 
         # Köşe iç açıları (approxPolyDP — en tutarlı köşe setinden).
         corner_angles: list[float] = []
+        edge_equality = 0.0
         if approx is not None and len(approx) >= 3:
             corner_angles = _corner_angles(approx)
+            edge_equality = _edge_equality_score(approx)
+        # Eşkenarlık: kenar uzunlukları birbirine yeterince eşit olmalı
+        # (eşkenar üçgen / düzgün altıgen). Yamuk ve eşkenar olmayan üçgenler
+        # sert elenir — "hedef şekle yakın" olmak yetmez, DÜZGÜN olmalıdır.
+        if edge_equality < self._min_edge_equality:
+            return None
+
+        # Köşe açıları hedef açıya (60°/90°/120°) yeterince yakın olmalı —
+        # ikinci eşkenarlık kanıtı. Kenarları eşit ama açıları bozuk şekiller
+        # (uzamış altıgen vb.) bu kapıda elenir. Tolerans config'ten.
+        if corner_angles and self._max_angle_deviation > 0:
+            worst_dev = max(abs(a - self._angle_target) for a in corner_angles)
+            if worst_dev > self._max_angle_deviation:
+                return None
 
         # minAreaRect en-boy oranı — rotated (dönük) şekillerde axis-aligned
         # bbox'tan daha sağlamdır (kare her yönde ~1.0).
@@ -180,19 +199,26 @@ class ShapeDetector:
             centroid_x=cx, centroid_y=cy,
             corner_angles=corner_angles,
             min_rect_aspect=min_rect_aspect,
+            edge_equality=edge_equality,
         )
 
     def _count_vertices(
         self, contour: np.ndarray, perimeter: float
     ) -> tuple[int, int, Optional[np.ndarray]]:
-        """Çoklu epsilon ile köşe sayısı çoğunluk oyu + en tutarlı approx."""
+        """Çoklu epsilon ile köşe sayısı çoğunluk oyu + geometri approx'u.
+
+        Köşe sayısı (çoğunluk oyu) sınıflandırma için. Açı/kenar hesabı için
+        çoğunluk oyu KÖŞE SAYISINA EŞLEŞEN en küçük epsilonlu approx döner:
+        büyük şekillerde 0.02 kenarları en doğru verir; küçük şekillerde
+        (morphology köşe aşındırınca) 0.02 gürültü köşesi yakalayabilir —
+        o zaman 0.04/0.06'nın temiz köşe seti kullanılır.
+        """
         approxes = [
             cv2.approxPolyDP(contour, eps * perimeter, True)
             for eps in self._epsilons
         ]
         votes = [len(a) for a in approxes]
         count, agreement = Counter(votes).most_common(1)[0]
-        # Çoğunluk oyuna karşılık gelen ilk approx (açı hesabı için).
         approx = next((a for a in approxes if len(a) == count), approxes[0])
         return count, agreement, approx
 
@@ -358,3 +384,26 @@ def _corner_angles(approx: np.ndarray) -> list[float]:
         cos_a = float(np.clip((v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2), -1.0, 1.0))
         angles.append(math.degrees(math.acos(cos_a)))
     return angles
+
+
+def _edge_equality_score(approx: np.ndarray) -> float:
+    """Kenar uzunluklarının eşitliği (eşkenarlık) — [0,1].
+
+    Ardışık köşeler arası uzaklıkların varyasyon katsayısına (cv = std/mean)
+    dayanır: eşkenar üçgen / düzgün altıgen cv ≈ 0.02-0.06 → skor ~0.9;
+    yamuk / eşkenar olmayan üçgen cv ≈ 0.25+ → skor düşer.
+    """
+    n = len(approx)
+    if n < 3:
+        return 0.0
+    pts = approx.reshape(n, 2).astype(np.float64)
+    edges = [
+        math.hypot(*(pts[i] - pts[(i + 1) % n]))
+        for i in range(n)
+    ]
+    mean = sum(edges) / n
+    if mean <= 1e-6:
+        return 0.0
+    var = sum((e - mean) ** 2 for e in edges) / n
+    cv = math.sqrt(var) / mean
+    return max(0.0, 1.0 - cv / 0.5)

@@ -138,8 +138,11 @@ def test_shifted_tones_classify_to_correct_color():
         ("turuncu üçgen", (0, 165, 255), TargetColor.RED),
         ("pembe üçgen", (180, 80, 255), TargetColor.RED),
         ("koyu kırmızı üçgen", (0, 0, 80), TargetColor.RED),
+        ("sahadan pembe (H165 S184 V254)", (162, 71, 254), TargetColor.RED),
         ("buz mavisi altıgen", (200, 220, 120), TargetColor.BLUE),
         ("koyu mavi altıgen", (60, 0, 0), TargetColor.BLUE),
+        ("sahadan mavi (H98 S94 V226)", (226, 204, 143), TargetColor.BLUE),
+        ("sahadan mavi (H105 S219 V255)", (255, 145, 36), TargetColor.BLUE),
     ):
         shape = "TRIANGLE" if want == TargetColor.RED else "HEXAGON"
         dets = TargetDetector().detect(_img_with(tri_poly, bgr) if want == TargetColor.RED

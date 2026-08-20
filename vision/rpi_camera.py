@@ -22,6 +22,11 @@ Ubuntu üzerinde test ederken Picamera2 yoksa uyarı verip stub çalışır.
 
 STATE MACHINE ARRAYÜZÜ: latest / show / pump / close_preview
   GazeboCamera / RemoteRPiCamera ile aynı — görüntü işleme kodu değişmez.
+
+OTOMATİK ODAK (AF): IMX708 VCM lens destekler. libcamera varsayılanı
+  AfMode=Manual (lens sabit) olduğundan, açılışta AfMode=Continuous
+  (Normal menzil, Fast) açıkça set_controls() ile etkinleştirilir;
+  aksi halde kamera hiç netlemez.
 """
 from __future__ import annotations
 
@@ -178,20 +183,45 @@ class RPiCam3:
                     f"Son hata: {exc3}"
                 ) from exc3
 
-        # FPS kontrolü — RPi Cam 3 30 FPS 1080p rahat yapar
+        # ── FPS + OTOMATİK ODAK (AF) ────────────────────────────────────────
+        # NOT: Picamera2 config dict'ini (camera_configuration) elle değiştirmek
+        # kameraya UYGULANMAZ; doğru yol start() sonrası set_controls()'tür.
         assert self._picam is not None
+        self._picam.start()
+
+        # FPS sınırı — RPi Cam 3 30 FPS 1080p rahat yapar
         try:
-            picam_cf = self._picam.camera_configuration
-            if picam_cf is not None and "controls" in picam_cf:
-                picam_cf["controls"]["FrameDurationLimits"] = (
+            self._picam.set_controls({
+                "FrameDurationLimits": (
                     int(1e6 / max(self._fps, 1)), int(1e6 / max(self._fps, 1))
-                )
-        except Exception:
+                ),
+            })
+        except Exception as exc:
             self._log.debug(
-                "FrameDurationLimits kontrolleri yazılamadı — varsayılan FPS kullanılıyor."
+                "FrameDurationLimits ayarlanamadı — varsayılan FPS kullanılıyor: %s", exc
             )
 
-        self._picam.start()
+        # OTOMATİK ODAK — IMX708 (Cam Module 3) VCM lens destekler, ANCAK
+        # libcamera'da varsayılan AfMode "Manual"dır: lens SABİT konumda kalır ve
+        # kamera HİÇ netlemez (görüntü bulanık). Görev profili aşağı bakan kamera
+        # + 0.5-11.5m çalışma mesafesi olduğu için sürekli netleme (Continuous)
+        # uygundur.
+        try:
+            from picamera2.controls import Controls  # type: ignore
+            self._picam.set_controls({
+                "AfMode":   Controls.AfModeEnum.Continuous,
+                "AfRange":  Controls.AfRangeEnum.Normal,
+                "AfSpeed":  Controls.AfSpeedEnum.Fast,
+            })
+            self._log.info("[AF] Otomatik odak AÇIK: Continuous / Normal menzil / Fast.")
+        except Exception as exc:
+            self._log.warning(
+                "[AF] Ayarlanamadı (%s) — lens varsayılan (Manual) konumda kalabilir; "
+                "görüntü bulanık olur. Donanım kontrolü: `libcamera-hello "
+                "--autofocus-mode continuous` ile CLI'da AF çalışıyor mu bakın, "
+                "kablo (FFC) / konnektör sağlam mı doğrulayın.", exc
+            )
+
         self._log.info(
             "RPi Camera Module 3 açıldı (CAM%d) %dx%d@%d — Picamera2/libcamera "
             "fmt=%s  cvt=%s",

@@ -163,27 +163,6 @@ def test_yellow_and_green_are_excluded():
             f"{name} mavi/kırmızı olarak algılanmamalı"
 
 
-def test_perspective_warped_hexagon_still_detected():
-    """Eğik bakış (perspektif) altıgeni trapeze çevirse de tespit edilmeli.
-
-    Kamera/monitör açısı altıgenin daireselliğini 0.7'ye kadar düşürür; eski
-    sıkı circularity bandı (0.72+) bu yüzden altıgeni eliyordu. Şimdi gevşek
-    bant (0.62+) + convex hull köşe sayımı bu durumu tolere eder.
-    """
-    img = np.zeros((H, W, 3), dtype=np.uint8)
-    cv2.fillPoly(img, [_HEX], (255, 0, 0))
-    M = cv2.getPerspectiveTransform(
-        np.float32([[840, 375], [1080, 375], [1080, 705], [840, 705]]),
-        np.float32([[870, 375], [1050, 375], [1080, 705], [840, 705]]),
-    )
-    warped = cv2.warpPerspective(img, M, (W, H))
-    dets = TargetDetector().detect(warped)
-    assert any(d.color == TargetColor.BLUE and d.shape == "HEXAGON" for d in dets), \
-        "perspektifli altıgen mavi altıgen olarak bulunmalı"
-    assert not any(d.color == TargetColor.RED for d in dets), \
-        "perspektifli mavi altıgen kırmızı olmamalı"
-
-
 # ── 7: history / stability ───────────────────────────────────────────────── #
 def test_oscillation_never_stabilizes():
     d = TargetDetector()

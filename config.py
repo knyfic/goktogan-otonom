@@ -236,8 +236,8 @@ VISION_TARGETS = {
         "vertex_count_range": [3, 3],     # EŞKENAR üçgen 3 köşelidir; 4+ köşe (yamuk/kare) ASLA üçgen değil
         "max_extent": 0.85,          # üçgen extent ≈ 0.50 (blur'da ~0.60) — üstü elenir
         "angle_target_deg": 60.0,    # eşkenar üçgen iç açısı
-        "min_edge_equality": 0.80,   # EŞKENARLIK: kenar uzunlukları eşitliği (cv≤0.10). Gerçek eşkenar ≥0.90
-                                        # (blur/küçük boyutta 0.90-0.97); ikizkenar üçgen ≤0.74 → sert elenir
+        "min_edge_equality": 0.80,   # EŞKENARLIK: kenar uzunlukları eşitliği. Gerçek eşkenar ≥0.94
+                                        # (jagged/jitter'da 0.94-0.99); ikizkenar üçgen ≤0.74 → sert elenir
         "max_angle_deviation_deg": 15.0,  # köşe açıları 60°'ye yakın olmalı (gerçek ≤7°; ikizkenar ≥21°)
         "area_tolerance": [0.60, 1.40],
     },
@@ -251,9 +251,9 @@ VISION_TARGETS = {
         "vertex_count_range": [5, 7],   # 8+ köşe = eğri kontur; 4- köşe = altıgen değil (sert)
         "max_extent": 0.92,          # altıgen extent ≈ 0.75-0.83; kare 1.0 → ELENİR
         "angle_target_deg": 120.0,   # düzgün altıgen iç açısı
-        "min_edge_equality": 0.72,   # EŞKENARLIK: 6 kenar eşitliği. Gerçek düzgün altıgen ≥0.85
-                                        # (blur/küçük boyutta 0.83-0.95, tilt 5° 0.87); bozuk 6-köşe ≤0.61 → elenir
-        "max_angle_deviation_deg": 15.0,  # köşe açıları 120°'ye yakın olmalı (gerçek ≤9°; bozuk şekil ≥20°)
+        "min_edge_equality": 0.45,   # sanite tabanı: 6 kenar eşitliği. Asıl eşkenarlık kanıtı AÇI kapısıdır
+                                        # (gerçek jagged altıgen edgeEq 0.57'ye düşebilir; bozuk decoy ≥41° açı sapmasıyla elenir)
+        "max_angle_deviation_deg": 20.0,  # köşe açıları 120°'ye yakın olmalı (gerçek ≤17°; bozuk şekil ≥41°)
         "area_tolerance": [0.60, 1.40],
     },
 }
@@ -274,6 +274,8 @@ VISION_SHAPE_SCORING = {
     "vertex_weight": 0.25,
     "angle_weight": 0.30,
     "angle_tolerance_deg": 45.0,   # hedef açıdan sapma toleransı (açı skoru)
+    "collinear_merge_deg": 20.0,   # iç açısı > 180°−20° (=160°) olan köşeler doğrusal kabul edilir
+                                    # ve birleştirilir (blur/jagged maske gürültü köşeleri)
     "min_shape_score": 0.55,
 }
 

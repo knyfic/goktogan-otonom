@@ -15,6 +15,7 @@ Senaryolar:
 """
 import cv2
 import numpy as np
+import pytest
 
 from config import TARGET_DETECTOR_AUTO_SWAP
 from models import Detection, TargetColor
@@ -179,3 +180,103 @@ def test_purity_is_reported_in_detection():
     """Kabul edilen tespitlerde color_purity alanı doldurulmalı."""
     dets = TargetDetector().detect(_blue_hex_img())
     assert dets and dets[0].color_purity >= 0.5
+
+
+# ── 9: Jagged maske (saha koşulu) sağlamlığı ─────────────────────────────── #
+# Gerçek kamera maskeleri testere dişi (jagged) kontur üretir: piksel kayması
+# circularity'yi çökertebilir ve approxPolyDP köşe sayısını bozabilir.
+# Geometri temizlenmiş (birleştirilmiş) poligondan hesaplandığı için ±1-2px
+# kontur bozukluğu hedef tespitini öldürmemeli.
+
+def _jitter_mask(mask: np.ndarray, jit: int, seed: int) -> np.ndarray:
+    """Maske piksellerini ±jit kadar kaydırarak jagged kontur üretir."""
+    rng = np.random.default_rng(seed)
+    out = np.zeros_like(mask)
+    ys, xs = np.nonzero(mask)
+    if len(xs) == 0:
+        return out
+    dx = rng.integers(-jit, jit + 1, len(xs))
+    dy = rng.integers(-jit, jit + 1, len(ys))
+    out[np.clip(ys + dy, 0, mask.shape[0] - 1),
+        np.clip(xs + dx, 0, mask.shape[1] - 1)] = 255
+    return out
+
+
+def _jittered_mask_through_shape_detector(img: np.ndarray, color: str, jit: int, seed: int) -> list:
+    """Maske seviyesinde jagged kontur üretip shape katmanını test eder.
+
+    TargetDetector.frame alır; kontur bozukluğunu doğrudan maske üzerinde
+    simüle etmek için shape katmanı + renk maskesi birlikte kullanılır
+    (pipeline'ın shape katmanının birebir aynısı). Giriş frame'i kamera
+    katmanının ürettiği gibi 1920×704 varsayılır.
+    """
+    from config import (
+        VISION_MORPHOLOGY,
+        VISION_SHAPE_SCORING,
+        VISION_TARGETS,
+        VISION_VERTEX_EPSILONS,
+    )
+    from vision.color_mask import ColorMask
+    from vision.shape_detector import ShapeDetector
+
+    tgt = VISION_TARGETS[color]
+    work = cv2.resize(img, (960, 352), interpolation=cv2.INTER_AREA)
+    hsv = cv2.cvtColor(work, cv2.COLOR_BGR2HSV)
+    mask = ColorMask(tgt["hsv_ranges"], VISION_MORPHOLOGY).apply(hsv)
+    mask = _jitter_mask(mask, jit, seed)
+    shape = ShapeDetector(
+        VISION_VERTEX_EPSILONS, VISION_SHAPE_SCORING, tgt,
+        shape_name="TRIANGLE" if color == "RED_TRIANGLE" else "HEXAGON",
+    )
+    return shape.detect(mask)
+
+
+# Gerçek boyut hedefler (11.5m'de): üçgen kenar ≈128px, altıgen kenar ≈258px @1920.
+_JIT_TRI = np.array([[960, 130], [832, 352], [1088, 352]], dtype=np.int32)  # eşkenar (taban 256)
+_JIT_HEX = np.array(
+    [[720, 352], [840, 144], [1080, 144], [1200, 352], [1080, 560], [840, 560]],
+    dtype=np.int32,
+)  # düzgün altıgen (kenar 240)
+
+
+def _jitter_red_tri_img() -> np.ndarray:
+    img = np.zeros((704, 1920, 3), dtype=np.uint8)
+    cv2.fillPoly(img, [_JIT_TRI], (0, 0, 255))
+    return img
+
+
+def _jitter_blue_hex_img() -> np.ndarray:
+    img = np.zeros((704, 1920, 3), dtype=np.uint8)
+    cv2.fillPoly(img, [_JIT_HEX], (255, 0, 0))
+    return img
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_jittered_real_triangle_still_detected(seed):
+    """Gerçek boyut eşkenar üçgen, jagged maske altında kaybolmamalı."""
+    cands = _jittered_mask_through_shape_detector(
+        _jitter_red_tri_img(), "RED_TRIANGLE", jit=2, seed=seed
+    )
+    assert cands, f"jagged üçgen tespit edilemedi (seed={seed})"
+    assert cands[0].vertex_count == 3
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_jittered_real_hexagon_still_detected(seed):
+    """Gerçek boyut düzgün altıgen, jagged maske altında kaybolmamalı."""
+    cands = _jittered_mask_through_shape_detector(
+        _jitter_blue_hex_img(), "BLUE_HEXAGON", jit=2, seed=seed
+    )
+    assert cands, f"jagged altıgen tespit edilemedi (seed={seed})"
+    assert 5 <= cands[0].vertex_count <= 7
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_jittered_square_still_rejected(seed):
+    """Jagged kare decoy hâlâ hedef sayılmamalı (vertex/açı kapıları)."""
+    img = np.zeros((704, 1920, 3), dtype=np.uint8)
+    cv2.rectangle(img, (850, 240), (1070, 460), (255, 0, 0), -1)  # mavi kare
+    cands = _jittered_mask_through_shape_detector(
+        img, "BLUE_HEXAGON", jit=2, seed=seed
+    )
+    assert not any(c.shape == "HEXAGON" for c in cands), f"jagged kare kaçtı (seed={seed})"

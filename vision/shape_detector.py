@@ -19,7 +19,6 @@ Sert elenme kuralları (yanlış pozitif kontrolü — config'ten):
 from __future__ import annotations
 
 import math
-from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -29,10 +28,6 @@ import numpy as np
 # Matematiksel sabitler — algoritmanın geometrik tanımının parçası.
 _PI = math.pi
 _SQRT3 = math.sqrt(3.0)
-
-# Köşe sayısı çoğunluk oyunda eşik: 3 farklı epsilon'dan en az 2'si aynı
-# köşe sayısını vermeli (daire/elips gibi eğri konturlar dağılır).
-_VERTEX_AGREEMENT_MIN = 2
 
 
 @dataclass
@@ -86,6 +81,7 @@ class ShapeDetector:
         self._w_vert = float(scoring_cfg["vertex_weight"])
         self._w_angle = float(scoring_cfg["angle_weight"])
         self._angle_tolerance = float(scoring_cfg["angle_tolerance_deg"])
+        self._merge_angle_deg = float(scoring_cfg["collinear_merge_deg"])
         self._min_shape_score = float(scoring_cfg["min_shape_score"])
 
         self._circ_lo, self._circ_hi = (float(v) for v in target_cfg["circularity_range"])
@@ -120,17 +116,6 @@ class ShapeDetector:
         perimeter = cv2.arcLength(contour, True)
         if perimeter < 5.0:
             return None
-        circularity = 4.0 * _PI * area / (perimeter * perimeter)
-        if circularity > self._circ_hard_max:
-            return None  # daire/elips hedef şekle uymaz
-
-        hull = cv2.convexHull(contour)
-        hull_area = cv2.contourArea(hull)
-        if hull_area <= 0:
-            return None
-        solidity = float(area) / hull_area
-        if solidity < self._solidity_min:
-            return None  # güçlü iç bükeylik: düzensiz blob
 
         x, y, w, h = cv2.boundingRect(contour)
         if w <= 2 or h <= 2 or w * h == 0:
@@ -142,25 +127,29 @@ class ShapeDetector:
         if aspect > 3.0:
             return None  # aşırı uzun/dar
 
-        count, agreement, approx = self._count_vertices(contour, perimeter)
-        # Sert köşe sınırları: hedef aralığın DIŞINDAKI köşe sayısı hedef şekil
-        # değildir (üçgen 3 köşe; 4 köşe = yamuk/kare → ASLA üçgen değil;
-        # altıgen 5-7; 4- = yamuk/kare).
-        if count < self._vert_lo or count > self._vert_hi:
+        count, raw_count, poly, corner_angles = self._best_polygon(contour, perimeter)
+        if poly is None:
+            return None  # hiçbir epsilon hedef köşe aralığına uymadı
+        # Geometri TEMİZLENMİŞ poligondan hesaplanır — ham kontur jagged
+        # (testere dişi) olduğunda circularity/perimeter çöker; poligon düz
+        # kenarlarla "ideal şekil" ölçüsü verir.
+        poly_area = cv2.contourArea(poly)
+        poly_per = cv2.arcLength(poly, True)
+        if poly_area <= 0 or poly_per < 5.0:
             return None
+        circularity = 4.0 * _PI * poly_area / (poly_per * poly_per)
+        if circularity > self._circ_hard_max:
+            return None  # daire/elips hedef şekle uymaz
 
-        moments = cv2.moments(contour)
-        if moments["m00"] == 0:
-            return None
-        cx = moments["m10"] / moments["m00"]
-        cy = moments["m01"] / moments["m00"]
+        # Solidity: içbükeylik ölçüsü (poligon vs hull) — jaggedness DEĞİL.
+        hull_poly = cv2.convexHull(poly)
+        hull_poly_area = cv2.contourArea(hull_poly)
+        solidity = float(poly_area) / hull_poly_area if hull_poly_area > 0 else 0.0
+        if solidity < self._solidity_min:
+            return None  # güçlü iç bükeylik: düzensiz blob
 
-        # Köşe iç açıları (approxPolyDP — en tutarlı köşe setinden).
-        corner_angles: list[float] = []
-        edge_equality = 0.0
-        if approx is not None and len(approx) >= 3:
-            corner_angles = _corner_angles(approx)
-            edge_equality = _edge_equality_score(approx)
+        # Köşe iç açıları + kenar eşitliği (temizlenmiş poligondan).
+        edge_equality = _edge_equality_score(poly)
         # Eşkenarlık: kenar uzunlukları birbirine yeterince eşit olmalı
         # (eşkenar üçgen / düzgün altıgen). Yamuk ve eşkenar olmayan üçgenler
         # sert elenir — "hedef şekle yakın" olmak yetmez, DÜZGÜN olmalıdır.
@@ -174,6 +163,12 @@ class ShapeDetector:
             worst_dev = max(abs(a - self._angle_target) for a in corner_angles)
             if worst_dev > self._max_angle_deviation:
                 return None
+
+        moments = cv2.moments(contour)
+        if moments["m00"] == 0:
+            return None
+        cx = moments["m10"] / moments["m00"]
+        cy = moments["m01"] / moments["m00"]
 
         # minAreaRect en-boy oranı — rotated (dönük) şekillerde axis-aligned
         # bbox'tan daha sağlamdır (kare her yönde ~1.0).
@@ -192,7 +187,7 @@ class ShapeDetector:
             circularity=circularity,
             solidity=solidity,
             vertex_count=count,
-            vertex_agreement=agreement,
+            vertex_agreement=raw_count,
             bbox_x=x, bbox_y=y, bbox_w=w, bbox_h=h,
             extent=extent,
             aspect_ratio=aspect,
@@ -202,25 +197,47 @@ class ShapeDetector:
             edge_equality=edge_equality,
         )
 
-    def _count_vertices(
+    def _best_polygon(
         self, contour: np.ndarray, perimeter: float
-    ) -> tuple[int, int, Optional[np.ndarray]]:
-        """Çoklu epsilon ile köşe sayısı çoğunluk oyu + geometri approx'u.
+    ) -> tuple[int, int, Optional[np.ndarray], list[float]]:
+        """Hedefe en uygun temizlenmiş poligonu seçer.
 
-        Köşe sayısı (çoğunluk oyu) sınıflandırma için. Açı/kenar hesabı için
-        çoğunluk oyu KÖŞE SAYISINA EŞLEŞEN en küçük epsilonlu approx döner:
-        büyük şekillerde 0.02 kenarları en doğru verir; küçük şekillerde
-        (morphology köşe aşındırınca) 0.02 gürültü köşesi yakalayabilir —
-        o zaman 0.04/0.06'nın temiz köşe seti kullanılır.
+        Tüm epsilon'larda approxPolyDP + doğrusal köşe birleştirme yapılır;
+        hedef köşe aralığına uyan poligonlar arasından köşe açıları hedef
+        açıya (60°/90°/120°) EN İYİ uyan seçilir.
+
+        Neden tek epsilon değil?
+          - Küçük gerçek üçgen: eps 0.02 morpholojinin yuvarlattığı tepeyi
+            2 köşeye böler (4 köşe çıkar); 0.04/0.06 temiz 3 köşe verir.
+          - Jagged (jitter'lı) altıgen: eps 0.04/0.06 komşu köşeleri aşırı
+            birleştirip 4 köşeye düşürür; 0.02 doğru 6 köşeyi verir.
+        Hangisinin doğru olduğunu köşe sayısı TEK BAŞINA söyleyemez; açı
+        uyumu (eşkenar hedef için tüm açılar hedef açıya yakın) karar verir.
+
+        Dönen: (köşe sayısı, ham approx köşe sayısı, poligon, iç açılar).
+        Poligon yoksa (None, ...) → aday elenir.
         """
-        approxes = [
-            cv2.approxPolyDP(contour, eps * perimeter, True)
-            for eps in self._epsilons
-        ]
-        votes = [len(a) for a in approxes]
-        count, agreement = Counter(votes).most_common(1)[0]
-        approx = next((a for a in approxes if len(a) == count), approxes[0])
-        return count, agreement, approx
+        best_count = 0
+        best_raw = 0
+        best_poly: Optional[np.ndarray] = None
+        best_angles: list[float] = []
+        best_dev = float("inf")
+        for eps in self._epsilons:
+            approx = cv2.approxPolyDP(contour, eps * perimeter, True)
+            raw_count = len(approx)
+            poly = _merge_collinear(approx, self._merge_angle_deg)
+            count = len(poly)
+            if count < self._vert_lo or count > self._vert_hi:
+                continue
+            angles = _corner_angles(poly)
+            dev = max(abs(a - self._angle_target) for a in angles)
+            if dev < best_dev:
+                best_dev = dev
+                best_count = count
+                best_raw = raw_count
+                best_poly = poly
+                best_angles = angles
+        return best_count, best_raw, best_poly, best_angles
 
     def classify(self, cand: ShapeCandidate) -> ShapeCandidate:
         """Adaya şekil + skor atar; skor eşiğin altındaysa shape=None kalır.
@@ -407,3 +424,36 @@ def _edge_equality_score(approx: np.ndarray) -> float:
     var = sum((e - mean) ** 2 for e in edges) / n
     cv = math.sqrt(var) / mean
     return max(0.0, 1.0 - cv / 0.5)
+
+
+def _merge_collinear(approx: np.ndarray, merge_deg: float) -> np.ndarray:
+    """İç açısı 180°'ye çok yakın (≈ doğrusal) köşeleri birleştirir.
+
+    Blur/jagged maskelerde kenar üzerinde oluşan gürültü köşelerini temizler:
+    gerçek köşeler (üçgen 60°, kare 90°, altıgen 120°) korunur, kenar
+    üzerindeki ~175°'lik sahte köşeler atılır. `merge_deg`: 180°'den sapma
+    toleransı (örn. 20° → açısı > 160° olan köşe doğrusal sayılır).
+    """
+    n = len(approx)
+    if n < 3:
+        return approx
+    pts = approx.reshape(n, 2).astype(np.float64)
+    threshold = 180.0 - merge_deg
+    keep = []
+    for i in range(n):
+        p_prev = pts[(i - 1) % n]
+        p_cur = pts[i]
+        p_next = pts[(i + 1) % n]
+        v1 = p_prev - p_cur
+        v2 = p_next - p_cur
+        n1 = math.hypot(v1[0], v1[1])
+        n2 = math.hypot(v2[0], v2[1])
+        if n1 < 1e-6 or n2 < 1e-6:
+            continue  # çift köşe → birleştir
+        cos_a = float(np.clip((v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2), -1.0, 1.0))
+        angle = math.degrees(math.acos(cos_a))
+        if angle <= threshold:
+            keep.append(i)
+    if len(keep) < 3:
+        return approx  # güvenli geri dönüş: aşırı agresif birleştirme olmaz
+    return approx[keep].reshape(-1, 1, 2).astype(np.int32)

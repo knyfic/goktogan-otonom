@@ -96,3 +96,9 @@ arducopterin parametrelerini değiştiren veya aşan kodlar bulunabilri bunlar t
 
 fps yazılacak
 kamera kaydı gerceye yakın alınacak
+
+Kamera H olarak 14.9m~ bir alanı gorebiliyor
+3 ayrı line boyunca boustrophedon searching yapması. bitirdiginde ve hale bir sey tespit edemedigi durumda ise tekrar aynı boustrophedon linenindan geri donmelidir.
+
+Eger ucgeni ararken altıgeni tespit ederse o tespiti yaptıgı konumu kaydetmeli. 2. hedef bırakma esnasında ise o kaydedilen konuma geri donup (belirli bir hata payı ile daha gerisinde baslayarak) orada ki boustrophedon search algortimasıan devam etmelidir. (irtifa bu sefer 11.5 olacak)
+ucgeni ise 10m irtifada arayacaktır

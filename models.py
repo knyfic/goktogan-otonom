@@ -57,6 +57,9 @@ class Detection:
     bbox_height_px: float
     confidence: float
     color_purity: float = 0.0  # kontur içi baskın renk oranı (0..1)
+    temporal_score: float = 0.0  # temporal doğrulama skoru (0..1; 0 = doğrulanmadı)
+    world_lat: Optional[float] = None  # geo projection sonucu (None = yok)
+    world_lon: Optional[float] = None
 
 
 @dataclass

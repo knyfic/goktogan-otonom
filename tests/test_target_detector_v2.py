@@ -224,56 +224,9 @@ def test_frame_to_frame_small_motion():
         ), f"dx={dx} frame'inde üçgen kayboldu"
 
 
-# ── 15: kısa süreli detection kaybı (temporal recovery) ──────────────────── #
-
-def _fake_det(color, shape, cx, cy, w, h, conf) -> Detection:
-    return Detection(
-        color=color, shape=shape, center_x=cx, center_y=cy,
-        area_px=w * h, bbox_width_px=w, bbox_height_px=h,
-        confidence=conf, color_purity=0.9,
-    )
-
-
-def test_temporal_recovery_accepts_weak_matching_candidate():
-    """Zayıf aday, son frame'lerdeki güçlü eşleşmeyle kabul edilir."""
-    d = TargetDetector()
-    d._track.append(
-        {"color": TargetColor.RED, "shape": "TRIANGLE", "cx": 960.0, "cy": 460.0,
-         "w": 200.0, "h": 150.0, "confidence": 0.90}
-    )
-    weak = _fake_det(TargetColor.RED, "TRIANGLE", 970.0, 455.0, 190.0, 140.0, 0.50)
-    recovered = d._recover_weak([weak])
-    assert len(recovered) == 1
-    assert recovered[0].confidence >= MIN_DETECTION_CONFIDENCE
-
-
-def test_temporal_recovery_rejects_unmatched_weak_candidate():
-    """Track'te eşleşme yoksa zayıf aday atılır (false positive kontrolü)."""
-    d = TargetDetector()
-    d._track.append(
-        {"color": TargetColor.BLUE, "shape": "HEXAGON", "cx": 960.0, "cy": 460.0,
-         "w": 200.0, "h": 150.0, "confidence": 0.90}
-    )
-    weak = _fake_det(TargetColor.RED, "TRIANGLE", 970.0, 455.0, 190.0, 140.0, 0.50)
-    assert d._recover_weak([weak]) == []
-
-
-def test_temporal_recovery_requires_track_history():
-    """Track boşken (ilk görülen zayıf aday) asla kabul edilmez."""
-    d = TargetDetector()
-    weak = _fake_det(TargetColor.RED, "TRIANGLE", 960.0, 460.0, 200.0, 150.0, 0.50)
-    assert d._recover_weak([weak]) == []
-
-
-def test_reset_time_lock_clears_temporal_track():
-    """Yeni hedef araması: eski hedefin temporal belleği temizlenir."""
-    d = TargetDetector()
-    d._track.append(
-        {"color": TargetColor.RED, "shape": "TRIANGLE", "cx": 960.0, "cy": 460.0,
-         "w": 200.0, "h": 150.0, "confidence": 0.90}
-    )
-    d.reset_time_lock()
-    assert len(d._track) == 0
+# ── 15: temporal doğrulama — TemporalValidator modülünde test edilir ────── #
+# (pipeline içi temporal DEFAULT KAPALI: state machine stable_detection zaten
+# temporal tutarlılık sağlar; VISION_TEMPORAL.enabled=True ile açılabilir.)
 
 
 # ── Ek: koordinat / çözünürlük doğrulaması ────────────────────────────────── #

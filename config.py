@@ -183,7 +183,10 @@ CAMERA_ORIENTATION = 'NORMAL'
 # payload/config.yaml → camera bölümü yalnızca donanım montajı içerir
 # (orientation, jpeg_quality) — burada tekrar tanımlanmaz.
 RPI_CAMERA_NUM = 0            # CSI port (0 = CAM0)
-REAL_CAMERA_FPS    = 30
+# Gerçek kamera FPS hedefi (IMX708 / Camera Module 3 — 1920x1080'de 10-bit mod
+# max ~56 FPS destekler, dolayısıyla 50 FPS güvenli ve desteklenen değerdir).
+# RPiCam3 bu değeri FrameDurationLimits = 20.000 µs/frame ile SABİTLER.
+REAL_CAMERA_FPS    = 50
 
 # ── Vision kırpma (payload mekanizması) ─────────────────────────────────────
 # Görev mekanizması kameranın DİKEY kadrajının alt kısmını kaplıyor. Bu değer,
@@ -203,6 +206,139 @@ MIN_DETECTION_CONFIDENCE = 0.60
 # Detection koordinatları her zaman ORİJİNAL frame çözünürlüğüne geri ölçeklenir;
 # state machine / align / meters_per_pixel hesabı (1920 bazlı) değişmez.
 VISION_DETECT_WIDTH_PX = 960
+
+# ── Görüntü işleme pipeline konfigürasyonu (sıfır magic number) ──────────────
+# Tüm eşikler, toleranslar, HSV değerleri, ağırlıklar ve sınırlar buradan gelir.
+# <...> olan değerler saha kalibrasyonuyla netleştirilecek başlangıç değerleridir.
+
+# Kamera geometrisi — GSD (Ground Sampling Distance). GSD irtifa ile doğrusal:
+#   GSD(h) = gsd_ref_m_per_px * (h / gsd_ref_altitude_m)
+# 11.5 m'de yatay görüş ≈ 14.93 m → GSD ≈ 0.01555 m/px (saha ölçümüyle doğrulandı).
+# NOT: eski 30 m / 960 px varsayımı KULLANILMAZ.
+VISION_CAMERA_GEOMETRY = {
+    "resolution": [960, 352],          # pipeline çalışma çözünürlüğü
+    "hfov_deg": 66.0,
+    "vfov_deg": 41.0,
+    "gsd_ref_m_per_px": 0.01555,
+    "gsd_ref_altitude_m": 11.5,
+}
+
+# Hedef tipleri — her hedef bağımsız yapılandırılır. HSV aralıkları
+# [H_lo, H_hi, S_min, V_min]; kırmızı için iki aralık (wrap-around) OR'lanır.
+VISION_TARGETS = {
+    "RED_TRIANGLE": {
+        "color": "RED",
+        "shape": "TRIANGLE",
+        "real_edge_m": 1.0,
+        "hsv_ranges": [[0, 10, 60, 50], [160, 179, 60, 50]],
+        "circularity_range": [0.52, 0.72],  # üçgen circ ≈ 0.60 (pikselleşmiş ölçüm 0.55); blur'da düşer/artar
+        "solidity_min": 0.90,
+        "vertex_count_range": [3, 5],
+        "max_extent": 0.85,          # üçgen extent ≈ 0.50 (blur'da ~0.60) — üstü elenir
+        "area_tolerance": [0.60, 1.40],
+    },
+    "BLUE_HEXAGON": {
+        "color": "BLUE",
+        "shape": "HEXAGON",
+        "real_edge_m": 2.0,
+        "hsv_ranges": [[90, 130, 60, 50]],
+        "circularity_range": [0.80, 0.92],
+        "solidity_min": 0.90,
+        "vertex_count_range": [5, 7],   # 8+ köşe = eğri kontur (daire/elips) → sert elenir
+        "max_extent": 0.92,          # altıgen extent ≈ 0.75-0.83; kare 1.0 → ELENİR
+        "area_tolerance": [0.60, 1.40],
+    },
+}
+
+# Morphology — renk maskesi temizliği (kernel tek boyut; elips kernel).
+VISION_MORPHOLOGY = {
+    "kernel_size": 5,
+    "open_iterations": 1,
+    "close_iterations": 1,
+}
+
+# Şekil skorlaması: circ + solidity + vertex ağırlıklı birleşim [0,1].
+# Hiçbir TEK özellik tek başına karar veremez.
+VISION_SHAPE_SCORING = {
+    "circularity_weight": 0.35,
+    "solidity_weight": 0.30,
+    "vertex_weight": 0.35,
+    "min_shape_score": 0.55,
+}
+
+# Final confidence bileşenleri (toplam 1.0 olacak şekilde kalibre edilir).
+#   confidence = w_shape·shape + w_color·color(purity) + w_size·size
+#   doğrulanan adaylara w_temporal eklenir (clamp 1.0).
+VISION_CONFIDENCE_WEIGHTS = {
+    "shape": 0.40,
+    "color": 0.25,
+    "size": 0.20,
+    "temporal": 0.15,
+}
+
+# Kontur içi renk saflığı (purity) — karışık blob / düşük doygunluk zemin
+# elenmesi. Baskın renk oranı + diğer renge 2.0x üstünlük şartı (yarı-yarıya
+# veya 40/60 karışık blob'lar baskın renk ÜRETEMEZ → elenir; gerçek hedefler
+# saf renklidir). Saha testiyle ayarlanabilir.
+VISION_COLOR_PURITY = {
+    "min_ratio": 0.50,
+    "dominance_ratio": 2.0,
+    "vivid_s_min": 60,
+    "vivid_v_min": 50,
+}
+
+# approxPolyDP epsilon oranları (çoğunluk oyu — köşe sayısı güvenilirliği).
+VISION_VERTEX_EPSILONS = [0.02, 0.04, 0.06]
+
+# Boyut filtresi — altitude bilinmiyorsa (state machine eski `detect(frame)`
+# çağrısı) mutlak eşikler kullanılır; altitude verilirse GSD tabanlı beklenen
+# alan + area_tolerance devreye girer.
+VISION_SIZE_FILTER = {
+    "min_area_px": 100.0,          # 960 ölçeğinde mutlak alt sınır (altitude yokken)
+    "max_blob_fraction": 0.75,     # kadrajın bu oranından büyük blob hedef değildir
+}
+
+# Frame kapısı — gyro (açısal hız) ile motion blur riskli frame'leri ele.
+# Gyro verisi yoksa pipeline ÇALIŞMAYA DEVAM eder (require_gyro_data=False).
+VISION_FRAME_GATE = {
+    "enabled": True,
+    "max_gyro_deg_s": 30.0,
+    "require_gyro_data": False,
+}
+
+# Piksel → zemin → dünya dönüşümü. Nadir görüş varsayımı: küçük pitch/roll
+# toleransı config'ten; aşılırsa projection geçersiz işaretlenir (confidence düşer).
+VISION_GEO_PROJECTION = {
+    "simplified_nadir_projection": True,
+    "max_pitch_deg": 5.0,
+    "max_roll_deg": 5.0,
+    "position_uncertainty_radius_m": 2.0,
+}
+
+# Temporal doğrulama — son N frame'deki adaylar dünya koordinatında tutarlı
+# olmalı. Dünya koordinatı yoksa piksel-uzay yarıçap fallback'i kullanılır.
+# DEFAULT KAPALI: state machine'in stable_detection() zaten temporal tutarlılık
+# sağlar (çift temporal = mevcut davranışı bozar). World-coordinate consistency
+# gerektiren saha testlerinde enabled=True yapılır.
+VISION_TEMPORAL = {
+    "enabled": False,
+    "window_size": 6,
+    "min_consistent_ratio": 0.60,
+    "min_consistent_frames": 3,   # en az bu kadar frame görülmeli (tek frame asla "kesin" değil)
+    "position_match_radius_m": 1.5,
+    "pixel_match_radius_px": 40.0,  # world koord yokken (960 ölçeğinde)
+}
+
+# Kabul edilebilir minimum işleme FPS'i — altına düşünce log uyarısı (engel değil).
+VISION_MIN_PROCESSING_FPS = 20.0
+
+# Kamera exposure — mode: "auto" = mevcut davranış (AeEnable otomatik).
+# "fixed" saha kalibrasyonuyla doldurulup RPiCam3'e uygulanabilir (şu an kullanılmaz).
+VISION_CAMERA_EXPOSURE = {
+    "mode": "auto",
+    "exposure_time_us": 5000,
+    "analogue_gain": 2.0,
+}
 
 # Detektör seviyesinde B↔R kanal takası (yalnızca acil durum ağı).
 # Varsayılan KAPALI: kanal takasının sahibi kamera katmanıdır

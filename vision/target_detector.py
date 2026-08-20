@@ -19,26 +19,30 @@ from models import Detection, TargetColor
 
 
 # ── HSV renk bantları — ışık değişimine toleranslı ──────────────────────────
-# Amaç: yalnızca "saf" kırmızı/mavi değil, ışık koşulu değişince aynı fiziksel
-# rengin HSV'de kaydığı tonlar da yakalansın (ör. sahadan ölçülen örnekler:
-# mavi H=98/S=94/V=226 ve H=105/S=219/V=255; pembe H=165/S=184/V=254):
-#   KIRMIZI  → turuncu (H≈10-28) ve pembe/macenta (H≈142-170) DAHİL;
-#              saf sarı (H≥30) bilinçli olarak DIŞARIDA (turuncu/sarı ayrımı).
-#   MAVİ     → buz/sky mavisi (H≈70-95) ve koyu/açık mavi DAHİL (düşük S/V).
+# Görev felsefesi: RENK TONU DEĞİL, ŞEKİL önceliklidir. Mavinin tonlarında
+# (açık mavi, buz mavisi, MOR/eflatun dahil) görünen ALTIGEN → BLUE hedef;
+# kırmızının tonlarında (turuncu, pembe, macenta dahil) görünen ÜÇGEN → RED
+# hedef kabul edilir. Işık/hava koşulu rengi HSV'de ne kadar kaydırırsa
+# kaydırsın ton bantlardan düşmesin:
+#   MAVİ     → H≈70-155 (cyan/buz mavisi + saf mavi + MOR/eflatun) — S/V alçak
+#   KIRMIZI  → H≈0-28 (kırmızı + turuncu) ve H≈156-179 (pembe/macenta + kırmızı)
+# Sınır bilinçli: saf sarı (H≥30) ve yeşil DIŞARIDA; mavi (≤155) ile kırmızı
+# (≥156) arasında ÇAKIŞMA YOK — çakışma olsaydı mor (H 142-155) her iki banda
+# girip purity'de elenirdi.
 # DİKKAT: Maske bantları ile _color_purity_from_contour içindeki purity
 # bantları BİREBİR aynı olmalı — aksi halde geniş maskeyle bulunan kontur dar
 # purity bandında reddedilir.
 _BLUE_MASK_LO   = np.array([70, 60, 50], dtype=np.uint8)
-_BLUE_MASK_HI   = np.array([141, 255, 255], dtype=np.uint8)
+_BLUE_MASK_HI   = np.array([155, 255, 255], dtype=np.uint8)
 _RED_LOW_LO     = np.array([0, 60, 50], dtype=np.uint8)     # kırmızı + turuncu
 _RED_LOW_HI     = np.array([28, 255, 255], dtype=np.uint8)
-_RED_HIGH_LO    = np.array([142, 60, 50], dtype=np.uint8)   # pembe/macenta + kırmızı
+_RED_HIGH_LO    = np.array([156, 60, 50], dtype=np.uint8)   # pembe/macenta + kırmızı
 _RED_HIGH_HI    = np.array([179, 255, 255], dtype=np.uint8)
 
 # Purity eşleştirme (hue) — maske ile aynı genişlik
-_BLUE_HUE_LO, _BLUE_HUE_HI = 70, 141
+_BLUE_HUE_LO, _BLUE_HUE_HI = 70, 155
 _RED_HUE_MAX = 28    # hue <= 28 (kırmızı + turuncu)
-_RED_HUE_MIN = 142   # hue >= 142 (pembe/macenta + kırmızı)
+_RED_HUE_MIN = 156   # hue >= 156 (pembe/macenta + kırmızı)
 # Purity "canlı piksel" eşiği (S/V) — maske ile aynı taban; karanlık/açık
 # koşullarda bile kontur içi renk oranı ölçülebilsin.
 _PURITY_SAT_MIN = 60

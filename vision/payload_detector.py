@@ -9,23 +9,22 @@ from vision.geometry import CameraModel, expected_payload_pixels
 
 
 # ── HSV renk bantları — ışık değişimine toleranslı ──────────────────────────
-# TargetDetector ile BİREBİR aynı mantık: ışık koşulu değişince aynı fiziksel
-# renk HSV'de kayabilir, bu yüzden bantlar geniş tutulur (sahadan ölçülen
-# örnekler: mavi H=98/S=94/V=226, H=105/S=219/V=255; pembe H=165/S=184/V=254):
-#   KIRMIZI  → turuncu (H≈10-28) ve pembe/macenta (H≈142-170) DAHİL
-#   MAVİ     → buz/sky mavisi (H≈70-95) ve koyu/açık mavi DAHİL (düşük S/V)
-# Maske ve purity bantları aynı olmalı (aşağıdaki _color_purity_from_contour).
+# TargetDetector ile BİREBİR aynı mantık (şekil öncelikli görev felsefesi):
+#   MAVİ     → H≈70-155 (açık/buz mavisi + MOR/eflatun dahil)
+#   KIRMIZI  → H≈0-28 (turuncu dahil) ve H≈156-179 (pembe/macenta dahil)
+# Mavi (≤155) ile kırmızı (≥156) ÇAKIŞMAZ — mor iki banda birden girip
+# purity'de elenmesin diye. Maske ve purity bantları aynı olmalı.
 _BLUE_MASK_LO = np.array([70, 60, 50], dtype=np.uint8)
-_BLUE_MASK_HI = np.array([141, 255, 255], dtype=np.uint8)
+_BLUE_MASK_HI = np.array([155, 255, 255], dtype=np.uint8)
 _RED_LOW_LO   = np.array([0, 60, 50], dtype=np.uint8)     # kırmızı + turuncu
 _RED_LOW_HI   = np.array([28, 255, 255], dtype=np.uint8)
-_RED_HIGH_LO  = np.array([142, 60, 50], dtype=np.uint8)   # pembe/macenta + kırmızı
+_RED_HIGH_LO  = np.array([156, 60, 50], dtype=np.uint8)   # pembe/macenta + kırmızı
 _RED_HIGH_HI  = np.array([179, 255, 255], dtype=np.uint8)
 
 # Purity eşleştirme (hue) + canlı piksel eşiği (S/V) — maske ile aynı
-_BLUE_HUE_LO, _BLUE_HUE_HI = 70, 141
+_BLUE_HUE_LO, _BLUE_HUE_HI = 70, 155
 _RED_HUE_MAX = 28    # hue <= 28 (kırmızı + turuncu)
-_RED_HUE_MIN = 142   # hue >= 142 (pembe/macenta + kırmızı)
+_RED_HUE_MIN = 156   # hue >= 156 (pembe/macenta + kırmızı)
 _PURITY_SAT_MIN = 60
 _PURITY_VAL_MIN = 50
 

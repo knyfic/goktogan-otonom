@@ -143,6 +143,8 @@ def test_shifted_tones_classify_to_correct_color():
         ("koyu mavi altıgen", (60, 0, 0), TargetColor.BLUE),
         ("sahadan mavi (H98 S94 V226)", (226, 204, 143), TargetColor.BLUE),
         ("sahadan mavi (H105 S219 V255)", (255, 145, 36), TargetColor.BLUE),
+        ("mor altıgen (H145 S150 V220)", (220, 91, 198), TargetColor.BLUE),
+        ("mor altıgen (H150 S150 V220)", (220, 91, 220), TargetColor.BLUE),
     ):
         shape = "TRIANGLE" if want == TargetColor.RED else "HEXAGON"
         dets = TargetDetector().detect(_img_with(tri_poly, bgr) if want == TargetColor.RED

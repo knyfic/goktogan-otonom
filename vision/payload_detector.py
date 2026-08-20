@@ -8,6 +8,27 @@ from models import TargetColor
 from vision.geometry import CameraModel, expected_payload_pixels
 
 
+# ── HSV renk bantları — ışık değişimine toleranslı ──────────────────────────
+# TargetDetector ile BİREBİR aynı mantık: ışık koşulu değişince aynı fiziksel
+# renk HSV'de kayabilir, bu yüzden bantlar geniş tutulur:
+#   KIRMIZI  → turuncu (H≈10-25) ve pembe/macenta (H≈145-170) DAHİL
+#   MAVİ     → buz/sky mavisi (H≈75-95) ve koyu/açık mavi DAHİL (düşük S/V)
+# Maske ve purity bantları aynı olmalı (aşağıdaki _color_purity_from_contour).
+_BLUE_MASK_LO = np.array([75, 60, 50], dtype=np.uint8)
+_BLUE_MASK_HI = np.array([140, 255, 255], dtype=np.uint8)
+_RED_LOW_LO   = np.array([0, 60, 50], dtype=np.uint8)     # kırmızı + turuncu
+_RED_LOW_HI   = np.array([25, 255, 255], dtype=np.uint8)
+_RED_HIGH_LO  = np.array([145, 60, 50], dtype=np.uint8)   # pembe/macenta + kırmızı
+_RED_HIGH_HI  = np.array([179, 255, 255], dtype=np.uint8)
+
+# Purity eşleştirme (hue) + canlı piksel eşiği (S/V) — maske ile aynı
+_BLUE_HUE_LO, _BLUE_HUE_HI = 75, 140
+_RED_HUE_MAX = 25    # hue <= 25 (kırmızı + turuncu)
+_RED_HUE_MIN = 145   # hue >= 145 (pembe/macenta + kırmızı)
+_PURITY_SAT_MIN = 60
+_PURITY_VAL_MIN = 50
+
+
 @dataclass
 class PayloadDetection:
     color: TargetColor
@@ -53,22 +74,10 @@ class PayloadDetector:
     @staticmethod
     def _mask(hsv, color):
         if color == TargetColor.BLUE:
-            return cv2.inRange(
-                hsv,
-                np.array([95, 90, 65], dtype=np.uint8),
-                np.array([130, 255, 255], dtype=np.uint8),
-            )
+            return cv2.inRange(hsv, _BLUE_MASK_LO, _BLUE_MASK_HI)
 
-        m_low = cv2.inRange(
-            hsv,
-            np.array([0, 100, 65], dtype=np.uint8),
-            np.array([10, 255, 255], dtype=np.uint8),
-        )
-        m_high = cv2.inRange(
-            hsv,
-            np.array([170, 100, 65], dtype=np.uint8),
-            np.array([179, 255, 255], dtype=np.uint8),
-        )
+        m_low = cv2.inRange(hsv, _RED_LOW_LO, _RED_LOW_HI)
+        m_high = cv2.inRange(hsv, _RED_HIGH_LO, _RED_HIGH_HI)
         return cv2.bitwise_or(m_low, m_high)
 
     @staticmethod
@@ -150,15 +159,15 @@ class PayloadDetector:
         hue = interior[:, 0]
         sat = interior[:, 1]
         val = interior[:, 2]
-        vivid = (sat >= 70) & (val >= 55)
+        vivid = (sat >= _PURITY_SAT_MIN) & (val >= _PURITY_VAL_MIN)
         n = int(vivid.sum())
         if n == 0:
             return None
 
         if expected_color == TargetColor.BLUE:
-            matched = vivid & (hue >= 95) & (hue <= 130)
+            matched = vivid & (hue >= _BLUE_HUE_LO) & (hue <= _BLUE_HUE_HI)
         else:
-            matched = vivid & ((hue <= 10) | (hue >= 170))
+            matched = vivid & ((hue <= _RED_HUE_MAX) | (hue >= _RED_HUE_MIN))
 
         purity = int(matched.sum()) / n
         if purity < purity_min:

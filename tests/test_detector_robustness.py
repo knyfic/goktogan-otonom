@@ -121,6 +121,43 @@ def test_purity_rejects_mixed_color_blob():
     assert TargetDetector().detect(img) == []
 
 
+# ── 6b: ışık değişiminde kayan tonlar doğru renge sınıflandırılır ────────── #
+# Aynı fiziksel hedef ışık koşuluna göre HSV'de kayabilir: kırmızı turuncuya/
+# pembeye, mavi buz/sky/koyu maviye dönebilir. Geniş bantlar bu kaymayı tolere
+# etmeli; sarı/yeşil gibi ayrık tonlar ise DIŞARIDA kalmalı.
+def _img_with(poly, bgr):
+    img = np.zeros((H, W, 3), dtype=np.uint8)
+    cv2.fillPoly(img, [poly], bgr)
+    return img
+
+
+def test_shifted_tones_classify_to_correct_color():
+    hex_poly = _HEX - np.array([60, 0])
+    tri_poly = _TRI + np.array([60, 0])
+    for name, bgr, want in (
+        ("turuncu üçgen", (0, 165, 255), TargetColor.RED),
+        ("pembe üçgen", (180, 80, 255), TargetColor.RED),
+        ("koyu kırmızı üçgen", (0, 0, 80), TargetColor.RED),
+        ("buz mavisi altıgen", (200, 220, 120), TargetColor.BLUE),
+        ("koyu mavi altıgen", (60, 0, 0), TargetColor.BLUE),
+    ):
+        shape = "TRIANGLE" if want == TargetColor.RED else "HEXAGON"
+        dets = TargetDetector().detect(_img_with(tri_poly, bgr) if want == TargetColor.RED
+                                       else _img_with(hex_poly, bgr))
+        assert any(d.color == want and d.shape == shape for d in dets), \
+            f"{name} -> {want} olarak bulunmalı"
+        assert not any(d.color != want for d in dets), \
+            f"{name} yanlış renge sınıflandırıldı"
+
+
+def test_yellow_and_green_are_excluded():
+    """Sarı/yeşil gibi ayrık tonlar mavi/kırmızı olarak algılanmamalı."""
+    for name, bgr in (("sarı üçgen", (0, 255, 255)), ("yeşil üçgen", (0, 255, 0))):
+        dets = TargetDetector().detect(_img_with(_TRI, bgr))
+        assert not any(d.color in (TargetColor.RED, TargetColor.BLUE) for d in dets), \
+            f"{name} mavi/kırmızı olarak algılanmamalı"
+
+
 # ── 7: history / stability ───────────────────────────────────────────────── #
 def test_oscillation_never_stabilizes():
     d = TargetDetector()

@@ -18,6 +18,32 @@ from config import (
 from models import Detection, TargetColor
 
 
+# ── HSV renk bantları — ışık değişimine toleranslı ──────────────────────────
+# Amaç: yalnızca "saf" kırmızı/mavi değil, ışık koşulu değişince aynı fiziksel
+# rengin HSV'de kaydığı tonlar da yakalansın:
+#   KIRMIZI  → turuncu (H≈10-25) ve pembe/macenta (H≈145-170) DAHİL;
+#              sarı (H≈25-35) bilinçli olarak DIŞARIDA (turuncu/sarı ayrımı).
+#   MAVİ     → buz/sky mavisi (H≈75-95) ve koyu/açık mavi DAHİL (düşük S/V).
+# DİKKAT: Maske bantları ile _color_purity_from_contour içindeki purity
+# bantları BİREBİR aynı olmalı — aksi halde geniş maskeyle bulunan kontur dar
+# purity bandında reddedilir.
+_BLUE_MASK_LO   = np.array([75, 60, 50], dtype=np.uint8)
+_BLUE_MASK_HI   = np.array([140, 255, 255], dtype=np.uint8)
+_RED_LOW_LO     = np.array([0, 60, 50], dtype=np.uint8)     # kırmızı + turuncu
+_RED_LOW_HI     = np.array([25, 255, 255], dtype=np.uint8)
+_RED_HIGH_LO    = np.array([145, 60, 50], dtype=np.uint8)   # pembe/macenta + kırmızı
+_RED_HIGH_HI    = np.array([179, 255, 255], dtype=np.uint8)
+
+# Purity eşleştirme (hue) — maske ile aynı genişlik
+_BLUE_HUE_LO, _BLUE_HUE_HI = 75, 140
+_RED_HUE_MAX = 25    # hue <= 25 (kırmızı + turuncu)
+_RED_HUE_MIN = 145   # hue >= 145 (pembe/macenta + kırmızı)
+# Purity "canlı piksel" eşiği (S/V) — maske ile aynı taban; karanlık/açık
+# koşullarda bile kontur içi renk oranı ölçülebilsin.
+_PURITY_SAT_MIN = 60
+_PURITY_VAL_MIN = 50
+
+
 _KAPAMA_KERNEL_Buyuk = 7
 _KAPAMA_KERNEL_Kucuk = 3
 
@@ -127,21 +153,9 @@ class TargetDetector:
 
         def _split_counts(bgr) -> tuple[int, int]:
             hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-            m_blue = cv2.inRange(
-                hsv,
-                np.array([95, 70, 60], dtype=np.uint8),
-                np.array([130, 255, 255], dtype=np.uint8),
-            )
-            m_rl = cv2.inRange(
-                hsv,
-                np.array([0, 70, 60], dtype=np.uint8),
-                np.array([10, 255, 255], dtype=np.uint8),
-            )
-            m_rh = cv2.inRange(
-                hsv,
-                np.array([170, 70, 60], dtype=np.uint8),
-                np.array([179, 255, 255], dtype=np.uint8),
-            )
+            m_blue = cv2.inRange(hsv, _BLUE_MASK_LO, _BLUE_MASK_HI)
+            m_rl = cv2.inRange(hsv, _RED_LOW_LO, _RED_LOW_HI)
+            m_rh = cv2.inRange(hsv, _RED_HIGH_LO, _RED_HIGH_HI)
             return (
                 int(cv2.countNonZero(m_blue)),
                 int(cv2.countNonZero(m_rl) + cv2.countNonZero(m_rh)),
@@ -225,22 +239,10 @@ class TargetDetector:
     @staticmethod
     def _color_mask(hsv, color):
         if color == TargetColor.BLUE:
-            return cv2.inRange(
-                hsv,
-                np.array([95, 90, 70], dtype=np.uint8),
-                np.array([130, 255, 255], dtype=np.uint8),
-            )
+            return cv2.inRange(hsv, _BLUE_MASK_LO, _BLUE_MASK_HI)
 
-        mask_low = cv2.inRange(
-            hsv,
-            np.array([0, 100, 70], dtype=np.uint8),
-            np.array([10, 255, 255], dtype=np.uint8),
-        )
-        mask_high = cv2.inRange(
-            hsv,
-            np.array([170, 100, 70], dtype=np.uint8),
-            np.array([179, 255, 255], dtype=np.uint8),
-        )
+        mask_low = cv2.inRange(hsv, _RED_LOW_LO, _RED_LOW_HI)
+        mask_high = cv2.inRange(hsv, _RED_HIGH_LO, _RED_HIGH_HI)
         return cv2.bitwise_or(mask_low, mask_high)
 
     @staticmethod
@@ -505,13 +507,13 @@ class TargetDetector:
         hue = interior[:, 0]
         sat = interior[:, 1]
         val = interior[:, 2]
-        vivid = (sat >= 70) & (val >= 60)
+        vivid = (sat >= _PURITY_SAT_MIN) & (val >= _PURITY_VAL_MIN)
         n = int(vivid.sum())
         if n == 0:
             return None
 
-        blue = vivid & (hue >= 95) & (hue <= 130)
-        red = vivid & ((hue <= 10) | (hue >= 170))
+        blue = vivid & (hue >= _BLUE_HUE_LO) & (hue <= _BLUE_HUE_HI)
+        red = vivid & ((hue <= _RED_HUE_MAX) | (hue >= _RED_HUE_MIN))
         blue_ratio = int(blue.sum()) / n
         red_ratio = int(red.sum()) / n
 

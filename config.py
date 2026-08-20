@@ -235,6 +235,7 @@ VISION_TARGETS = {
         "solidity_min": 0.90,
         "vertex_count_range": [3, 5],
         "max_extent": 0.85,          # üçgen extent ≈ 0.50 (blur'da ~0.60) — üstü elenir
+        "angle_target_deg": 60.0,    # eşkenar üçgen iç açısı
         "area_tolerance": [0.60, 1.40],
     },
     "BLUE_HEXAGON": {
@@ -246,6 +247,7 @@ VISION_TARGETS = {
         "solidity_min": 0.90,
         "vertex_count_range": [5, 7],   # 8+ köşe = eğri kontur (daire/elips) → sert elenir
         "max_extent": 0.92,          # altıgen extent ≈ 0.75-0.83; kare 1.0 → ELENİR
+        "angle_target_deg": 120.0,   # düzgün altıgen iç açısı
         "area_tolerance": [0.60, 1.40],
     },
 }
@@ -257,22 +259,65 @@ VISION_MORPHOLOGY = {
     "close_iterations": 1,
 }
 
-# Şekil skorlaması: circ + solidity + vertex ağırlıklı birleşim [0,1].
-# Hiçbir TEK özellik tek başına karar veremez.
+# Şekil skorlaması: circ + solidity + vertex + angle ağırlıklı birleşim [0,1].
+# Hiçbir TEK özellik tek başına karar veremez. Köşe AÇILARI decoy ayrımında
+# kritiktir (üçgen 60°, kare 90°, altıgen 120°).
 VISION_SHAPE_SCORING = {
-    "circularity_weight": 0.35,
-    "solidity_weight": 0.30,
-    "vertex_weight": 0.35,
+    "circularity_weight": 0.25,
+    "solidity_weight": 0.20,
+    "vertex_weight": 0.25,
+    "angle_weight": 0.30,
+    "angle_tolerance_deg": 45.0,   # hedef açıdan sapma toleransı (açı skoru)
     "min_shape_score": 0.55,
+}
+
+# KARE DECOY modeli — gerçek hedefleri kandırmak için görev alanına konan
+# kareler (mavi kare 2m / kırmızı kare 1m). Bu model YALNIZCA rakip skoru
+# üretir: pipeline her aday için target_score vs square_score karşılaştırır
+# (VISION_DECOY_REJECTION).
+VISION_SQUARE = {
+    "circularity_range": [0.72, 0.82],   # kare circ ≈ 0.785 (DAR — altıgen 0.85 girmesin)
+    "solidity_min": 0.90,
+    "vertex_count_range": [3, 6],        # sert sınır (analyze için)
+    "vertex_score_map": {4: 1.0, 3: 0.5, 5: 0.2, 6: 0.0},  # kareye özgü köşe skoru
+    "max_extent": 1.05,                  # kare extent ≈ 1.0 → skorlanabilmeli
+    "minimum_score": 0.45,
+    "angle_target_deg": 90.0,            # kare iç açısı
+    "angle_tolerance_deg": 35.0,         # DAR — altıgenin 120° köşeleri uzak kalır
+    "aspect_target": 1.0,
+    "aspect_tolerance": 0.30,            # axis-aligned bbox aspect sapması
+    "min_rect_aspect_tolerance": 0.35,   # minAreaRect aspect sapması (rotated kare sağlam)
+    "weights": {
+        "vertex": 0.15,
+        "circularity": 0.20,
+        "solidity": 0.10,
+        "angle": 0.25,
+        "aspect": 0.15,
+        "min_rect_aspect": 0.15,
+    },
+}
+
+# Decoy reddi — target skor ile square skoru karşılaştırması.
+# Kabul şartı:
+#   target_score >= minimum_target_score
+#   AND target_score - square_score >= minimum_margin
+# Fark minimum_margin ile uncertain_margin arasındaysa UNCERTAIN (reject —
+# state machine'e kesin detection gönderilmez).
+VISION_DECOY_REJECTION = {
+    "minimum_target_score": 0.55,
+    "minimum_margin": 0.15,
+    "uncertain_margin": 0.08,
+    "margin_score_ref": 0.30,   # confidence margin_score normalizasyon referansı
 }
 
 # Final confidence bileşenleri (toplam 1.0 olacak şekilde kalibre edilir).
 #   confidence = w_shape·shape + w_color·color(purity) + w_size·size
-#   doğrulanan adaylara w_temporal eklenir (clamp 1.0).
+#                + w_margin·margin(target-square) [doğrulananlara + w_temporal]
 VISION_CONFIDENCE_WEIGHTS = {
-    "shape": 0.40,
+    "shape": 0.30,
     "color": 0.25,
-    "size": 0.20,
+    "size": 0.15,
+    "decoy_margin": 0.15,
     "temporal": 0.15,
 }
 

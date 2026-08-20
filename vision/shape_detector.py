@@ -54,7 +54,9 @@ class ShapeCandidate:
     aspect_ratio: float
     centroid_x: float
     centroid_y: float
-    shape: Optional[str] = None      # "TRIANGLE" | "HEXAGON" | None
+    corner_angles: Optional[list[float]] = None  # approxPolyDP iç açıları (derece)
+    min_rect_aspect: float = 0.0       # minAreaRect w/h (≥1) — rotated şekillerde sağlam
+    shape: Optional[str] = None      # "TRIANGLE" | "HEXAGON" | "SQUARE" | None
     shape_score: float = 0.0         # [0,1] — config ağırlıklarıyla
 
 
@@ -71,21 +73,24 @@ class ShapeDetector:
         """
         vertex_epsilons: approxPolyDP epsilon oranları (örn. [0.02, 0.04, 0.06]).
         scoring_cfg: {"circularity_weight", "solidity_weight", "vertex_weight",
-                      "min_shape_score"}.
+                      "angle_weight", "angle_tolerance_deg", "min_shape_score"}.
         target_cfg: hedefe özgü {"circularity_range", "solidity_min",
-                     "vertex_count_range"}.
-        shape_name: üretilen şeklin adı ("TRIANGLE" / "HEXAGON").
+                     "vertex_count_range", "max_extent", "angle_target_deg"}.
+        shape_name: üretilen şeklin adı ("TRIANGLE" / "HEXAGON" / "SQUARE").
         """
         self._shape_name = shape_name
         self._epsilons = [float(e) for e in vertex_epsilons]
         self._w_circ = float(scoring_cfg["circularity_weight"])
         self._w_sol = float(scoring_cfg["solidity_weight"])
         self._w_vert = float(scoring_cfg["vertex_weight"])
+        self._w_angle = float(scoring_cfg["angle_weight"])
+        self._angle_tolerance = float(scoring_cfg["angle_tolerance_deg"])
         self._min_shape_score = float(scoring_cfg["min_shape_score"])
 
         self._circ_lo, self._circ_hi = (float(v) for v in target_cfg["circularity_range"])
         self._solidity_min = float(target_cfg["solidity_min"])
         self._max_extent = float(target_cfg["max_extent"])
+        self._angle_target = float(target_cfg["angle_target_deg"])
         v_lo, v_hi = target_cfg["vertex_count_range"]
         self._vert_lo, self._vert_hi = int(v_lo), int(v_hi)
 
@@ -134,7 +139,7 @@ class ShapeDetector:
         if aspect > 3.0:
             return None  # aşırı uzun/dar
 
-        count, agreement = self._count_vertices(contour, perimeter)
+        count, agreement, approx = self._count_vertices(contour, perimeter)
         # Sert köşe üst sınırı: hedef aralığın üstündeki köşe sayısı eğri
         # kontur demektir (daire/elips 8+ köşe üretir; altıgen blur'da bile ≤ 7).
         if count > self._vert_hi:
@@ -145,6 +150,21 @@ class ShapeDetector:
             return None
         cx = moments["m10"] / moments["m00"]
         cy = moments["m01"] / moments["m00"]
+
+        # Köşe iç açıları (approxPolyDP — en tutarlı köşe setinden).
+        corner_angles: list[float] = []
+        if approx is not None and len(approx) >= 3:
+            corner_angles = _corner_angles(approx)
+
+        # minAreaRect en-boy oranı — rotated (dönük) şekillerde axis-aligned
+        # bbox'tan daha sağlamdır (kare her yönde ~1.0).
+        min_rect_aspect = 0.0
+        try:
+            rect_w, rect_h = cv2.minAreaRect(contour)[1]
+            if min(rect_w, rect_h) > 0:
+                min_rect_aspect = max(rect_w, rect_h) / min(rect_w, rect_h)
+        except Exception:
+            min_rect_aspect = 0.0
 
         return ShapeCandidate(
             contour=contour,
@@ -158,16 +178,23 @@ class ShapeDetector:
             extent=extent,
             aspect_ratio=aspect,
             centroid_x=cx, centroid_y=cy,
+            corner_angles=corner_angles,
+            min_rect_aspect=min_rect_aspect,
         )
 
-    def _count_vertices(self, contour: np.ndarray, perimeter: float) -> tuple[int, int]:
-        """Çoklu epsilon ile köşe sayısı çoğunluk oyu."""
-        votes = [
-            len(cv2.approxPolyDP(contour, eps * perimeter, True))
+    def _count_vertices(
+        self, contour: np.ndarray, perimeter: float
+    ) -> tuple[int, int, Optional[np.ndarray]]:
+        """Çoklu epsilon ile köşe sayısı çoğunluk oyu + en tutarlı approx."""
+        approxes = [
+            cv2.approxPolyDP(contour, eps * perimeter, True)
             for eps in self._epsilons
         ]
+        votes = [len(a) for a in approxes]
         count, agreement = Counter(votes).most_common(1)[0]
-        return count, agreement
+        # Çoğunluk oyuna karşılık gelen ilk approx (açı hesabı için).
+        approx = next((a for a in approxes if len(a) == count), approxes[0])
+        return count, agreement, approx
 
     def classify(self, cand: ShapeCandidate) -> ShapeCandidate:
         """Adaya şekil + skor atar; skor eşiğin altındaysa shape=None kalır.
@@ -181,15 +208,36 @@ class ShapeDetector:
         circ_score = self._circularity_score(cand.circularity)
         sol_score = self._solidity_score(cand.solidity)
         vert_score = self._vertex_score(cand.vertex_count)
-        score = (
-            self._w_circ * circ_score
-            + self._w_sol * sol_score
-            + self._w_vert * vert_score
-        )
+        angle_score = self._angle_score(cand)
+        score = self._combine(circ_score, sol_score, vert_score, angle_score)
         cand.shape_score = score
         if score >= self._min_shape_score:
             cand.shape = self._shape_name
         return cand
+
+    def _combine(
+        self, circ_score: float, sol_score: float, vert_score: float, angle_score: float
+    ) -> float:
+        """Ağırlıklı birleşim (config ağırlıkları). Alt sınıflar override edebilir."""
+        return (
+            self._w_circ * circ_score
+            + self._w_sol * sol_score
+            + self._w_vert * vert_score
+            + self._w_angle * angle_score
+        )
+
+    def _angle_score(self, cand: ShapeCandidate) -> float:
+        """Köşe iç açılarının hedef açıya (örn. 60°/120°) yakınlığı [0,1].
+
+        Her köşenin |açı - hedef|/tolerans oranı 1'e clamp edilir; ortalama alınır.
+        Eğri konturlarda (köşe yok) skor 0 — hedef şekil düz kenar ister.
+        """
+        if not cand.corner_angles:
+            return 0.0
+        total = 0.0
+        for angle in cand.corner_angles:
+            total += max(0.0, 1.0 - abs(angle - self._angle_target) / self._angle_tolerance)
+        return total / len(cand.corner_angles)
 
     def classify_contour(self, contour: np.ndarray) -> Optional[ShapeCandidate]:
         """Tek kontur için analiz + sınıflandırma (pipeline dışı çağrılar için)."""
@@ -219,3 +267,94 @@ class ShapeDetector:
         if count < self._vert_lo:
             return max(0.0, 1.0 - (self._vert_lo - count) * 0.35)
         return max(0.0, 1.0 - (count - self._vert_hi) * 0.35)
+
+
+class SquareDetector(ShapeDetector):
+    """KARE DECOY rakip skoru — gerçek hedefleri kandırmak için görev alanındaki
+    karelerin (mavi 2m / kırmızı 1m) ne kadar "kareye benzediğini" ölçer.
+
+    Pipeline her aday için target_score vs square_score karşılaştırması yapar
+    (VISION_DECOY_REJECTION). Kare skoru yalnızca vertex'e dayanmaz:
+      vertex + circularity + solidity + angle(90°) + bbox aspect + minAreaRect aspect
+    Tüm eşikler VISION_SQUARE config'inden gelir.
+    """
+
+    def __init__(
+        self, vertex_epsilons: list[float], scoring_cfg: dict[str, Any], square_cfg: dict[str, Any]
+    ) -> None:
+        # ShapeDetector ortak geometriyi (analyze) sağlar; skor kareye özgüdür.
+        super().__init__(vertex_epsilons, scoring_cfg, square_cfg, shape_name="SQUARE")
+        self._square_min_score = float(square_cfg["minimum_score"])
+        self._aspect_target = float(square_cfg["aspect_target"])
+        self._aspect_tol = float(square_cfg["aspect_tolerance"])
+        self._min_rect_tol = float(square_cfg["min_rect_aspect_tolerance"])
+        # Kareye özgü dar angle toleransı (altıgenin 120° köşeleri uzak kalır).
+        self._angle_tolerance = float(square_cfg["angle_tolerance_deg"])
+        # Kareye özgü köşe skoru: 4 ideal; 5-6 (altıgen!) hızla düşer.
+        self._vert_map = {
+            int(k): float(v) for k, v in square_cfg["vertex_score_map"].items()
+        }
+        w = square_cfg["weights"]
+        self._sq_w_vert = float(w["vertex"])
+        self._sq_w_circ = float(w["circularity"])
+        self._sq_w_sol = float(w["solidity"])
+        self._sq_w_angle = float(w["angle"])
+        self._sq_w_aspect = float(w["aspect"])
+        self._sq_w_minrect = float(w["min_rect_aspect"])
+
+    def _vertex_score(self, count: int) -> float:
+        """Kareye özgü: 4 köşe ideal; 5-6 köşe (altıgen) güçlü şekilde düşer."""
+        return self._vert_map.get(count, 0.0)
+
+    def classify(self, cand: ShapeCandidate) -> ShapeCandidate:
+        """Kare skorunu hesaplar (aspect/minRect dahil) ve eşiği uygular."""
+        circ_score = self._circularity_score(cand.circularity)
+        sol_score = self._solidity_score(cand.solidity)
+        vert_score = self._vertex_score(cand.vertex_count)
+        angle_score = self._angle_score(cand)
+        aspect_score = self._aspect_score(cand.aspect_ratio)
+        min_rect_score = self._min_rect_score(cand.min_rect_aspect)
+        score = (
+            self._sq_w_vert * vert_score
+            + self._sq_w_circ * circ_score
+            + self._sq_w_sol * sol_score
+            + self._sq_w_angle * angle_score
+            + self._sq_w_aspect * aspect_score
+            + self._sq_w_minrect * min_rect_score
+        )
+        cand.shape_score = score
+        if score >= self._square_min_score:
+            cand.shape = "SQUARE"
+        return cand
+
+    def _aspect_score(self, aspect_ratio: float) -> float:
+        """Axis-aligned bbox en-boy oranının 1.0'a yakınlığı."""
+        if self._aspect_tol <= 0 or aspect_ratio <= 0:
+            return 0.0
+        return max(0.0, 1.0 - abs(self._aspect_target - aspect_ratio) / self._aspect_tol)
+
+    def _min_rect_score(self, min_rect_aspect: float) -> float:
+        """minAreaRect en-boy oranının 1.0'a yakınlığı (rotated kare sağlam)."""
+        if self._min_rect_tol <= 0 or min_rect_aspect <= 0:
+            return 0.0
+        return max(0.0, 1.0 - abs(self._aspect_target - min_rect_aspect) / self._min_rect_tol)
+
+
+def _corner_angles(approx: np.ndarray) -> list[float]:
+    """Çokgen köşelerindeki İÇ açıları derece cinsinden döndürür."""
+    n = len(approx)
+    angles: list[float] = []
+    pts = approx.reshape(n, 2).astype(np.float64)
+    for i in range(n):
+        p_prev = pts[(i - 1) % n]
+        p_cur = pts[i]
+        p_next = pts[(i + 1) % n]
+        v1 = p_prev - p_cur
+        v2 = p_next - p_cur
+        n1 = math.hypot(v1[0], v1[1])
+        n2 = math.hypot(v2[0], v2[1])
+        if n1 < 1e-6 or n2 < 1e-6:
+            continue
+        cos_a = float(np.clip((v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2), -1.0, 1.0))
+        angles.append(math.degrees(math.acos(cos_a)))
+    return angles

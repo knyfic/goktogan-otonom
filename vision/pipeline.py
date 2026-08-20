@@ -30,6 +30,7 @@ Sıra (mantıksal bağımlılıklara göre):
 """
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Optional
 
@@ -43,6 +44,7 @@ from vision.geo_projection import GeoProjection, VehiclePose
 from vision.shape_detector import ShapeCandidate, ShapeDetector
 from vision.size_filter import SizeFilter
 from vision.temporal_validator import TemporalEntry, TemporalValidator
+from vision.shape_detector import SquareDetector
 
 # Çalışma çözünürlüğü için hedef renk → TargetColor eşlemesi.
 _COLOR_MAP = {
@@ -67,9 +69,12 @@ class VisionPipeline:
         temporal_cfg: dict[str, Any],
         purity_cfg: dict[str, Any],
         confidence_weights: dict[str, Any],
+        square_cfg: dict[str, Any],
+        decoy_cfg: dict[str, Any],
         work_width_px: int,
         min_detection_confidence: float,
     ) -> None:
+        self._log = logging.getLogger("VisionPipeline")
         self._work_width = int(work_width_px)
         self._min_conf = float(min_detection_confidence)
         self._purity_min = float(purity_cfg["min_ratio"])
@@ -79,13 +84,22 @@ class VisionPipeline:
         self._w_shape = float(confidence_weights["shape"])
         self._w_color = float(confidence_weights["color"])
         self._w_size = float(confidence_weights["size"])
+        self._w_margin = float(confidence_weights["decoy_margin"])
         self._w_temporal = float(confidence_weights["temporal"])
+
+        # Decoy reddi: hedef skor üst sınır + margin (target vs square).
+        self._min_target_score = float(decoy_cfg["minimum_target_score"])
+        self._min_margin = float(decoy_cfg["minimum_margin"])
+        self._margin_ref = float(decoy_cfg["margin_score_ref"])
 
         self._frame_gate = FrameGate(frame_gate_cfg)
         self._geo = GeoProjection(geo_cfg, geometry_cfg)
         self._temporal = TemporalValidator(temporal_cfg)
         self._size_filter = SizeFilter(geometry_cfg, size_filter_cfg)
         self._geometry = geometry_cfg
+
+        # KARE DECOY rakip skorlayıcı — tüm renkler için ortak (geometri ortak).
+        self._square_det = SquareDetector(vertex_epsilons, scoring_cfg, square_cfg)
 
         # Hedefler: (color_key, shape_name, config, masker, shape_detector)
         self._targets: list[tuple[str, str, dict[str, Any], ColorMask, ShapeDetector]] = []
@@ -203,6 +217,22 @@ class VisionPipeline:
             if cand is None or cand.shape != t_shape:
                 continue
 
+            # ── DECOY REJECTION ────────────────────────────────────────────────
+            # Katman 1: hedef skor minimum eşiğin altındaysa kabul edilmez.
+            if cand.shape_score < self._min_target_score:
+                continue
+            # Katman 2: rakip KARE skoru hesapla — target_score - square_score
+            # margin'in altındaysa aday DECOY veya UNCERTAIN'dir (kesin detection
+            # gönderilmez). Tek başına threshold yeterli DEĞİLDİR.
+            square_score = self._square_score(contour)
+            margin = cand.shape_score - square_score
+            if margin < self._min_margin:
+                self._log.debug(
+                    "DECOY/UNCERTAIN: %s %s target=%.2f square=%.2f margin=%.2f",
+                    color_key, t_shape, cand.shape_score, square_score, margin,
+                )
+                continue
+
             area_tol = (float(tcfg["area_tolerance"][0]), float(tcfg["area_tolerance"][1]))
             frame_area = hsv.shape[0] * hsv.shape[1]
             if not self._size_filter.accept(
@@ -211,13 +241,15 @@ class VisionPipeline:
             ):
                 continue
 
-            # 3) Confidence: şekil + renk + boyut (temporal katkı doğrulama
-            #    sonrası eklenir — pipeline.process içinde).
+            # 3) Confidence: şekil + renk + boyut + decoy margin (temporal
+            #    katkı doğrulama sonrası eklenir — pipeline.process içinde).
             size_score = self._size_score(cand.area_px, tcfg, altitude_m)
+            margin_score = min(1.0, margin / self._margin_ref) if self._margin_ref > 0 else 0.0
             confidence = (
                 self._w_shape * cand.shape_score
                 + self._w_color * color_score
                 + self._w_size * size_score
+                + self._w_margin * margin_score
             )
             if confidence < self._min_conf:
                 continue
@@ -257,6 +289,11 @@ class VisionPipeline:
         self, shape_det: ShapeDetector, contour: np.ndarray
     ) -> Optional[ShapeCandidate]:
         return shape_det.classify_contour(contour)
+
+    def _square_score(self, contour: np.ndarray) -> float:
+        """Rakip KARE skoru — decoy reddi için (0 = kare değil)."""
+        sq = self._square_det.classify_contour(contour)
+        return sq.shape_score if sq is not None else 0.0
 
     def _color_purity(
         self, hsv: np.ndarray, contour: np.ndarray

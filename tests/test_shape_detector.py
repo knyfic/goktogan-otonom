@@ -146,14 +146,61 @@ def test_shape_score_weights_from_config():
 
 
 def test_shape_score_is_weighted_combination():
-    """Skor = ağırlıklı birleşim; tek özellik tek başına karar veremez."""
+    """Skor = ağırlıklı birleşim (circ + solidity + vertex + angle);
+    tek özellik tek başına karar veremez."""
     d = _tri_detector()
     raw = d.detect(_mask_from_polygon(_tri_pts()))[0]
     cand = d.classify(raw)  # skor atanır
     circ_s = d._circularity_score(cand.circularity)
     sol_s = d._solidity_score(cand.solidity)
     vert_s = d._vertex_score(cand.vertex_count)
+    angle_s = d._angle_score(cand)
     expected = (
-        d._w_circ * circ_s + d._w_sol * sol_s + d._w_vert * vert_s
+        d._w_circ * circ_s + d._w_sol * sol_s
+        + d._w_vert * vert_s + d._w_angle * angle_s
     )
     assert cand.shape_score == pytest.approx(expected)
+
+
+def test_triangle_angle_score_high():
+    """Eşkenar üçgenin köşe açıları 60°'ye yakın → angle skoru yüksek."""
+    d = _tri_detector()
+    raw = d.detect(_mask_from_polygon(_tri_pts()))[0]
+    assert d._angle_score(raw) > 0.7
+
+
+def test_square_detector_scores_high_for_square():
+    """Kare, SquareDetector'dan YÜKSEK skor alır (decoy tespiti)."""
+    import cv2
+    from config import VISION_SQUARE
+    from vision.shape_detector import SquareDetector
+
+    mask = np.zeros((352, 960), dtype=np.uint8)
+    cv2.rectangle(mask, (380, 100), (580, 300), 255, -1)
+    sd = SquareDetector(VISION_VERTEX_EPSILONS, VISION_SHAPE_SCORING, VISION_SQUARE)
+    cand = sd.classify(sd.detect(mask)[0])  # kare analyze'den geçmeli
+    assert cand.shape_score >= VISION_SQUARE["minimum_score"]
+
+
+def test_square_detector_low_score_for_hexagon():
+    """Altıgen SquareDetector'dan DÜŞÜK skor alır (decoy skoru düşük kalmalı)."""
+    from config import VISION_SQUARE
+    from vision.shape_detector import SquareDetector
+
+    sd = SquareDetector(VISION_VERTEX_EPSILONS, VISION_SHAPE_SCORING, VISION_SQUARE)
+    raw = sd.detect(_mask_from_polygon(_hex_pts()))[0]
+    cand = sd.classify(raw)
+    assert cand.shape_score < 0.85, "altıgen kare gibi skorlanmamalı"
+
+
+def test_square_angle_score_high():
+    """Karenin köşe açıları 90°'ye yakın → square angle skoru yüksek."""
+    import cv2
+    from config import VISION_SQUARE
+    from vision.shape_detector import SquareDetector
+
+    mask = np.zeros((352, 960), dtype=np.uint8)
+    cv2.rectangle(mask, (380, 100), (580, 300), 255, -1)
+    sd = SquareDetector(VISION_VERTEX_EPSILONS, VISION_SHAPE_SCORING, VISION_SQUARE)
+    cand = sd.detect(mask)[0]
+    assert sd._angle_score(cand) > 0.7

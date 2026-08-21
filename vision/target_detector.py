@@ -32,11 +32,11 @@ from models import Detection, TargetColor
 # DİKKAT: Maske bantları ile _color_purity_from_contour içindeki purity
 # bantları BİREBİR aynı olmalı — aksi halde geniş maskeyle bulunan kontur dar
 # purity bandında reddedilir.
-_BLUE_MASK_LO   = np.array([70, 60, 50], dtype=np.uint8)
-_BLUE_MASK_HI   = np.array([155, 255, 255], dtype=np.uint8)
+_BLUE_MASK_LO   = np.array([90, 60, 50], dtype=np.uint8)
+_BLUE_MASK_HI   = np.array([149, 255, 255], dtype=np.uint8)
 _RED_LOW_LO     = np.array([0, 60, 50], dtype=np.uint8)     # kırmızı + turuncu
-_RED_LOW_HI     = np.array([28, 255, 255], dtype=np.uint8)
-_RED_HIGH_LO    = np.array([156, 60, 50], dtype=np.uint8)   # pembe/macenta + kırmızı
+_RED_LOW_HI     = np.array([20, 255, 255], dtype=np.uint8)
+_RED_HIGH_LO    = np.array([150, 60, 50], dtype=np.uint8)   # pembe/macenta + kırmızı
 _RED_HIGH_HI    = np.array([179, 255, 255], dtype=np.uint8)
 
 # Purity eşleştirme (hue) — maske ile aynı genişlik

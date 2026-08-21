@@ -163,6 +163,39 @@ def test_yellow_and_green_are_excluded():
             f"{name} mavi/kırmızı olarak algılanmamalı"
 
 
+def test_two_close_hexagons_stay_separate():
+    """Aralarında küçük boşluk olan iki mavi altıgen TEK contour'a birleşmemeli.
+
+    Uçtan uca kontrol: _clean_mask artık CLOSE içermediği için yakın iki hedef
+    ayrı bileşen kalmalı ve ikisi de ayrı BLUE HEXAGON olarak bulunmalı.
+    """
+    d = 243
+    img = np.zeros((H, W, 3), dtype=np.uint8)
+    cv2.fillPoly(img, [_HEX - np.array([d, 0])], (255, 0, 0))
+    cv2.fillPoly(img, [_HEX + np.array([d, 0])], (255, 0, 0))
+    dets = TargetDetector().detect(img)
+    hexes = [d for d in dets
+             if d.color == TargetColor.BLUE and d.shape == "HEXAGON"]
+    assert len(hexes) == 2, \
+        f"iki ayrı altıgen bulunmalı (bulunan: {len(hexes)})"
+
+
+def test_clean_mask_does_not_bridge_small_gaps():
+    """_clean_mask iki ayrı şekli birleştirmemeli (MORPH_CLOSE kaldırıldı).
+
+    Regresyon: eski yapı (medianBlur5 + CLOSE 7x7, 2 iterasyon) paralel
+    kenarlı iki şekil arasındaki ≤~10px boşluğu kapatıp TEK bileşen üretiyordu;
+    bu test eski kodla BAŞARISIZ olurdu (1 bileşen), yeni kodla 2 bileşen geçer.
+    """
+    mask = np.zeros((200, 400), dtype=np.uint8)
+    cv2.rectangle(mask, (50, 60), (150, 140), 255, -1)
+    cv2.rectangle(mask, (156, 60), (256, 140), 255, -1)   # 5px boşluk
+    clean = TargetDetector._clean_mask(mask)
+    n, _ = cv2.connectedComponents(clean)
+    assert n - 1 == 2, \
+        f"5px boşluk iki şekli ayırmalı (bileşen={n - 1})"
+
+
 # ── 7: history / stability ───────────────────────────────────────────────── #
 def test_oscillation_never_stabilizes():
     d = TargetDetector()

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import TYPE_CHECKING, Optional
 
 import cv2
@@ -205,15 +206,69 @@ class RPiCam3:
         # libcamera'da varsayılan AfMode "Manual"dır: lens SABİT konumda kalır ve
         # kamera HİÇ netlemez (görüntü bulanık). Görev profili aşağı bakan kamera
         # + 0.5-11.5m çalışma mesafesi olduğu için sürekli netleme (Continuous)
-        # uygundur.
+        # uygundur; açılışta bir kez AfTrigger=Start ile ANINDA netleme başlatılır
+        # (beklemeden net görüntü).
         try:
             from picamera2.controls import Controls  # type: ignore
             self._picam.set_controls({
-                "AfMode":   Controls.AfModeEnum.Continuous,
-                "AfRange":  Controls.AfRangeEnum.Normal,
-                "AfSpeed":  Controls.AfSpeedEnum.Fast,
+                "AfMode":     Controls.AfModeEnum.Continuous,
+                "AfRange":    Controls.AfRangeEnum.Normal,
+                "AfSpeed":    Controls.AfSpeedEnum.Fast,
+                "AfTrigger":  Controls.AfTriggerEnum.Start,
             })
-            self._log.info("[AF] Otomatik odak AÇIK: Continuous / Normal menzil / Fast.")
+            # Doğrulama 1: kamera AF kontrollerini destekliyor mu? Desteklenmiyorsa
+            # VCM lens sürücüsü algılanmıyor demektir (genelde FFC kablo/konnektör).
+            try:
+                supported = self._picam.camera_controls
+                af_supported = "AfMode" in supported and "LensPosition" in supported
+            except Exception:
+                af_supported = True   # okunamadı — ayarlandı kabul et
+            if af_supported:
+                self._log.info(
+                    "[AF] Otomatik odak AÇIK: Continuous / Normal menzil / Fast "
+                    "(AfTrigger=Start → anında netleme)."
+                )
+            else:
+                self._log.warning(
+                    "[AF] AfMode/LensPosition kontrolü kamerada BULUNAMADI — VCM lens "
+                    "algılanmıyor. FFC kablo/konnektörü kontrol edin ve `libcamera-hello "
+                    "--list-cameras` çıktısına bakın."
+                )
+
+            # Doğrulama 2 (KANIT): metadata'dan AfState (0=Idle, 1=Scanning,
+            # 2=Focused, 3=Failed) ve LensPosition (dioptre) birkaç örnek okunur.
+            # LensPosition DEĞİŞİYORSA lens gerçekten hareket ediyordur;
+            # AfState=2 görülürse netleme tamamlanmıştır. Karanlık/kontrastsız
+            # sahnede AfState hep 0 kalabilir → bu durumda sorun kod değil ışıktır.
+            try:
+                _af_states: list[int] = []
+                _lens_pos: list[float] = []
+                for _ in range(6):   # ~1.5s içinde 6 örnek
+                    md = self._picam.capture_metadata()
+                    _af_states.append(int(md.get("AfState", -1)))
+                    lp = md.get("LensPosition", float("nan"))
+                    _lens_pos.append(round(float(lp), 2))
+                    time.sleep(0.25)
+                _states_str = ",".join(map(str, _af_states))
+                _lens_str = ",".join(map(str, _lens_pos))
+                if 2 in _af_states:
+                    self._log.info(
+                        "[AF] DOĞRULANDI: AfState=2(Focused) görüldü | lens=%s | "
+                        "durumlar=[%s]", _lens_str, _states_str,
+                    )
+                elif 1 in _af_states:
+                    self._log.info(
+                        "[AF] TARAMA SÜRÜYOR: AfState=1(Scanning) | lens=%s | "
+                        "durumlar=[%s]", _lens_str, _states_str,
+                    )
+                else:
+                    self._log.warning(
+                        "[AF] NETLEME GÖZLEMLENMEDİ: durumlar=[%s] lens=%s — "
+                        "sahne karanlık/kontrastsız olabilir; aydınlıkta tekrar deneyin",
+                        _states_str, _lens_str,
+                    )
+            except Exception as exc:
+                self._log.debug("AF durum okuması başarısız: %s", exc)
         except Exception as exc:
             self._log.warning(
                 "[AF] Ayarlanamadı (%s) — lens varsayılan (Manual) konumda kalabilir; "

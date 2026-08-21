@@ -251,16 +251,19 @@ class TargetDetector:
         return cv2.bitwise_or(mask_low, mask_high)
 
     @staticmethod
-    def _clean_mask(mask, kernel_size=_KAPAMA_KERNEL_Buyuk):
-        """Median blur + elips kernel ile kapat/aç (referans kod katkısı).
+    def _clean_mask(mask):
+        """Maske temizliği — MİNİMAL: yalnızca gürültüyü at, şekilleri BİRLEŞTİRME.
 
-        Median blur küçük gürültü parçacıklarını bastırır; CLOSE delikleri
-        doldurur, OPEN kalan gürültüyü atar.
+        Teşhis (morfoloji izolasyonu): eski yapıdaki agresif
+          medianBlur(5) + MORPH_CLOSE(7x7, 2x) + MORPH_OPEN(7x7)
+        iki ayrı hedef arasındaki küçük boşlukları (≤~10px) kapatıp iki şekli
+        TEK contour'a çeviriyordu. CLOSE bilinçli olarak KALDIRILDI — boşluklar
+        asla köprülenmez; medianBlur(3) + OPEN(3x3) yalnızca tekil gürültü
+        pikselciklerini eler.
         """
-        mask = cv2.medianBlur(mask, 5)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        mask = cv2.medianBlur(mask, 3)
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open, iterations=1)
         return mask
 
     # ──────────────────────────────────────────────────────────────

@@ -20,17 +20,19 @@ from config import (
     PAYLOAD_DESCENT_STEP_M,
     PAYLOAD_PICKUP_VISION_MIN_S,
     PAYLOAD_RELEASE_ALTITUDE,
+    RED_PAYLOAD_VERIFY_ALTITUDE,
 )
 from models import TargetColor, TargetType
 
 
-def _real_sm():
+def _real_sm(altitude: float | None = None):
     """Gerçek __init__ ile kurulan örnek (tüm öznitelikler hazır)."""
     from state_machine import MissionStateMachine
 
     nav = MagicMock()
     nav.position.return_value = MagicMock(
-        relative_altitude=PAYLOAD_RELEASE_ALTITUDE,
+        relative_altitude=altitude if altitude is not None
+            else PAYLOAD_RELEASE_ALTITUDE,
         latitude=1.0, longitude=1.0, heading_deg=0.0,
     )
     camera = MagicMock()
@@ -78,7 +80,7 @@ def test_align_target_single_centered_frame_is_not_aligned():
 
 def test_align_target_requires_consecutive_frames():
     """TARGET_ALIGNED_FRAMES_REQUIRED ardışık onay dolmadan OFFSET/inişe geçilmez."""
-    sm, nav = _real_sm()
+    sm, nav = _real_sm(altitude=RED_PAYLOAD_VERIFY_ALTITUDE)
     sm.position_controller = MagicMock()
     sm.position_controller.align_detection.return_value = True
     sm.data.pending_detection = _detection(32.0, 32.0)
@@ -87,7 +89,8 @@ def test_align_target_requires_consecutive_frames():
     sm._no_detection_count = 0
     sm._aligned_frame_count = 0
 
-    # 2.5m'de (PAYLOAD_RELEASE_ALTITUDE) olduğu için onay dolunca → OFFSET
+    # Kırmızı üçgen hedefinde verify irtifasında (RED_PAYLOAD_VERIFY_ALTITUDE =
+    # 3m) onay dolunca → OFFSET (kademeli inişe geçmeden).
     for _ in range(TARGET_ALIGNED_FRAMES_REQUIRED - 1):
         sm._last_align_cmd_t = 0.0
         sm._do_align_target()

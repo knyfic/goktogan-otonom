@@ -15,11 +15,25 @@ GAZEBO_TRANSPORT_MODULE = "gz.transport"
 TAKEOFF_ALTITUDE = 11.5
 TARGET_APPROACH_ALTITUDE = 8.0
 
-# Yük bırakma: görüntü işleme ile HASSAS hizalanılan irtifa.
-# Kadraj kırpma + yarı çözünürlük sonrası (960x352) görüş daraldığı için
-# 1m gibi alçak irtifada hizalama yapılamıyor → son hizalama 2.5m'de yapılır.
-PAYLOAD_RELEASE_ALTITUDE = 8
-# Hizalama + offset düzeltmesi sonrası DİK iniş ile inilen ve yükün bırakıldığı irtifa
+# ── Yük bırakma — HEDEFE ÖZEL konfigürasyon ────────────────────────────────
+# Görev kuralı (hedef/payload eşlemesi — payload_for_target ile birebir):
+#   Payload 1 (MAVİ payload) → KIRMIZI ÜÇGEN
+#   Payload 2 (KIRMIZI payload) → MAVİ ALTIGEN
+# Her hedef için BAĞIMSIZ iki değer tanımlanır:
+#   VERIFY_ALTITUDE — görüntü işlemeli hizalamanın BİTTİĞİ ve offset doğrulama
+#       aşamasına geçildiği irtifa. Bu, payload'ın BIRAKILDIĞI irtifa DEĞİLDİR;
+#       bırakma her zaman PAYLOAD_DROP_ALTITUDE (1m)'de, görüntü işlemesiz
+#       dikey inişle yapılır.
+#   OFFSET_M — offset doğrulama adımında İHA'nın hedef merkez doğrultusunda
+#       ileri gideceği mesafe (mekanizma arkada → hedefin ortasına denk gelir).
+# Kırmızı ve mavi değerler BİRBİRİNDEN BAĞIMSIZDİR (offsetler ayrı kalibre edilir).
+RED_PAYLOAD_VERIFY_ALTITUDE  = 3.0
+RED_PAYLOAD_OFFSET_M         = 1.5
+BLUE_PAYLOAD_VERIFY_ALTITUDE = 8.0
+BLUE_PAYLOAD_OFFSET_M        = 1.8
+
+# Hizalama + offset düzeltmesi sonrası DİK iniş ile inilen ve yükün bırakıldığı
+# irtifa (her iki hedef için ortak — görüntü işleme bu inişte KULLANILMAZ).
 PAYLOAD_DROP_ALTITUDE = 1.0
 # 1m'de görüntüye göre EK hizalama denemesi (saniye). 0 → devre dışı:
 # yeni akış 2.5m'de hizalama + offset düzeltmesi yapar, sonra dik iner ve bırakır.
@@ -29,7 +43,11 @@ PAYLOAD_SEARCH_ALTITUDE = 3.0
 # Her kademede: yatay ortala → bu kadar metre in → tekrar ortala ...
 ALIGNMENT_DESCENT_STEP_M = 1.0
 
-# Geriye dönük uyumluluk
+# ── Geriye dönük uyumluluk ──────────────────────────────────────────────────
+# Eski ORTAK değerler — yeni kod hedefe özel RED/BLUE_PAYLOAD_* değerlerini
+# kullanır; bu takma adlar yalnızca eski referanslar/FINAL_TARGET_ALTITUDE için
+# korunur. Yeni akışta bunlara bağlanma.
+PAYLOAD_RELEASE_ALTITUDE = BLUE_PAYLOAD_VERIFY_ALTITUDE   # eski ortak verify (8m)
 FINAL_TARGET_ALTITUDE = PAYLOAD_RELEASE_ALTITUDE
 
 # Yük alımı: İHA tam yere (0 m) inmeli çünkü mekanizma kısa
@@ -101,11 +119,11 @@ PAYLOAD_ALIGN_TIMEOUT_S = 4.0
 # kadar ileri giderek mekanizmayı payload'ın tam üzerine getirir.
 CAMERA_TO_MECHANISM_OFFSET_M = 0.16
 
-# Yük BIRAKMA offseti (metre): 2.5m'de (PAYLOAD_RELEASE_ALTITUDE) görüntü
-# hizalaması bittikten sonra İHA, hedef merkez doğrultusu boyunca bu kadar
-# İLERİ gider (görev mekanizması arkada → hedefin tam ortasına denk gelir).
-# Bu adımda görüntü işleme kapalıdır; config'ten istenildiği gibi değiştirilir.
-DROP_OFFSET_M = 1.5
+# Yük BIRAKMA offseti — ARTIK HEDEFE ÖZEL: RED_PAYLOAD_OFFSET_M (kırmızı üçgen)
+# ve BLUE_PAYLOAD_OFFSET_M (mavi altıgen) ayrı ayrı tanımlıdır (yukarıya bak).
+# Bu takma ad yalnızca eski referanslar için korunur; bırakma akışı hedefe
+# özel değeri kullanır.
+DROP_OFFSET_M = RED_PAYLOAD_OFFSET_M
 
 # Offset düzeltmesinde ileri hareketin tamamlanması için verilen
 # maksimum süre (saniye). Bu süre dolunca alçalmaya geçilir.

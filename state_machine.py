@@ -39,13 +39,16 @@ from config import (
     ALIGNED_FRAMES_REQUIRED,
     TARGET_ALIGNED_FRAMES_REQUIRED,
     CAMERA_TO_MECHANISM_OFFSET_M,
-    DROP_OFFSET_M,
+    BLUE_PAYLOAD_OFFSET_M,
+    RED_PAYLOAD_OFFSET_M,
     MISSION_TIMEOUT_S,
     MAX_PICKUP_ATTEMPTS,
     MAX_PAYLOAD_SIZE_FACTOR,
     OFFSET_CORRECTION_WAIT_S,
     PAYLOAD_ALIGN_TIMEOUT_S,
     PAYLOAD_ALIGN_ALTITUDE_M,
+    BLUE_PAYLOAD_VERIFY_ALTITUDE,
+    RED_PAYLOAD_VERIFY_ALTITUDE,
     PAYLOAD_CONTACT_ALTITUDE,
     PAYLOAD_CORNER_PICK_ALT_M,
     PAYLOAD_DESCENT_STEP_M,
@@ -55,7 +58,6 @@ from config import (
     PIXEL_ALIGNMENT_TOLERANCE_PX,
     PAYLOAD_DROP_ALIGN_TIMEOUT_S,
     PAYLOAD_DROP_ALTITUDE,
-    PAYLOAD_RELEASE_ALTITUDE,
     PAYLOAD_SEARCH_ALTITUDE,
     PAYLOAD_SEARCH_TIMEOUT,
     PAYLOAD_SERVO_WAIT_S,
@@ -1038,13 +1040,40 @@ class MissionStateMachine:
         return False
 
     # ------------------------------------------------------------------ #
+    def _drop_config_for(self, color, shape) -> tuple[float, float]:
+        """Hedefe özel bırakma konfigürasyonu: (verify_altitude_m, offset_m).
+
+        MAVİ ALTIGEN  → BLUE_PAYLOAD_* (payload 2 — görüntü işleme 8m'de biter)
+        KIRMIZI ÜÇGEN → RED_PAYLOAD_*  (payload 1 — görüntü işleme 3m'de biter)
+        Bilinmeyen tip (test/fallback) → RED (ilk hedef — güvenli varsayılan).
+
+        NOT: verify irtifası BIRAKMA irtifası DEĞİLDİR; bırakma her zaman
+        PAYLOAD_DROP_ALTITUDE (1m)'de, görüntü işlemesiz dikey inişle yapılır.
+        """
+        if color == TargetColor.BLUE and shape == "HEXAGON":
+            return BLUE_PAYLOAD_VERIFY_ALTITUDE, BLUE_PAYLOAD_OFFSET_M
+        return RED_PAYLOAD_VERIFY_ALTITUDE, RED_PAYLOAD_OFFSET_M
+
+    # ------------------------------------------------------------------ #
     def _do_align_target(self) -> None:
         """
         Kademeli yük bırakma yaklaşımı:
-          yatay ortala → in → ortala → ... → 2.5m'de son ortalama
-          → OFFSET düzeltmesi (İHA ileri — mekanizma hedefin ortasına)
+          yatay ortala → in → ortala → ... → HEDEFE ÖZEL verify irtifasında
+          (RED üçgen: 3m / MAVİ altıgen: 8m) son ortalama
+          → hedefe özel OFFSET düzeltmesi (İHA ileri — mekanizma hedefin ortasına)
           → görüntü işleme KAPALI → dik iniş 1m → yük bırakma.
         """
+        # Hedefe özel bırakma konfigürasyonu: hizalanan hedefin tipi
+        # pending_detection veya kilitten belirlenir (ilk hedef = kırmızı üçgen,
+        # ikinci hedef = mavi altıgen).
+        det = self.data.pending_detection
+        if det is not None and getattr(det, "color", None) is not None:
+            _color, _shape = det.color, getattr(det, "shape", None)
+        elif self._locked_color is not None:
+            _color, _shape = self._locked_color, self._locked_shape
+        else:
+            _color, _shape = None, None
+        verify_alt, offset_m = self._drop_config_for(_color, _shape)
         # ── Görüntü işleme GEREKTİRMEYEN fazlar ──────────────────────────────
         # REACQUIRE: hedef görüntüden kayboldu → güvenli irtifaya (4m) yüksel;
         # irtifaya varınca beklenen tür (kilit korunur) aranır — bulunamazsa
@@ -1065,29 +1094,30 @@ class MissionStateMachine:
             self._return_search()
             return
 
-        # OFFSET: 2.5m'de ortalama bitti; İHA, hedef merkez doğrultusu boyunca
-        # DROP_OFFSET_M (0.5m) İLERİ hareket eder (yük mekanizması arkada →
-        # hedefin ortasına denk gelir). Bu adımda görüntü işleme ÇALIŞMAZ.
+        # OFFSET: verify irtifasında (RED: 3m / BLUE: 8m) ortalama bitti; İHA,
+        # hedef merkez doğrultusu boyunca HEDEFE ÖZEL offset kadar İLERİ hareket
+        # eder (yük mekanizması arkada → hedefin ortasına denk gelir).
+        # Bu adımda görüntü işleme ÇALIŞMAZ.
         if self._align_phase == "OFFSET":
             if self._offset_correction_start is None:
                 self._offset_correction_start = time.monotonic()
                 self.log.info(
                     "OFFSET (bırakma): İleri %.0fcm gidiliyor...",
-                    DROP_OFFSET_M * 100,
+                    offset_m * 100,
                 )
                 self.nav.goto_body_offset(
-                    forward_m=DROP_OFFSET_M, right_m=0.0
+                    forward_m=offset_m, right_m=0.0
                 )
                 # Görüntü işleme penceresinde bildirim göster (payload alımındaki gibi)
                 self._set_display_offset(
-                    f"OFFSET: hedefe {DROP_OFFSET_M:.1f}m ileri gidiliyor"
+                    f"OFFSET: hedefe {offset_m:.1f}m ileri gidiliyor"
                 )
                 return
             elapsed = time.monotonic() - self._offset_correction_start
             if elapsed < OFFSET_CORRECTION_WAIT_S:
                 # Bekleme süresince bildirim güncel kalsın
                 self._set_display_offset(
-                    f"OFFSET: hedefe {DROP_OFFSET_M:.1f}m ileri  "
+                    f"OFFSET: hedefe {offset_m:.1f}m ileri  "
                     f"({elapsed:.1f}/{OFFSET_CORRECTION_WAIT_S:.0f}s)"
                 )
                 return
@@ -1272,7 +1302,7 @@ class MissionStateMachine:
         )
 
         next_alt = self._next_step_down_altitude(
-            pos.relative_altitude, PAYLOAD_RELEASE_ALTITUDE,
+            pos.relative_altitude, verify_alt,
         )
         if next_alt is not None:
             self.log.info(
@@ -1285,21 +1315,22 @@ class MissionStateMachine:
             self._aligned_frame_count = 0   # iniş başladı: onay sayacı temiz
             self._send_altitude(next_alt, timeout=30.0)
         else:
-            # Son irtifada (PAYLOAD_RELEASE_ALTITUDE = 2.5m) ve tam merkezde.
-            # GPS'i kaydet, ardından kamera-mekanizma OFFSET düzeltmesine geç
-            # (mekanizma arkada → İHA ileri), sonra dik inişle 1m'ye inip bırak.
+            # Son irtifada (hedefe özel verify — RED üçgen 3m / MAVİ altıgen 8m)
+            # ve tam merkezde. GPS'i kaydet, ardından hedefe özel OFFSET
+            # düzeltmesine geç (mekanizma arkada → İHA ileri), sonra dik inişle
+            # 1m'ye inip bırak (görüntü işleme bu noktadan itibaren KAPALI).
             pos_now = self.nav.position()
             self._gps_candidates.append(
                 (pos_now.latitude, pos_now.longitude, detection.confidence)
             )
             self.log.info(
                 "Son hizalama tamamlandı (%.1fm). GPS kaydedildi: lat=%.7f lon=%.7f "
-                "güven=%.2f (toplam aday=%d). Kamera-mekanizma offset düzeltmesi "
+                "güven=%.2f (toplam aday=%d). Hedefe özel offset düzeltmesi "
                 "başlıyor (%.0fcm ileri).",
                 pos.relative_altitude,
                 pos_now.latitude, pos_now.longitude, detection.confidence,
                 len(self._gps_candidates),
-                DROP_OFFSET_M * 100,
+                offset_m * 100,
             )
             self.nav.set_max_speed(ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS)
             self._align_phase = "OFFSET"
@@ -2408,9 +2439,22 @@ class MissionStateMachine:
         Alınan yükü 2. hedefin merkezine kademeli iniş + yatay hizalama ile bırak.
         Görüntü işleme: second_target'ın renk + şeklini ara.
         _align_phase: HORIZONTAL | DESCENDING | DROPPING | DROP_ALIGN | RELEASING
+
+        Bırakma konfigürasyonu HEDEFE ÖZELDİR: ikinci hedef MAVİ ALTIGEN ise
+        BLUE_PAYLOAD_* (verify 8m + BLUE offset), KIRMIZI ÜÇGEN ise RED_* kullanılır
+        — ilk payload'ın offseti asla ikinci payload akışına sızamaz.
         """
         frame = self.camera.latest()
         pos = self.nav.position()
+
+        # Hedefe özel bırakma konfigürasyonu (2. hedefe göre).
+        target_obj = self.data.second_target
+        if target_obj is not None:
+            verify_alt, offset_m = self._drop_config_for(
+                target_obj.color, target_obj.shape
+            )
+        else:
+            verify_alt, offset_m = self._drop_config_for(None, None)
 
         # --- RELEASING ---
         if self._align_phase == "RELEASING":
@@ -2435,20 +2479,21 @@ class MissionStateMachine:
             return
 
         # --- OFFSET: son hizalama bitti; mekanizma ARKADA → İHA hedef merkez
-        # doğrultusunda DROP_OFFSET_M İLERİ gider (ilk bırakmalarla AYNI adım). ---
+        # doğrultusunda HEDEFE ÖZEL offset kadar İLERİ gider (ilk bırakmalarla
+        # AYNI adım, hedefe özel değerle). ---
         if self._align_phase == "OFFSET":
             if self._offset_correction_start is None:
                 self._offset_correction_start = time.monotonic()
                 self.log.info(
                     "Geri yük OFFSET (bırakma): İleri %.0fcm gidiliyor...",
-                    DROP_OFFSET_M * 100,
+                    offset_m * 100,
                 )
                 self.nav.goto_body_offset(
-                    forward_m=DROP_OFFSET_M, right_m=0.0
+                    forward_m=offset_m, right_m=0.0
                 )
                 # Görüntü işleme penceresinde bildirim (ilk bırakma ile aynı)
                 self._set_display_offset(
-                    f"OFFSET (geri yük): hedefe {DROP_OFFSET_M:.1f}m ileri gidiliyor"
+                    f"OFFSET (geri yük): hedefe {offset_m:.1f}m ileri gidiliyor"
                 )
                 return
             elapsed = time.monotonic() - self._offset_correction_start
@@ -2561,7 +2606,7 @@ class MissionStateMachine:
             return
 
         next_alt = self._next_step_down_altitude(
-            pos.relative_altitude, PAYLOAD_RELEASE_ALTITUDE,
+            pos.relative_altitude, verify_alt,
         )
         if next_alt is not None:
             self.log.info(
@@ -2575,7 +2620,7 @@ class MissionStateMachine:
             self.log.info(
                 "Geri yük bırakma: %.1fm'de 2. hedef merkezinde → OFFSET "
                 "düzeltmesi başlıyor (%.0fcm ileri — mekanizma hedefin ortasına).",
-                pos.relative_altitude, DROP_OFFSET_M * 100,
+                pos.relative_altitude, offset_m * 100,
             )
             self._align_phase = "OFFSET"
             self._offset_correction_start = None

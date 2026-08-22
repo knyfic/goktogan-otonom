@@ -15,11 +15,13 @@ import numpy as np
 import pytest
 
 from config import (
-    DROP_OFFSET_M,
+    BLUE_PAYLOAD_OFFSET_M,
     OFFSET_CORRECTION_WAIT_S,
     PAYLOAD_DROP_ALIGN_TIMEOUT_S,
     PAYLOAD_DROP_ALTITUDE,
     PAYLOAD_RELEASE_ALTITUDE,
+    RED_PAYLOAD_OFFSET_M,
+    RED_PAYLOAD_VERIFY_ALTITUDE,
 )
 
 
@@ -85,7 +87,10 @@ def test_release_altitude_above_drop_altitude():
 
 # ── 2) OFFSET fazı ────────────────────────────────────────────────────────── #
 def test_align_target_offset_sends_forward_offset():
-    """OFFSET fazı: İHA, bırakma offseti (DROP_OFFSET_M) kadar İLERİ gider."""
+    """OFFSET fazı: İHA, hedefe özel bırakma offseti kadar İLERİ gider.
+
+    Hedef tipi bilinmiyor (test) → güvenli varsayılan RED_PAYLOAD_OFFSET_M.
+    """
     sm, nav = _real_sm()
     sm._align_phase = "OFFSET"
     sm._offset_correction_start = None
@@ -93,7 +98,7 @@ def test_align_target_offset_sends_forward_offset():
     sm._do_align_target()
 
     nav.goto_body_offset.assert_called_once_with(
-        forward_m=DROP_OFFSET_M, right_m=0.0
+        forward_m=RED_PAYLOAD_OFFSET_M, right_m=0.0
     )
 
 
@@ -109,8 +114,13 @@ def test_align_target_offset_shows_display_notification():
 
 
 def test_drop_offset_is_configurable():
-    """Bırakma offseti config'ten okunur (sıfırdan büyük, ileri hareket)."""
-    assert DROP_OFFSET_M > 0
+    """Bırakma offsetleri config'ten okunur (sıfırdan büyük, ileri hareket).
+
+    Kırmızı ve mavi offsetler BAĞIMSIZ ve farklıdır — hedefe özel seçim testi
+    aşağıda (test_payload_drop_config).
+    """
+    assert RED_PAYLOAD_OFFSET_M > 0
+    assert BLUE_PAYLOAD_OFFSET_M > 0
 
 
 def test_align_target_offset_waits_then_drops():
@@ -144,13 +154,13 @@ def test_do_align_target_dropping_goes_straight_to_release():
 
 
 # ── 4) Geri getirilen yük bırakma: OFFSET düzeltmesi (ilk bırakma ile AYNI) ── #
-def _return_drop_sm(nav=None):
+def _return_drop_sm(nav=None, altitude: float | None = None):
     from models import Target, TargetColor, TargetType
     from state_machine import MissionStateMachine
 
     nav = nav or MagicMock()
     nav.position.return_value = MagicMock(
-        relative_altitude=PAYLOAD_RELEASE_ALTITUDE,
+        relative_altitude=altitude if altitude is not None else PAYLOAD_RELEASE_ALTITUDE,
         latitude=1.0, longitude=1.0, heading_deg=0.0,
     )
     camera = MagicMock()
@@ -182,8 +192,9 @@ def _return_drop_sm(nav=None):
 
 
 def test_release_returned_payload_enters_offset_after_final_align():
-    """Son hizalama bitince (3m) DROPPING'e değil OFFSET'e geçilir."""
-    sm, nav = _return_drop_sm()
+    """Son hizalama bitince (kırmızı üçgen verify irtifası = 3m) DROPPING'e değil
+    OFFSET'e geçilir."""
+    sm, nav = _return_drop_sm(altitude=RED_PAYLOAD_VERIFY_ALTITUDE)
     sm._align_phase = "HORIZONTAL"
 
     sm._do_release_returned_payload()
@@ -193,7 +204,10 @@ def test_release_returned_payload_enters_offset_after_final_align():
 
 
 def test_release_returned_payload_offset_sends_forward_offset():
-    """OFFSET fazı: İHA, DROP_OFFSET_M kadar İLERİ gider (mekanizma hedefin üstüne)."""
+    """OFFSET fazı: İHA, hedefe özel offset kadar İLERİ gider.
+
+    Fixture'daki 2. hedef kırmızı üçgen → RED_PAYLOAD_OFFSET_M kullanılır.
+    """
     sm, nav = _return_drop_sm()
     sm._align_phase = "OFFSET"
     sm._offset_correction_start = None
@@ -201,7 +215,7 @@ def test_release_returned_payload_offset_sends_forward_offset():
     sm._do_release_returned_payload()
 
     nav.goto_body_offset.assert_called_once_with(
-        forward_m=DROP_OFFSET_M, right_m=0.0
+        forward_m=RED_PAYLOAD_OFFSET_M, right_m=0.0
     )
     assert sm._pending_display is not None   # görüntü işleme penceresinde bildirim
 

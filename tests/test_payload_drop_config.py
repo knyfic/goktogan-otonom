@@ -2,24 +2,33 @@
 Hedefe özel payload bırakma konfigürasyonu testleri.
 
 Görev kuralı:
-  Payload 1 (MAVİ payload) → KIRMIZI ÜÇGEN   → verify 3m  + RED offset
-  Payload 2 (KIRMIZI payload) → MAVİ ALTIGEN → verify 8m  + BLUE offset
-  Bırakma her zaman PAYLOAD_DROP_ALTITUDE (1m)'de — verify irtifası bırakma
-  irtifası DEĞİLDİR; verify → OFFSET → görüntü işlemesiz dikey iniş → 1m → bırak.
+  Payload 1 (MAVİ payload) → KIRMIZI ÜÇGEN   → 3m'de offset + RED offset
+  Payload 2 (KIRMIZI payload) → MAVİ ALTIGEN → şekil-kilit 8m, takip 8m→3m,
+                                               3m'de offset + BLUE offset
+  Bırakma her zaman PAYLOAD_DROP_ALTITUDE (1m)'de — görüntü işlemesiz dikey iniş.
+
+MAVİ ALTIGEN takip kuralı (8m → 3m):
+  - 8m'ye kadar şekil doğrulamalı detection (BLUE_PAYLOAD_VERIFY_ALTITUDE).
+  - 8m'den 3m'ye kadar şekil doğrulaması YOK: kilitli hedefin MAVİ BÖLGESİ
+    takip edilir (kadraj taşmasına dayanıklı) — yanlış mavi nesneye atlanmaz.
+  - 3m'de (RED_PAYLOAD_VERIFY_ALTITUDE) offset doğrulaması başlar (kırmızıyla
+    aynı altyapı).
 
 Kapsanan gereksinimler:
-  Test 1 — kırmızı payload: RED_TRIANGLE → 3m verify + RED offset + dikey iniş 1m
-  Test 2 — mavi payload:   BLUE_HEXAGON → 8m verify + BLUE offset + dikey iniş 1m
+  Test 1 — kırmızı payload: RED_TRIANGLE → 3m offset + RED offset + dikey iniş 1m
+  Test 2 — mavi payload:   8m şekil-kilit → takip → 3m offset + BLUE offset
   Test 3 — returning payload: 2. hedef MAVİ ALTIGEN ise BLUE offset seçilir
   Test 4 — offset ayrılığı: RED/BLUE offsetler farklı ve doğru hedefe bağlı
-  Test 5 — vision cutoff: verify sonrası görüntü tabanlı yatay düzeltme YOK
-  Test 6 — final descent: verify → OFFSET → görüntüsüz dikey iniş → 1m → bırakma
+  Test 5 — vision cutoff: offset sonrası görüntü tabanlı yatay düzeltme YOK
+  Test 6 — final descent: offset → görüntüsüz dikey iniş → 1m → bırakma
+  Takip  — 8m sonrası şekil doğrulamasız mavi bölge takibi; taşma; yanlış nesne
 """
 import logging
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import cv2
 import numpy as np
 import pytest
 
@@ -32,10 +41,18 @@ from config import (
     RED_PAYLOAD_VERIFY_ALTITUDE,
     TARGET_ALIGNED_FRAMES_REQUIRED,
 )
-from models import MissionState, Target, TargetColor, TargetType
+from models import Detection, MissionState, Target, TargetColor, TargetType
 
 
-def _align_sm(target_color, target_shape, altitude):
+def _blue_blob_frame(cx=960.0, cy=352.0, w=300, h=220):
+    """Merkezde mavi dikdörtgen bölge içeren frame (altıgen değil)."""
+    frame = np.zeros((704, 1920, 3), dtype=np.uint8)
+    cv2.rectangle(frame, (int(cx - w // 2), int(cy - h // 2)),
+                  (int(cx + w // 2), int(cy + h // 2)), (255, 0, 0), -1)
+    return frame
+
+
+def _align_sm(target_color, target_shape, altitude, frame=None):
     """ALIGNING_TARGET durumunda, hedef tipi + irtifa ile gerçek SM kur."""
     from state_machine import MissionStateMachine
 
@@ -44,7 +61,9 @@ def _align_sm(target_color, target_shape, altitude):
         relative_altitude=altitude, latitude=1.0, longitude=1.0, heading_deg=0.0,
     )
     camera = MagicMock()
-    camera.latest.return_value = np.zeros((704, 1920, 3), dtype=np.uint8)
+    camera.latest.return_value = (
+        frame if frame is not None else np.zeros((704, 1920, 3), dtype=np.uint8)
+    )
 
     sm = MissionStateMachine(
         navigation=nav, camera=camera, payload=MagicMock(),
@@ -97,16 +116,78 @@ def test_red_triangle_verify_at_3m_then_red_offset():
     )
 
 
-# ── Test 2 — MAVİ altıgen (payload 2) ────────────────────────────────────── #
-def test_blue_hexagon_verify_at_8m_then_blue_offset():
-    """BLUE_HEXAGON: 8m'de (verify) onay dolunca OFFSET; OFFSET adımı BLUE offset."""
-    sm, nav = _align_sm(TargetColor.BLUE, "HEXAGON", BLUE_PAYLOAD_VERIFY_ALTITUDE)
+# ── Test 2 — MAVİ altıgen (payload 2): 8m şekil-kilit → takip → 3m offset ── #
+def test_blue_hexagon_shape_lock_at_8m_then_tracking_descend():
+    """BLUE_HEXAGON: 8m'de (şekil-kilit irtifası) onay dolunca OFFSET'e DEĞİL
+    kademeli inişe geçilir — takip 3m'ye kadar sürer (BLUE offset 3m'de başlar)."""
+    sm, nav = _align_sm(TargetColor.BLUE, "HEXAGON", BLUE_PAYLOAD_VERIFY_ALTITUDE,
+                        frame=_blue_blob_frame())
+    assert _run_horizontal_decision(sm, nav) == "DESCENDING", \
+        "8m'de şekil-kilit tamamlanır; OFFSET 3m'de başlar (önce takipli iniş)"
+    assert sm._alt_target == pytest.approx(BLUE_PAYLOAD_VERIFY_ALTITUDE - 1.0)
+
+
+def test_blue_hexagon_offset_at_3m_uses_blue_offset():
+    """BLUE_HEXAGON: 3m'de (ortak offset irtifası) OFFSET başlar, BLUE offset."""
+    sm, nav = _align_sm(TargetColor.BLUE, "HEXAGON", RED_PAYLOAD_VERIFY_ALTITUDE,
+                        frame=_blue_blob_frame())
     assert _run_horizontal_decision(sm, nav) == "OFFSET", \
-        "verify irtifasında (8m) onay dolunca OFFSET'e geçilmeli"
+        "3m'de offset doğrulaması başlamalı (kırmızıyla aynı)"
     _enter_offset(sm)
     nav.goto_body_offset.assert_called_once_with(
         forward_m=BLUE_PAYLOAD_OFFSET_M, right_m=0.0
     )
+
+
+# ── Takip (8m → 3m): şekil doğrulaması YOK, mavi bölge centroid'i ─────────── #
+def test_blue_tracking_uses_blue_region_without_shape_verification():
+    """8m'de altıgen OLMAYAN mavi bölge bile takip edilir — şekil doğrulamalı
+    detektör (target_detector.detect) çağrılmaz."""
+    sm, nav = _align_sm(TargetColor.BLUE, "HEXAGON", BLUE_PAYLOAD_VERIFY_ALTITUDE,
+                        frame=_blue_blob_frame())   # dikdörtgen — altıgen değil
+    sm.target_detector.detect.return_value = []     # şekil doğrulamalı yol boş dönerdi
+    sm.position_controller.align_detection.reset_mock()
+
+    assert _run_horizontal_decision(sm, nav) == "DESCENDING", \
+        "mavi bölge takibiyle inişe geçilmeli (şekil doğrulaması şart değil)"
+    sm.target_detector.detect.assert_not_called()
+    assert sm.data.pending_detection.center_x == pytest.approx(960.0, abs=5)
+    assert sm.data.pending_detection.center_y == pytest.approx(352.0, abs=5)
+
+
+def test_blue_tracking_continues_when_hexagon_overflows_frame():
+    """Hedef kadrajdan TAŞSA bile (mavi bölge kenarlara dayanıyor) takip sürer."""
+    frame = np.zeros((704, 1920, 3), dtype=np.uint8)
+    cv2.rectangle(frame, (0, 0), (1919, 703), (255, 0, 0), -1)   # tam ekran mavi
+    sm, nav = _align_sm(TargetColor.BLUE, "HEXAGON", 6.0, frame=frame)
+
+    tracked = sm._track_blue_region_centroid(frame)
+    assert tracked is not None, "taşmış hedefin mavi bölgesi yine de takip edilmeli"
+    assert tracked.center_x == pytest.approx(960.0, abs=5)
+    assert tracked.center_y == pytest.approx(352.0, abs=5)
+
+
+def test_blue_tracking_prefers_target_over_wrong_blue_object():
+    """Yanlış (uzak) büyük mavi nesne olsa bile takip, son bilinen hedef merkezine
+    en yakın bölgede kalır — rastgele mavi nesneye atlanmaz."""
+    frame = _blue_blob_frame(cx=960, cy=352, w=200, h=200)             # hedef
+    cv2.rectangle(frame, (1500, 60), (1860, 380), (255, 0, 0), -1)     # yanlış nesne
+    sm, nav = _align_sm(TargetColor.BLUE, "HEXAGON", 6.0, frame=frame)
+
+    tracked = sm._track_blue_region_centroid(frame)
+    assert tracked is not None
+    assert tracked.center_x == pytest.approx(960.0, abs=5), \
+        "referans merkeze en yakın bölge seçilmeli (yanlış nesneye atlanmamalı)"
+
+
+def test_red_uses_shape_verified_detection_in_tracking_window():
+    """KIRMIZI: 3-8m aralığında bile şekil doğrulamalı detection kullanılır
+    (takip modu yalnızca mavi altıgen içindir — mevcut davranış korunur)."""
+    sm, nav = _align_sm(TargetColor.RED, "TRIANGLE", 5.0)
+    sm.target_detector.detect.return_value = [sm.data.pending_detection]
+
+    assert _run_horizontal_decision(sm, nav) == "DESCENDING"
+    sm.target_detector.detect.assert_called()
 
 
 # ── Test 3 — Returning payload (2. hedef) ────────────────────────────────── #
@@ -175,17 +256,25 @@ def test_offsets_are_separate_and_mapped_per_target():
     )
 
 
-# ── Test 5 — Vision cutoff (verify sonrası görüntü işleme YOK) ───────────── #
-def test_above_verify_altitude_descends_not_offset():
-    """Verify irtifasının ÜSTÜNDE onay dolunca OFFSET'e DEĞİL kademeli inişe geçilir
-    (görüntü işleme verify irtifasına KADAR sürer)."""
+# ── Test 5 — Vision cutoff (offset sonrası görüntü işleme YOK) ──────────── #
+def test_above_offset_altitude_descends_not_offset():
+    """Offset irtifasının ÜSTÜNDE onay dolunca OFFSET'e DEĞİL kademeli inişe
+    geçilir (kırmızı: 3m üstü; mavi: 8m üstü şekil doğrulamalı, 8m-3m takip)."""
     sm, nav = _align_sm(TargetColor.RED, "TRIANGLE", RED_PAYLOAD_VERIFY_ALTITUDE + 1.0)
     assert _run_horizontal_decision(sm, nav) == "DESCENDING"
     assert sm._alt_target == pytest.approx(RED_PAYLOAD_VERIFY_ALTITUDE)
 
-    sm2, nav2 = _align_sm(TargetColor.BLUE, "HEXAGON", BLUE_PAYLOAD_VERIFY_ALTITUDE + 1.0)
+    # Mavi 9m (> 8m şekil-kilit): şekil doğrulamalı detection + iniş
+    sm2, nav2 = _align_sm(TargetColor.BLUE, "HEXAGON", BLUE_PAYLOAD_VERIFY_ALTITUDE + 1.0,
+                          frame=_blue_blob_frame())
     assert _run_horizontal_decision(sm2, nav2) == "DESCENDING"
     assert sm2._alt_target == pytest.approx(BLUE_PAYLOAD_VERIFY_ALTITUDE)
+
+    # Mavi 8m (şekil-kilit): takip modu + iniş (3m'ye kadar)
+    sm3, nav3 = _align_sm(TargetColor.BLUE, "HEXAGON", BLUE_PAYLOAD_VERIFY_ALTITUDE,
+                          frame=_blue_blob_frame())
+    assert _run_horizontal_decision(sm3, nav3) == "DESCENDING"
+    assert sm3._alt_target == pytest.approx(BLUE_PAYLOAD_VERIFY_ALTITUDE - 1.0)
 
 
 def test_no_vision_correction_after_verify_altitude():
@@ -212,10 +301,11 @@ def test_no_vision_correction_after_verify_altitude():
 
 # ── Test 6 — Final descent sırası ────────────────────────────────────────── #
 def test_final_descent_sequence_verify_offset_vertical_drop():
-    """Sıra: verify → OFFSET → görüntüsüz dikey iniş → 1m → bırakma fazına geçiş."""
-    sm, nav = _align_sm(TargetColor.BLUE, "HEXAGON", BLUE_PAYLOAD_VERIFY_ALTITUDE)
+    """Sıra: 3m'de OFFSET → görüntüsüz dikey iniş → 1m → bırakma fazına geçiş."""
+    sm, nav = _align_sm(TargetColor.BLUE, "HEXAGON", RED_PAYLOAD_VERIFY_ALTITUDE,
+                        frame=_blue_blob_frame())
 
-    # 1) verify irtifasında (8m) onay → OFFSET
+    # 1) 3m'de (ortak offset irtifası) onay → OFFSET
     assert _run_horizontal_decision(sm, nav) == "OFFSET"
     # 2) OFFSET: ileri hareket komutu
     _enter_offset(sm)

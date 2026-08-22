@@ -44,6 +44,7 @@ from config import (
     MISSION_TIMEOUT_S,
     MAX_PICKUP_ATTEMPTS,
     MAX_PAYLOAD_SIZE_FACTOR,
+    MIN_TARGET_AREA_PX,
     OFFSET_CORRECTION_WAIT_S,
     PAYLOAD_ALIGN_TIMEOUT_S,
     PAYLOAD_ALIGN_ALTITUDE_M,
@@ -1040,28 +1041,96 @@ class MissionStateMachine:
         return False
 
     # ------------------------------------------------------------------ #
-    def _drop_config_for(self, color, shape) -> tuple[float, float]:
-        """Hedefe özel bırakma konfigürasyonu: (verify_altitude_m, offset_m).
+    def _drop_config_for(self, color, shape) -> tuple[float, float, float]:
+        """Hedefe özel bırakma konfigürasyonu: (offset_alt, shape_lock_alt, offset_m).
 
-        MAVİ ALTIGEN  → BLUE_PAYLOAD_* (payload 2 — görüntü işleme 8m'de biter)
-        KIRMIZI ÜÇGEN → RED_PAYLOAD_*  (payload 1 — görüntü işleme 3m'de biter)
+        offset_alt     — görüntü tabanlı merkezlemenin BİTTİĞİ ve offset
+                         doğrulamanın başladığı ORTAK irtifa
+                         (RED_PAYLOAD_VERIFY_ALTITUDE = 3m).
+        shape_lock_alt — şekil doğrulamalı detection'ın geçerli olduğu SON irtifa:
+                         KIRMIZI ÜÇGEN → offset_alt (3m — tüm yaklaşımda şekil
+                         doğrulanır); MAVİ ALTIGEN → BLUE_PAYLOAD_VERIFY_ALTITUDE
+                         (8m — bu irtifadan SONRA şekil doğrulanmaz, yalnızca
+                         kilitli hedefin mavi bölgesi takip edilir).
+        offset_m       — hedefe özel offset mesafesi.
+
         Bilinmeyen tip (test/fallback) → RED (ilk hedef — güvenli varsayılan).
-
-        NOT: verify irtifası BIRAKMA irtifası DEĞİLDİR; bırakma her zaman
-        PAYLOAD_DROP_ALTITUDE (1m)'de, görüntü işlemesiz dikey inişle yapılır.
         """
         if color == TargetColor.BLUE and shape == "HEXAGON":
-            return BLUE_PAYLOAD_VERIFY_ALTITUDE, BLUE_PAYLOAD_OFFSET_M
-        return RED_PAYLOAD_VERIFY_ALTITUDE, RED_PAYLOAD_OFFSET_M
+            return (RED_PAYLOAD_VERIFY_ALTITUDE,
+                    BLUE_PAYLOAD_VERIFY_ALTITUDE,
+                    BLUE_PAYLOAD_OFFSET_M)
+        return (RED_PAYLOAD_VERIFY_ALTITUDE,
+                RED_PAYLOAD_VERIFY_ALTITUDE,
+                RED_PAYLOAD_OFFSET_M)
+
+    # ------------------------------------------------------------------ #
+    def _track_blue_region_centroid(self, frame) -> Detection | None:
+        """MAVİ ALTIGEN — şekil doğrulamasız hedef takibi (8m → 3m fazı).
+
+        Sorun: 8m'de kilitlenen altıgen, aşağı inildikçe büyür ve kadrajdan
+        taşabilir; bu durumda _classify_shape() başarısız olup hedef "kaybolur"
+        (köşe sayısı okunamaz). Çözüm: şekil doğrulaması YAPILMAZ — mavi renk
+        maskesinin konturlarından, SON BİLİNEN hedef merkezine EN YAKIN olanın
+        centroid'i döndürülür. Hedef taşsa bile mavi bölgenin merkezi kadraj
+        merkezine yakın kalır; referans merkeze yakınlık şartı sayesinde
+        rastgele başka bir büyük mavi nesneye atlanmaz.
+
+        Returns: Detection (merkez + bbox + alan) veya None (mavi bölge yok).
+        """
+        hsv = TargetDetector._preprocess_for_hsv(frame)
+        mask = TargetDetector._color_mask(hsv, TargetColor.BLUE)
+        mask = TargetDetector._clean_mask(mask)
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if not contours:
+            return None
+
+        # Referans merkez: son bilinen hedef (yoksa görüntü merkezi)
+        ref = self.data.pending_detection
+        if ref is not None and getattr(ref, "center_x", None) is not None:
+            ref_x, ref_y = float(ref.center_x), float(ref.center_y)
+        else:
+            ref_x, ref_y = frame.shape[1] / 2.0, frame.shape[0] / 2.0
+
+        best: Detection | None = None
+        best_dist = float("inf")
+        for c in contours:
+            m = cv2.moments(c)
+            if m["m00"] == 0:
+                continue
+            area = cv2.contourArea(c)
+            if area < MIN_TARGET_AREA_PX:      # gürültü pikselciklerini ele
+                continue
+            cx = m["m10"] / m["m00"]
+            cy = m["m01"] / m["m00"]
+            d = (cx - ref_x) ** 2 + (cy - ref_y) ** 2
+            if d < best_dist:
+                best_dist = d
+                _, _, bw, bh = cv2.boundingRect(c)
+                best = Detection(
+                    color=TargetColor.BLUE, shape="HEXAGON",
+                    center_x=float(cx), center_y=float(cy),
+                    area_px=float(area),
+                    bbox_width_px=float(bw), bbox_height_px=float(bh),
+                    confidence=0.8, color_purity=1.0,
+                )
+        return best
 
     # ------------------------------------------------------------------ #
     def _do_align_target(self) -> None:
         """
         Kademeli yük bırakma yaklaşımı:
-          yatay ortala → in → ortala → ... → HEDEFE ÖZEL verify irtifasında
-          (RED üçgen: 3m / MAVİ altıgen: 8m) son ortalama
+          yatay ortala → in → ortala → ... → ORTAK offset irtifasında
+          (RED_PAYLOAD_VERIFY_ALTITUDE = 3m) son ortalama
           → hedefe özel OFFSET düzeltmesi (İHA ileri — mekanizma hedefin ortasına)
           → görüntü işleme KAPALI → dik iniş 1m → yük bırakma.
+
+        MAVİ ALTIGEN farkı: BLUE_PAYLOAD_VERIFY_ALTITUDE (8m)'ye kadar şekil
+        doğrulamalı detection; 8m'den 3m'ye kadar ŞEKİL DOĞRULAMASIZ mavi bölge
+        takibi (_track_blue_region_centroid — hedef büyüyüp kadrajdan taşsa bile
+        kaybolmaz). 3m'de offset doğrulaması başlar (kırmızı ile aynı altyapı).
         """
         # Hedefe özel bırakma konfigürasyonu: hizalanan hedefin tipi
         # pending_detection veya kilitten belirlenir (ilk hedef = kırmızı üçgen,
@@ -1073,7 +1142,7 @@ class MissionStateMachine:
             _color, _shape = self._locked_color, self._locked_shape
         else:
             _color, _shape = None, None
-        verify_alt, offset_m = self._drop_config_for(_color, _shape)
+        offset_alt, shape_lock_alt, offset_m = self._drop_config_for(_color, _shape)
         # ── Görüntü işleme GEREKTİRMEYEN fazlar ──────────────────────────────
         # REACQUIRE: hedef görüntüden kayboldu → güvenli irtifaya (4m) yüksel;
         # irtifaya varınca beklenen tür (kilit korunur) aranır — bulunamazsa
@@ -1094,10 +1163,10 @@ class MissionStateMachine:
             self._return_search()
             return
 
-        # OFFSET: verify irtifasında (RED: 3m / BLUE: 8m) ortalama bitti; İHA,
-        # hedef merkez doğrultusu boyunca HEDEFE ÖZEL offset kadar İLERİ hareket
-        # eder (yük mekanizması arkada → hedefin ortasına denk gelir).
-        # Bu adımda görüntü işleme ÇALIŞMAZ.
+        # OFFSET: ortak offset irtifasında (RED_PAYLOAD_VERIFY_ALTITUDE = 3m)
+        # ortalama bitti; İHA, hedef merkez doğrultusu boyunca HEDEFE ÖZEL offset
+        # kadar İLERİ hareket eder (yük mekanizması arkada → hedefin ortasına
+        # denk gelir). Bu adımda görüntü işleme ÇALIŞMAZ.
         if self._align_phase == "OFFSET":
             if self._offset_correction_start is None:
                 self._offset_correction_start = time.monotonic()
@@ -1154,6 +1223,16 @@ class MissionStateMachine:
 
         pos = self.nav.position()
 
+        # MAVİ ALTIGEN + irtifa <= şekil-kilit irtifası (8m) → ŞEKİL DOĞRULAMASI
+        # KAPALI: yalnızca kilitli hedefin mavi bölgesi takip edilir (kadraj
+        # taşmasına dayanıklı). Kırmızı üçgen (shape_lock_alt = 3m) ve 8m üstünde
+        # ise mevcut tam detection (şekil doğrulamalı) kullanılır.
+        tracking_mode = (
+            _color == TargetColor.BLUE
+            and _shape == "HEXAGON"
+            and pos.relative_altitude <= shape_lock_alt
+        )
+
         if pos.relative_altitude < 0.5:
             self.log.warning("İrtifa tehlikeli düşük %.1fm, geri çekiliyor.", pos.relative_altitude)
             self._reset_altitude_state()
@@ -1164,24 +1243,40 @@ class MissionStateMachine:
         if now_status - self._last_align_status_log_t > 2.0:
             self._last_align_status_log_t = now_status
             self.log.info(
-                "ALIGN aktif: faz=%s irtifa=%.1fm kayıp_sayac=%d kilit=%s/%s",
+                "ALIGN aktif: faz=%s irtifa=%.1fm kayıp_sayac=%d kilit=%s/%s "
+                "takip=%s",
                 self._align_phase, pos.relative_altitude, self._no_detection_count,
                 self._locked_color.value if self._locked_color else "-",
                 self._locked_shape or "-",
+                "mavi-bölge" if tracking_mode else "şekil-dogrulu",
             )
 
-        detections = self._filter_active_detections(self.target_detector.detect(frame))
-        self._set_display_detections(frame, detections)
-
-        if detections:
-            picked = self._pick_locked_detection(detections)
-            self.data.pending_detection = picked
-            self._no_detection_count = 0
-            p = self.nav.position()
-            self._target_rough_lat = p.latitude
-            self._target_rough_lon = p.longitude
+        if tracking_mode:
+            # 8m sonrası: şekil doğrulaması YOK — kilitli mavi bölgenin
+            # centroid'i takip edilir (hedef büyüyüp kadrajdan taşsa bile kaybolmaz).
+            tracked = self._track_blue_region_centroid(frame)
+            self._set_display_detections(frame, [tracked] if tracked else [])
+            if tracked is not None:
+                self.data.pending_detection = tracked
+                self._no_detection_count = 0
+                p = self.nav.position()
+                self._target_rough_lat = p.latitude
+                self._target_rough_lon = p.longitude
+            else:
+                self._no_detection_count += 1
         else:
-            self._no_detection_count += 1
+            detections = self._filter_active_detections(self.target_detector.detect(frame))
+            self._set_display_detections(frame, detections)
+
+            if detections:
+                picked = self._pick_locked_detection(detections)
+                self.data.pending_detection = picked
+                self._no_detection_count = 0
+                p = self.nav.position()
+                self._target_rough_lat = p.latitude
+                self._target_rough_lon = p.longitude
+            else:
+                self._no_detection_count += 1
 
         # ---------- DESCENDING fazı ----------
         if self._align_phase == "DESCENDING":
@@ -1302,7 +1397,7 @@ class MissionStateMachine:
         )
 
         next_alt = self._next_step_down_altitude(
-            pos.relative_altitude, verify_alt,
+            pos.relative_altitude, offset_alt,
         )
         if next_alt is not None:
             self.log.info(
@@ -1315,8 +1410,8 @@ class MissionStateMachine:
             self._aligned_frame_count = 0   # iniş başladı: onay sayacı temiz
             self._send_altitude(next_alt, timeout=30.0)
         else:
-            # Son irtifada (hedefe özel verify — RED üçgen 3m / MAVİ altıgen 8m)
-            # ve tam merkezde. GPS'i kaydet, ardından hedefe özel OFFSET
+            # Son irtifada (ortak offset irtifası = RED_PAYLOAD_VERIFY_ALTITUDE
+            # 3m) ve tam merkezde. GPS'i kaydet, ardından hedefe özel OFFSET
             # düzeltmesine geç (mekanizma arkada → İHA ileri), sonra dik inişle
             # 1m'ye inip bırak (görüntü işleme bu noktadan itibaren KAPALI).
             pos_now = self.nav.position()
@@ -2441,8 +2536,10 @@ class MissionStateMachine:
         _align_phase: HORIZONTAL | DESCENDING | DROPPING | DROP_ALIGN | RELEASING
 
         Bırakma konfigürasyonu HEDEFE ÖZELDİR: ikinci hedef MAVİ ALTIGEN ise
-        BLUE_PAYLOAD_* (verify 8m + BLUE offset), KIRMIZI ÜÇGEN ise RED_* kullanılır
-        — ilk payload'ın offseti asla ikinci payload akışına sızamaz.
+        şekil doğrulaması 8m'ye kadar (BLUE_PAYLOAD_VERIFY_ALTITUDE), sonrasında
+        mavi bölge takibi; offset her iki hedefte de 3m'de (RED_PAYLOAD_VERIFY_ALTITUDE)
+        başlar ve hedefe özel BLUE/RED offset kullanılır — ilk payload'ın offseti
+        asla ikinci payload akışına sızamaz.
         """
         frame = self.camera.latest()
         pos = self.nav.position()
@@ -2450,11 +2547,20 @@ class MissionStateMachine:
         # Hedefe özel bırakma konfigürasyonu (2. hedefe göre).
         target_obj = self.data.second_target
         if target_obj is not None:
-            verify_alt, offset_m = self._drop_config_for(
+            offset_alt, shape_lock_alt, offset_m = self._drop_config_for(
                 target_obj.color, target_obj.shape
             )
         else:
-            verify_alt, offset_m = self._drop_config_for(None, None)
+            offset_alt, shape_lock_alt, offset_m = self._drop_config_for(None, None)
+
+        # MAVİ ALTIGEN + irtifa <= şekil-kilit irtifası (8m) → şekil doğrulamasız
+        # mavi bölge takibi (kadraj taşmasına dayanıklı).
+        tracking_mode = (
+            target_obj is not None
+            and target_obj.color == TargetColor.BLUE
+            and target_obj.shape == "HEXAGON"
+            and pos.relative_altitude <= shape_lock_alt
+        )
 
         # --- RELEASING ---
         if self._align_phase == "RELEASING":
@@ -2568,14 +2674,19 @@ class MissionStateMachine:
             return
 
         target_obj = self.data.second_target
-        detections = self.target_detector.detect(frame)
-        if target_obj is not None:
-            # Yalnızca 2. hedefe ait renk + şekli ara
-            detections = [
-                d for d in detections
-                if d.color == target_obj.color
-                and d.shape == target_obj.shape.value
-            ]
+        if tracking_mode:
+            # MAVİ ALTIGEN + ≤8m: şekil doğrulaması YOK — kilitli mavi bölge takibi
+            tracked = self._track_blue_region_centroid(frame)
+            detections = [tracked] if tracked is not None else []
+        else:
+            detections = self.target_detector.detect(frame)
+            if target_obj is not None:
+                # Yalnızca 2. hedefe ait renk + şekli ara
+                detections = [
+                    d for d in detections
+                    if d.color == target_obj.color
+                    and d.shape == target_obj.shape.value
+                ]
         self._set_display_detections(frame, detections)
 
         if not detections:
@@ -2606,7 +2717,7 @@ class MissionStateMachine:
             return
 
         next_alt = self._next_step_down_altitude(
-            pos.relative_altitude, verify_alt,
+            pos.relative_altitude, offset_alt,
         )
         if next_alt is not None:
             self.log.info(

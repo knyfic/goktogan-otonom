@@ -19,14 +19,22 @@ TARGET_APPROACH_ALTITUDE = 8.0
 # Görev kuralı (hedef/payload eşlemesi — payload_for_target ile birebir):
 #   Payload 1 (MAVİ payload) → KIRMIZI ÜÇGEN
 #   Payload 2 (KIRMIZI payload) → MAVİ ALTIGEN
-# Her hedef için BAĞIMSIZ iki değer tanımlanır:
-#   VERIFY_ALTITUDE — görüntü işlemeli hizalamanın BİTTİĞİ ve offset doğrulama
-#       aşamasına geçildiği irtifa. Bu, payload'ın BIRAKILDIĞI irtifa DEĞİLDİR;
-#       bırakma her zaman PAYLOAD_DROP_ALTITUDE (1m)'de, görüntü işlemesiz
-#       dikey inişle yapılır.
-#   OFFSET_M — offset doğrulama adımında İHA'nın hedef merkez doğrultusunda
+#
+# ORTAK akış (iki hedef için de):
+#   görüntü tabanlı merkezleme → RED_PAYLOAD_VERIFY_ALTITUDE (3m) → OFFSET
+#   doğrulaması → görüntü işlemesiz dik iniş → PAYLOAD_DROP_ALTITUDE (1m) → bırak.
+# 3m/8m BIRAKMA irtifası DEĞİLDİR — yalnızca görüntü işlemenin bittiği irtifadır.
+#
+#   RED_PAYLOAD_VERIFY_ALTITUDE (3m): görüntü tabanlı merkezlemenin bittiği ve
+#       offset doğrulamasının başladığı ORTAK irtifa (her iki hedef için).
+#   BLUE_PAYLOAD_VERIFY_ALTITUDE (8m): mavi altıgen için ŞEKİL DOĞRULAMALI
+#       detection/kilit aşamasının bittiği irtifa. 8m'den sonra şekil tekrar
+#       doğrulanmaz; 8m'de kilitlenen hedefin MAVİ BÖLGESİ 3m'ye kadar takip
+#       edilir (hedef büyüyüp kadrajdan taşsa bile kaybolmaz). Kırmızı üçgende
+#       ayrı bir şekil-kilit irtifası yoktur — aynı 3m geçerlidir.
+#   *_OFFSET_M: OFFSET doğrulama adımında İHA'nın hedef merkez doğrultusunda
 #       ileri gideceği mesafe (mekanizma arkada → hedefin ortasına denk gelir).
-# Kırmızı ve mavi değerler BİRBİRİNDEN BAĞIMSIZDİR (offsetler ayrı kalibre edilir).
+# Kırmızı/mavi değerler BİRBİRİNDEN BAĞIMSIZDİR (saha kalibrasyonuna göre ayrı ayarlanır).
 RED_PAYLOAD_VERIFY_ALTITUDE  = 3.0
 RED_PAYLOAD_OFFSET_M         = 1.5
 BLUE_PAYLOAD_VERIFY_ALTITUDE = 8.0

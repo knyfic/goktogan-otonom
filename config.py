@@ -13,12 +13,12 @@ GAZEBO_TRANSPORT_MODULE = "gz.transport"
 # Kalkış + HER İKİ hedef araması (kırmızı üçgen / mavi altıgen) bu irtifada yapılır.
 # 11.5m'de kamera 30×100m alanı görür → her arama tek geçiş (single_pass) ile yapılır.
 TAKEOFF_ALTITUDE = 11.5
-TARGET_APPROACH_ALTITUDE = 4.0
+TARGET_APPROACH_ALTITUDE = 8.0
 
 # Yük bırakma: görüntü işleme ile HASSAS hizalanılan irtifa.
 # Kadraj kırpma + yarı çözünürlük sonrası (960x352) görüş daraldığı için
 # 1m gibi alçak irtifada hizalama yapılamıyor → son hizalama 2.5m'de yapılır.
-PAYLOAD_RELEASE_ALTITUDE = 3
+PAYLOAD_RELEASE_ALTITUDE = 8
 # Hizalama + offset düzeltmesi sonrası DİK iniş ile inilen ve yükün bırakıldığı irtifa
 PAYLOAD_DROP_ALTITUDE = 1.0
 # 1m'de görüntüye göre EK hizalama denemesi (saniye). 0 → devre dışı:
@@ -212,9 +212,9 @@ VISION_VERTICAL_FOV_DEG = 2.0 * math.degrees(math.atan(
     * VISION_CROP_HEIGHT_PX / CAMERA_HEIGHT_PX
 ))
 
-# Fiziksel boyut filtreleri (px²) — yarı çözünürlükte alan 1/4'e iner;
-# aynı fiziksel eşik için değerler de 1/4'e ölçeklenir.
-MIN_TARGET_AREA_PX = 100.0
+# Fiziksel boyut filtreleri (px²) — yarı çözünürlükte alan 2/4'e iner;
+# aynı fiziksel eşik için değerler de 2/4'e ölçeklenir.
+MIN_TARGET_AREA_PX = 101.0
 MIN_PAYLOAD_AREA_PX = 10.0
 DETECTION_HISTORY_SIZE = 5
 MIN_STABLE_DETECTIONS = 3

@@ -96,3 +96,15 @@ arducopterin parametrelerini değiştiren veya aşan kodlar bulunabilri bunlar t
 
 fps yazılacak
 kamera kaydı gerceye yakın alınacak
+
+- konturun tamamı görüntüde mi? sorusu sorulabilri bu sayede kırmızı ucgen kırmızı kare ile karıstırlmaz
+iha once objeye yonelebilir objenin tamamı goruntude olduktan sonra kare mi ucgen mi oldugunu anlar eger devam etmesi gereken line a geri donerek search gerceklestirir.
+
+garip bir hata: ik basta araması gereken sekil kırmız sekidle fakat kırmızı sekill tespit edilir ve ardından kadrajdan cıkar ve tam bu esnada eger mavi sekilde kadrajda ise mavi sekil tespit edilir. halbuki en basından araması gereken sekilde zaten kırmızı bir ucgen oldugu icin neden kırmızı ucgen kadradaj nbir anlıgna cıkınca mavi altıgeni de targetliyor ki? baska bir durumda mavi altıgeni targetlamıyor.
+
+8m irtifadan 10cm lik bir yuku gormesi imkansiz payload zaten kırmızı payload zaten kırmızı ucgenden alınacagı icin payloada gideceegi irtifa dusurulebilir payload search altitude degistirilerek duzeltilebilir.
+
+ilk payloadı kırmızı ucgene bırakacgı icin payloadı bıracak oldugu irtifanın 8m olmasına gerek yok
+iki ayrı payload bırakma irtifası(daha doguru son goruntu islemenin yapılacagı irtifa)
+iki ayrı offset duzetlme degeri (birisi kırmızı digeri ise mavi hedef icin)
+yani returning payload kısmında da mavi altıgen icin tanımlanmıs offset degerleri kullanılacak

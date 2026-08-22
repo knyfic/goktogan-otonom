@@ -14,12 +14,12 @@ from vision.geometry import CameraModel, expected_payload_pixels
 #   KIRMIZI  → H≈0-28 (turuncu dahil) ve H≈156-179 (pembe/macenta dahil)
 # Mavi (≤155) ile kırmızı (≥156) ÇAKIŞMAZ — mor iki banda birden girip
 # purity'de elenmesin diye. Maske ve purity bantları aynı olmalı.
-_BLUE_MASK_LO = np.array([70, 60, 50], dtype=np.uint8)
-_BLUE_MASK_HI = np.array([155, 255, 255], dtype=np.uint8)
-_RED_LOW_LO   = np.array([0, 60, 50], dtype=np.uint8)     # kırmızı + turuncu
-_RED_LOW_HI   = np.array([28, 255, 255], dtype=np.uint8)
-_RED_HIGH_LO  = np.array([156, 60, 50], dtype=np.uint8)   # pembe/macenta + kırmızı
-_RED_HIGH_HI  = np.array([179, 255, 255], dtype=np.uint8)
+_BLUE_MASK_LO   = np.array([90, 90, 80], dtype=np.uint8)
+_BLUE_MASK_HI   = np.array([149, 255, 255], dtype=np.uint8)
+_RED_LOW_LO     = np.array([0, 90, 80], dtype=np.uint8)     # kırmızı + turuncu
+_RED_LOW_HI     = np.array([20, 255, 255], dtype=np.uint8)
+_RED_HIGH_LO    = np.array([150, 90, 80], dtype=np.uint8)   # pembe/macenta + kırmızı
+_RED_HIGH_HI    = np.array([179, 255, 255], dtype=np.uint8)
 
 # Purity eşleştirme (hue) + canlı piksel eşiği (S/V) — maske ile aynı
 _BLUE_HUE_LO, _BLUE_HUE_HI = 70, 155

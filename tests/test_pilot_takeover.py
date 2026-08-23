@@ -73,6 +73,7 @@ def _nav_obj():
     nav._mode_custom = None
     nav._mode_name = None
     nav._mode_last_t = 0.0
+    nav._hb_seen = 0
     return nav
 
 
@@ -102,26 +103,91 @@ def _pos(**kw):
 # ══════════════════════════════════════════════════════════════════════════ #
 #  1) Navigation: HEARTBEAT → mod takibi
 # ══════════════════════════════════════════════════════════════════════════ #
+def _ap_hb(custom_mode, **kw):
+    """ArduPilot autopilot heartbeat'i (autopilot=3 + CUSTOM_MODE_ENABLED)."""
+    fields = dict(custom_mode=custom_mode, type=2, autopilot=3, base_mode=1)
+    fields.update(kw)
+    return _FakeMsg("HEARTBEAT", **fields)
+
+
 def test_navigation_tracks_mode_from_heartbeat():
     nav = _nav_obj()
     assert nav.current_flight_mode is None
     assert nav.flight_mode_fresh(5.0) is False   # henüz mod bilgisi yok
 
-    nav._dispatch_telemetry(_FakeMsg("HEARTBEAT", custom_mode=4, type=2))
+    nav._dispatch_telemetry(_ap_hb(4))
     assert nav.current_flight_mode == "GUIDED"
     assert nav.flight_mode_fresh(5.0) is True
 
     # Pilot RC → LAND: heartbeat custom_mode değişir
-    nav._dispatch_telemetry(_FakeMsg("HEARTBEAT", custom_mode=9, type=2))
+    nav._dispatch_telemetry(_ap_hb(9))
     assert nav.current_flight_mode == "LAND"
+
+
+def test_navigation_ignores_foreign_heartbeat():
+    """FC dışı bir cihazın heartbeat'i (autopilot ARDUPILOTMEGA DEĞİL) modu
+    bozamaz. Real modda TELEM2 hattında custom_mode=0 taşıyan yabancı heartbeat
+    'STABILIZE' yanlış okumasına yol açıyordu — artık yoksayılır."""
+    nav = _nav_obj()
+    # Önce FC'nin gerçek heartbeat'i: GUIDED
+    nav._dispatch_telemetry(_ap_hb(4))
+    assert nav.current_flight_mode == "GUIDED"
+
+    # Yabancı cihaz: GCS tipi, autopilot INVALID, custom_mode=0
+    nav._dispatch_telemetry(_FakeMsg(
+        "HEARTBEAT", custom_mode=0, type=6,
+        autopilot=8, base_mode=0,
+    ))
+    assert nav.current_flight_mode == "GUIDED", "yabancı heartbeat modu ezmemeli"
+
+    # Yabancı cihaz: copter tipi ama autopilot generik (RC telemetri vb.), custom=0
+    nav._dispatch_telemetry(_FakeMsg(
+        "HEARTBEAT", custom_mode=0, type=2,
+        autopilot=0, base_mode=0,
+    ))
+    assert nav.current_flight_mode == "GUIDED", "autopilot olmayan heartbeat yoksayılmalı"
+
+    # CUSTOM_MODE_ENABLED biti olmayan heartbeat: custom_mode anlamsız → yoksay
+    nav._dispatch_telemetry(_FakeMsg(
+        "HEARTBEAT", custom_mode=0, type=2,
+        autopilot=3, base_mode=0,
+    ))
+    assert nav.current_flight_mode == "GUIDED"
 
 
 def test_navigation_ignores_gcs_heartbeat():
     """MAV_TYPE_GCS heartbeat'leri mod taşımaz — yoksayılır."""
     nav = _nav_obj()
-    nav._dispatch_telemetry(_FakeMsg("HEARTBEAT", custom_mode=4, type=2))
-    nav._dispatch_telemetry(_FakeMsg("HEARTBEAT", custom_mode=0, type=6))  # GCS
+    nav._dispatch_telemetry(_ap_hb(4))
+    nav._dispatch_telemetry(_ap_hb(0, type=6))   # GCS tipi
     assert nav.current_flight_mode == "GUIDED"   # GCS mesajı modu bozmadı
+
+
+def test_accept_autopilot_heartbeat_shared_filter():
+    """Mission (_update_mode) ile saha teşhisinin (tests/hardware/
+    test_real_mode_telemetry.py) paylaştığı TEK filtre — Navigation.
+    accept_autopilot_heartbeat() doğrudan test edilir."""
+    from flight.navigation import Navigation
+
+    # Gerçek ArduPilot autopilot heartbeat'i → kabul
+    ok, reason = Navigation.accept_autopilot_heartbeat(_ap_hb(4))
+    assert ok and reason == ""
+
+    # GCS tipi heartbeat (autopilot INVALID) → red + neden
+    ok, reason = Navigation.accept_autopilot_heartbeat(_FakeMsg(
+        "HEARTBEAT", custom_mode=0, type=6, autopilot=8, base_mode=0,
+    ))
+    assert not ok and "autopilot" in reason
+
+    # CUSTOM_MODE_ENABLED biti olmayan heartbeat → custom_mode anlamsız, red
+    ok, reason = Navigation.accept_autopilot_heartbeat(_FakeMsg(
+        "HEARTBEAT", custom_mode=0, type=2, autopilot=3, base_mode=0,
+    ))
+    assert not ok and "CUSTOM_MODE_ENABLED" in reason
+
+    # custom_mode alanı olmayan mesaj → red
+    ok, reason = Navigation.accept_autopilot_heartbeat(_FakeMsg("GLOBAL_POSITION_INT"))
+    assert not ok and reason
 
 
 def test_navigation_mode_fresh_goes_stale():

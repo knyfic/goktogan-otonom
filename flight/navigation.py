@@ -1,3 +1,4 @@
+import logging
 import math
 import threading
 import time
@@ -5,6 +6,13 @@ import time
 from pymavlink import mavutil
 
 from models import VehiclePosition
+
+# Mission logger'ıyla aynı ad — setup_logging() ile aynı akışa/format'a yazılır.
+_log = logging.getLogger("iha_mission")
+
+# Başlangıçta bu kadar heartbeat ham alanlarıyla INFO seviyesinde yazdırılır
+# (sahada "hangi cihaz ne gönderiyor" teşhisi için — sonra yalnızca değişimler).
+_HB_STARTUP_LOG_N = 15
 
 
 class Navigation:
@@ -75,6 +83,8 @@ class Navigation:
         self._mode_custom: int | None = None
         self._mode_name: str | None = None
         self._mode_last_t: float = 0.0
+        # Teşhis: kaç heartbeat işlendi (ilk N tanesi INFO loglanır).
+        self._hb_seen: int = 0
 
         # ---- Pre-arm / SYS_STATUS / STATUSTEXT durumu ----
         # ArduPilot'un SYS_STATUS sağlık bitleri (onboard_control_sensors_health)
@@ -142,27 +152,107 @@ class Navigation:
         if getattr(msg, "battery_remaining", -1) != -1:
             self._position.battery_percent = msg.battery_remaining
 
-    def _update_mode(self, msg) -> None:
-        """HEARTBEAT custom_mode → mevcut flight mode (pilot takeover tespiti).
+    @staticmethod
+    def accept_autopilot_heartbeat(msg) -> tuple[bool, str]:
+        """HEARTBEAT gerçek ArduPilot autopilot'undan mı? (mod kaynağı kabulü)
 
-        GCS heartbeat'leri (MAV_TYPE_GCS) autopilot modu taşımaz — yoksayılır.
+        _update_mode() ile tests/hardware/test_real_mode_telemetry.py'nin
+        PAYLAŞTIĞI TEK kaynak — pilot takeover tespiti ve saha teşhisi aynı
+        mantığı kullanır (test kendi basitleştirilmiş filtre icat etmez).
+
+        Kabul şartları:
+          1) autopilot == MAV_AUTOPILOT_ARDUPILOTMEGA (3)
+          2) base_mode'da MAV_MODE_FLAG_CUSTOM_MODE_ENABLED biti set
+             (custom_mode yalnızca bu bitle anlamlıdır)
+          3) type != MAV_TYPE_GCS
+
+        GCS / RC telemetri / diğer cihaz heartbeat'leri custom_mode=0 taşıyıp
+        yanlış 'STABILIZE' okumasına yol açabilir (real modda gözlemlendi).
+
+        Returns: (accepted, reason) — accepted=True iken reason boştur.
+        """
+        custom = getattr(msg, "custom_mode", None)
+        if custom is None:
+            return False, "custom_mode yok (HEARTBEAT değil)"
+        autopilot = getattr(msg, "autopilot", 0)
+        base_mode = getattr(msg, "base_mode", 0)
+        mav_type = getattr(msg, "type", 0)
+        if autopilot != mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA:
+            return (
+                False,
+                f"autopilot={autopilot} (ARDUPILOTMEGA="
+                f"{mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA} değil)",
+            )
+        if not (base_mode & mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED):
+            return (
+                False,
+                f"base_mode=0x{base_mode:02X} CUSTOM_MODE_ENABLED biti yok",
+            )
+        if mav_type == mavutil.mavlink.MAV_TYPE_GCS:
+            return False, f"type={mav_type} MAV_TYPE_GCS"
+        return True, ""
+
+    def _update_mode(self, msg) -> None:
+        """HEARTBEAT → mevcut flight mode (pilot takeover tespiti).
+
+        Kabul mantığı Navigation.accept_autopilot_heartbeat() ile PAYLAŞILIR —
+        yalnızca gerçek ArduPilot autopilot heartbeat'i modu taşır. Başka
+        kaynakların (RC telemetri modülü, başka GCS) custom_mode=0 heartbeat'i
+        yanlış 'STABILIZE' okumasına yol açabilir (real modda gözlemlendi —
+        SITL'de tek cihaz olduğu için görünmez).
         Mod adı, ArduPilot mode_mapping'in tersinden çözülür (ör. 4 → 'GUIDED',
-        9 → 'LAND'). Mapping çözülemezse ad None kalır (mod bilinmiyor) ama
-        custom_mode + zaman damgası yine de güncellenir.
+        9 → 'LAND'). Mapping çözülemezse ad None kalır (mod bilinmiyor).
         """
         custom = getattr(msg, "custom_mode", None)
         if custom is None:
             return
-        if getattr(msg, "type", 0) == mavutil.mavlink.MAV_TYPE_GCS:
-            return  # autopilot değil — modu taşımaz
+        src_sys = msg.get_srcSystem() if hasattr(msg, "get_srcSystem") else None
+        src_comp = msg.get_srcComponent() if hasattr(msg, "get_srcComponent") else None
+        mav_type = getattr(msg, "type", 0)
+        autopilot = getattr(msg, "autopilot", 0)
+        base_mode = getattr(msg, "base_mode", 0)
+
+        self._hb_seen = getattr(self, "_hb_seen", 0) + 1
+        first = self._hb_seen <= _HB_STARTUP_LOG_N
+
+        accepted, reason = self.accept_autopilot_heartbeat(msg)
+
+        if first:
+            # Başlangıç teşhisi: hangi cihazlar heartbeat gönderiyor, içeriği ne?
+            _log.info(
+                "HB#%d src=%s/%s type=%s autopilot=%s base=0x%02X custom=%s → %s",
+                self._hb_seen, src_sys, src_comp, mav_type, autopilot,
+                base_mode, int(custom),
+                "kabul (mod kaynağı)" if accepted else f"YOKSAYILDI ({reason})",
+            )
+        else:
+            _log.debug(
+                "HB src=%s/%s type=%s autopilot=%s base=0x%02X custom=%s → %s",
+                src_sys, src_comp, mav_type, autopilot, base_mode, int(custom),
+                "kabul" if accepted else f"yoksay ({reason})",
+            )
+
+        if not accepted:
+            return
+
         self._mode_custom = int(custom)
         self._mode_last_t = time.monotonic()
         try:
             mapping = self.master.mode_mapping() or {}
             rev = {v: k for k, v in mapping.items()}
-            self._mode_name = rev.get(int(custom))
+            name = rev.get(int(custom))
         except Exception:
+            name = None
+        if name is None:
             self._mode_name = None
+            _log.warning(
+                "Autopilot heartbeat custom_mode=%s ad çözülemedi (mode_mapping boş)",
+                int(custom),
+            )
+            return
+        if name != self._mode_name:
+            _log.info("Flight mode: %s -> %s (custom=%s)", self._mode_name, name, int(custom))
+        self._mode_name = name
 
     def _update_status_text(self, msg) -> None:
         """STATUSTEXT: son mesaj + 'PreArm:' ön ekli mesajları sakla.

@@ -168,11 +168,17 @@ FIELD_LENGTH = 100.0
 # Değerler SITL home'una göre düzenlenmiştir: SITL --home 41.0082,28.9784
 # alanın tam MERKEZİNE (local 15, 50) denk gelir. Gerçek yarışma alanına
 # geçerken yalnızca bu dört değer güncellenir (kod değişmez).
+# COMPETITION_CORNERS = {
+#     "A": (41.0077508, 28.9782215),
+#     "B": (41.0086492, 28.9782215),
+#     "C": (41.0086492, 28.9785785),
+#     "D": (41.0077508, 28.9785785),
+# }
 COMPETITION_CORNERS = {
-    "A": (41.0077508, 28.9782215),
-    "B": (41.0086492, 28.9782215),
-    "C": (41.0086492, 28.9785785),
-    "D": (41.0077508, 28.9785785),
+    "A": (37.9336259, 34.6175672),
+    "B": (37.9338936, 34.6175042),
+    "C": (37.9339258, 34.6177221),
+    "D": (37.9336640, 34.6177952),
 }
 
 HEXAGON_SIDE_LENGTH = 2.0
@@ -353,7 +359,7 @@ PREVIEW_WINDOW_NAME = "İHA Kamera"
 # Canlı önizleme penceresi gösterim genişliği (piksel).
 # Görüntü işleme pipeline YARI çözünürlükte (960x352) yapılır; YALNIZCA pencere
 # gösterimi bu genişliğe küçültülür → imshow/HUD maliyeti ekstra ~4x azalır.
-PREVIEW_DISPLAY_WIDTH_PX = 480
+PREVIEW_DISPLAY_WIDTH_PX = 960
 
 # ── Vision kayıt (vision_record_only.py — debug recorder, SD kart) ───────────
 # Yalnızca recorder tarafından kullanılır; görev akışı bu değerleri okumaz.

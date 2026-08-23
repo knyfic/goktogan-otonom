@@ -32,6 +32,11 @@ class MissionState(str, Enum):
     ALIGNING_ON_TARGET_FOR_PICKUP = "ALIGNING_ON_TARGET_FOR_PICKUP"   # Yük aramadan önce hedef merkezine hizala
     RETURNING_PAYLOAD = "RETURNING_PAYLOAD"
     RELEASING_RETURNED_PAYLOAD = "RELEASING_RETURNED_PAYLOAD"
+    # Pilot RC'den GUIDED dışı bir mod seçti (LAND/LOITER/RTL/STABILIZE/...) —
+    # mission DURDU. Bu state'te Python hiçbir uçuş komutu göndermez ve state
+    # otomatik ilerlemez (terminal durdurma — güvenlik). Pilot geri GUIDED'a
+    # geçse bile mission otomatik devam ETMEZ.
+    PILOT_CONTROL = "PILOT_CONTROL"
     RTL = "RTL"
     COMPLETE = "COMPLETE"
 

@@ -66,6 +66,16 @@ class Navigation:
         # False döner. Mesaj tüketmez (alma buffer'ını kirletmez).
         self._last_message_s = time.monotonic()
 
+        # ---- Pilot flight mode takibi (güvenlik) ----
+        # HEARTBEAT custom_mode'dan beslenir (_update_mode). Görev YALNIZCA
+        # GUIDED'da uçar; pilot RC'den başka bir mod seçerse mission durur ve
+        # Python artık uçuş komutu göndermez (bkz. state_machine PILOT_CONTROL).
+        # Mod bilgisi tüketici kodun paylaştığı telemetri akışından (position())
+        # alınır — ayrı/blocking bir read eklenmez, mission loop kilitlenmez.
+        self._mode_custom: int | None = None
+        self._mode_name: str | None = None
+        self._mode_last_t: float = 0.0
+
         # ---- Pre-arm / SYS_STATUS / STATUSTEXT durumu ----
         # ArduPilot'un SYS_STATUS sağlık bitleri (onboard_control_sensors_health)
         # üzerinden "arm edilebilir mi?" takip edilir; STATUSTEXT'teki
@@ -132,6 +142,28 @@ class Navigation:
         if getattr(msg, "battery_remaining", -1) != -1:
             self._position.battery_percent = msg.battery_remaining
 
+    def _update_mode(self, msg) -> None:
+        """HEARTBEAT custom_mode → mevcut flight mode (pilot takeover tespiti).
+
+        GCS heartbeat'leri (MAV_TYPE_GCS) autopilot modu taşımaz — yoksayılır.
+        Mod adı, ArduPilot mode_mapping'in tersinden çözülür (ör. 4 → 'GUIDED',
+        9 → 'LAND'). Mapping çözülemezse ad None kalır (mod bilinmiyor) ama
+        custom_mode + zaman damgası yine de güncellenir.
+        """
+        custom = getattr(msg, "custom_mode", None)
+        if custom is None:
+            return
+        if getattr(msg, "type", 0) == mavutil.mavlink.MAV_TYPE_GCS:
+            return  # autopilot değil — modu taşımaz
+        self._mode_custom = int(custom)
+        self._mode_last_t = time.monotonic()
+        try:
+            mapping = self.master.mode_mapping() or {}
+            rev = {v: k for k, v in mapping.items()}
+            self._mode_name = rev.get(int(custom))
+        except Exception:
+            self._mode_name = None
+
     def _update_status_text(self, msg) -> None:
         """STATUSTEXT: son mesaj + 'PreArm:' ön ekli mesajları sakla.
 
@@ -160,6 +192,8 @@ class Navigation:
             self._update_sys_status(msg)
         elif t == "STATUSTEXT":
             self._update_status_text(msg)
+        elif t == "HEARTBEAT":
+            self._update_mode(msg)
 
     def position(self) -> VehiclePosition:
         """
@@ -200,6 +234,19 @@ class Navigation:
     def last_message_age_s(self) -> float:
         """Son alınan MAVLink telemetrisinden bu yana geçen süre (saniye)."""
         return time.monotonic() - self._last_message_s
+
+    @property
+    def current_flight_mode(self) -> str | None:
+        """Son bilinen flight mode adı ('GUIDED', 'LAND', ...). None = bilinmiyor."""
+        return self._mode_name
+
+    def flight_mode_fresh(self, timeout_s: float = 5.0) -> bool:
+        """Mod bilgisi bu süre içinde tazelendi mi?
+
+        Bayat mod bilgisiyle karar verilmez (ör. telemetri kesildi, mod adı
+        eski kaldı) — pilot takeover tespiti yalnızca taze modla yapılır.
+        """
+        return self._mode_last_t > 0.0 and (time.monotonic() - self._mode_last_t) <= timeout_s
 
     def heartbeat_ok(self, timeout_s: float) -> bool:
         """
@@ -321,19 +368,6 @@ class Navigation:
                 mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
             )
 
-    def _ensure_guided(self) -> None:
-        """Zaten GUIDED modundaysa tekrar komut gönderme."""
-        try:
-            mode_id = self.master.mode_mapping().get("GUIDED")
-            if mode_id is not None:
-                # Mevcut modu kontrol et
-                hb = self.master.recv_match(type="HEARTBEAT", blocking=False)
-                if hb is not None and hb.custom_mode == mode_id:
-                    return
-        except Exception:
-            pass
-        self.set_mode("GUIDED")
-
     def goto_global(
         self,
         latitude: float,
@@ -351,8 +385,12 @@ class Navigation:
         Hizalama sırasında İHA burnunun komutlar arasında dönmesi, düzeltme
         vektörlerinin gecikmeli heading'le hesaplanmasına ve hedef etrafında
         dönmeye (daire) yol açar; yaw kilidi bunu önler.
+
+        NOT (güvenlik): Bu fonksiyon GUIDED modu ASLA yeniden göndermez.
+        Pilot RC'den başka bir mod seçtiyse ArduPilot bu pozisyon komutunu
+        zaten yoksayar (GUIDED dışı modlarda SET_POSITION_TARGET işlenmez) —
+        pilotun seçtiği mod asla ezilmez.
         """
-        self._ensure_guided()
         type_mask = 0b0000111111111000
         yaw_rad = 0.0
         if yaw_deg is not None:
@@ -418,7 +456,8 @@ class Navigation:
         if pos.latitude == 0.0 and pos.longitude == 0.0:
             return
 
-        self._ensure_guided()
+        # NOT (güvenlik): GUIDED mod yeniden gönderilmez — pilotun RC modu
+        # asla ezilmez. GUIDED dışı modda bu komut ArduPilot tarafından yoksayılır.
 
         # type_mask: sadece lat/lon/alt + yaw aktif; hız/ivme yoksayılır
         # bit 10 (yaw) = 0 → aktif (mevcut heading'i koru)

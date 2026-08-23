@@ -64,6 +64,7 @@ from config import (
     PAYLOAD_SERVO_WAIT_S,
     PAYLOAD_VERIFY_ALTITUDE,
     PAYLOAD_WIDTH,
+    PILOT_TAKEOVER_MODE_STALE_S,
     PREVIEW_DISPLAY_WIDTH_PX,
     RTL_ARRIVAL_TIMEOUT_S,
     RTL_DISARM_TIMEOUT_S,
@@ -243,6 +244,12 @@ class MissionStateMachine:
         self._verify_votes: list[str] = []          # verification oy listesi
         self._verify_stabilize_start: float | None = None  # stabilizasyon sayacı
 
+        # ---- Pilot takeover (RC mode değişikliği) ----
+        # Pilot RC'den GUIDED dışı bir mod seçerse mission PILOT_CONTROL'de
+        # durur (terminal — otomatik devam YOK). Bu alanlar HUD/log içindir.
+        self._pilot_takeover_mode: str | None = None
+        self._pilot_takeover_t: float = 0.0
+
         # ---- Görev zamanlayıcısı ----
         # Kalkış tamamlanınca set edilir. None → görev henüz başlamadı.
         # time.monotonic() tabanlı — sistem saatinden bağımsız.
@@ -272,7 +279,11 @@ class MissionStateMachine:
         if (
             self._heartbeat_timeout_s is not None
             and not self._heartbeat_triggered
-            and self.data.state not in (MissionState.RTL, MissionState.COMPLETE)
+            and self.data.state not in (
+                MissionState.RTL,
+                MissionState.COMPLETE,
+                MissionState.PILOT_CONTROL,
+            )
         ):
             if not self.nav.heartbeat_ok(self._heartbeat_timeout_s):
                 self._heartbeat_triggered = True
@@ -297,6 +308,7 @@ class MissionStateMachine:
                 MissionState.TAKEOFF,
                 MissionState.RTL,
                 MissionState.COMPLETE,
+                MissionState.PILOT_CONTROL,
             )
         ):
             elapsed = time.monotonic() - self._mission_start_t
@@ -314,6 +326,18 @@ class MissionStateMachine:
                 self.data.mission_failed = True
                 self._do_start_rtl()
                 return
+
+        # ── Pilot takeover watchdog (güvenlik — pilot her zaman öncelikli) ──
+        # Mission yalnızca GUIDED'da uçar. Pilot RC'den başka bir mod seçerse
+        # (LAND/LOITER/RTL/STABILIZE/ALT_HOLD/...) Python tüm uçuş komutlarını
+        # bırakır: yeni goto/position/velocity/altitude komutu, GUIDED tekrar
+        # gönderme, state ilerletme YOK. ArduPilot pilotun seçtiği modda kalır.
+        # WAITING_FOR_PREARM/INIT: mission henüz kontrol almamıştır (pilot
+        # kendi modunda olabilir) — burada tespit edilmez.
+        # RTL/COMPLETE: mission'ın kendi RTL akışıdır — tespit edilmez.
+        # PILOT_CONTROL: zaten durdurulmuş — yeniden durdurma yok.
+        if self._pilot_mode_check():
+            return
 
         s = self.data.state
         if s == MissionState.WAITING_FOR_PREARM:
@@ -365,6 +389,8 @@ class MissionStateMachine:
             self._do_release_returned_payload()
         elif s == MissionState.TASK_2_FAILED:
             self._do_start_rtl()
+        elif s == MissionState.PILOT_CONTROL:
+            self._do_pilot_control()
         elif s == MissionState.RTL:
             self._do_wait_rtl()
         else:
@@ -789,6 +815,10 @@ class MissionStateMachine:
         self.nav.takeoff(TAKEOFF_ALTITUDE)
         deadline = time.monotonic() + TAKEOFF_TIMEOUT
         while time.monotonic() < deadline:
+            # Pilot RC'den GUIDED dışı mod seçtiyse kalkış derhal durur
+            # (PILOT_CONTROL — kalkış timeout'una kadar beklenmez).
+            if self._pilot_mode_check():
+                return
             pos = self.nav.position()
             if abs(pos.relative_altitude - TAKEOFF_ALTITUDE) <= 0.4:
                 break
@@ -1669,6 +1699,10 @@ class MissionStateMachine:
         # Non-blocking bekleme ile hedefe ulaşınca merkezleme başlat
         nav_deadline = time.monotonic() + STATE_TIMEOUT
         while time.monotonic() < nav_deadline:
+            # Pilot RC'den GUIDED dışı mod seçtiyse transit derhal durur
+            # (PILOT_CONTROL — yeni komut gönderilmez).
+            if self._pilot_mode_check():
+                return
             pos = self.nav.position()
             dist = haversine_m(pos.latitude, pos.longitude,
                                target.latitude, target.longitude)
@@ -2827,6 +2861,74 @@ class MissionStateMachine:
     # ==================================================================== #
     #  Yardımcı metodlar
     # ==================================================================== #
+
+    def _pilot_mode_check(self) -> bool:
+        """Pilot RC flight mode'u GUIDED değilse mission'ı durdurur.
+
+        True dönerse mission PILOT_CONTROL'a alınmıştır — bu tick'te başka
+        hiçbir komut/state ilerlemesi YAPILMAMALI (çağıran return etmeli).
+        Mod bilgisi yoksa veya bayatsa False döner — yanlış pozitif üretilmez
+        (mock/test nesneleri ve henüz heartbeat gelmemiş başlangıç güvende).
+        Zaten PILOT_CONTROL'deyse False döner — yeniden durdurma/log yok.
+        """
+        if self.data.state == MissionState.PILOT_CONTROL:
+            return False   # zaten durdurulmuş — yeniden pause edilmez
+        mode = getattr(self.nav, "current_flight_mode", None)
+        if not isinstance(mode, str):
+            return False   # mod bilgisi yok — takeover tespit edilemez
+        fresh = getattr(self.nav, "flight_mode_fresh", None)
+        if fresh is not None:
+            try:
+                if not fresh(PILOT_TAKEOVER_MODE_STALE_S):
+                    return False   # bayat mod — güvenme
+            except Exception:
+                return False
+        if mode == "GUIDED":
+            return False   # mission modunda — devam
+        self._pause_for_pilot_takeover(mode)
+        return True
+
+    def _pause_for_pilot_takeover(self, new_mode: str) -> None:
+        """Pilot mode değişikliği: mission'ı durdur, FC'yi pilotun moduna bırak.
+
+        Bu noktadan sonra hiçbir navigation/GUIDED/position komutu gönderilmez
+        ve mission otomatik olarak devam etmez (PILOT_CONTROL terminal durdurma;
+        pilot tekrar GUIDED'a geçse bile yeniden başlatma açık bir mekanizma
+        gerektirir — şimdilik mission'ı yeniden çalıştırmak gerekir).
+        Idempotent: yalnızca İLK çağrı loglar + PILOT_CONTROL'a geçer;
+        sonraki çağrılar no-op'tur (log spam'i / STATE: X → PILOT_CONTROL
+        tekrarı engellenir — pilot modu değişse bile yeniden yazılmaz).
+        """
+        if self._pilot_takeover_t > 0.0:
+            return   # zaten pause edildi — tekrar log/geçiş yok
+        self._pilot_takeover_mode = new_mode
+        self._pilot_takeover_t = time.monotonic()
+        self.log.critical(
+            "PILOT MODE CHANGE DETECTED: GUIDED -> %s (timestamp=%.3fs, "
+            "current_state=%s, mission_paused_reason=%s) — MISSION CONTROL PAUSED",
+            new_mode, self._pilot_takeover_t, self.data.state.value,
+            f"pilot RC mode '{new_mode}' (GUIDED değil)",
+        )
+        self._goto(MissionState.PILOT_CONTROL)
+
+    def _do_pilot_control(self) -> None:
+        """Pilot kontrolü state'i — terminal durdurma.
+
+        Hiçbir uçuş komutu gönderilmez; yalnızca canlı önizleme + HUD akar
+        (GStreamer dahil). State asla ilerletilmez; otomatik devam YOKTUR.
+        """
+        if self._pending_display is None:
+            frame = self.camera.latest()
+            if frame is not None:
+                extra = (
+                    f"PILOT CONTROL ({self._pilot_takeover_mode or '?'}) — "
+                    f"MISSION PAUSED {self._pilot_takeover_t:.0f}s"
+                )
+                l1, l2 = self._hud_lines(extra=extra)
+                self._pending_display = self._draw_hud(
+                    frame, l1, l2, line1_color=(0, 0, 255),
+                )
+        # Asla state ilerletme, asla komut gönderme.
 
     def _goto(self, new_state: MissionState) -> None:
         self.log.info("STATE: %s → %s", self.data.state.value, new_state.value)

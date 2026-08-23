@@ -384,3 +384,12 @@ RTL_DISARM_TIMEOUT_S  = 300.0   # disarm bekleme (ek 5 dk)
 # Kalkış tamamlandığı anda sayaç başlar.
 # Bu süre dolunca sistem hangi state'te olursa olsun RTL'ye geçer.
 MISSION_TIMEOUT_S = 11 * 60  # 660 saniye
+
+# ── Pilot takeover (RC flight mode değişikliği) — GÜVENLİK ───────────────────
+# Mission yalnızca GUIDED modda uçar. Pilot RC'den başka bir mod seçerse
+# (LAND/LOITER/RTL/STABILIZE/ALT_HOLD/...) mission PILOT_CONTROL state'inde
+# durur ve Python artık hiçbir uçuş komutu göndermez; ArduPilot pilotun
+# seçtiği modda kalır (pilot her zaman önceliklidir).
+# Bu süre içinde tazelenen HEARTBEAT mod bilgisi geçerli sayılır; bayat mod
+# bilgisiyle takeover kararı verilmez (yanlış pozitif riski).
+PILOT_TAKEOVER_MODE_STALE_S = 5.0

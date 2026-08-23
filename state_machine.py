@@ -2712,6 +2712,15 @@ class MissionStateMachine:
             # MAVİ ALTIGEN + ≤8m: şekil doğrulaması YOK — kilitli mavi bölge takibi
             tracked = self._track_blue_region_centroid(frame)
             detections = [tracked] if tracked is not None else []
+            if tracked is not None:
+                # Referans merkezi TAZE tut — ilk bırakma akışıyla (_do_align_target)
+                # birebir aynı. Aksi halde _track_blue_region_centroid, 1. hedefteki
+                # pickup fazından kalma ESKİ pending_detection merkezini referans
+                # alır ve yanlış mavi nesneye atlayabilir / merkezden sapabilir.
+                self.data.pending_detection = tracked
+                p = self.nav.position()
+                self._target_rough_lat = p.latitude
+                self._target_rough_lon = p.longitude
         else:
             detections = self.target_detector.detect(frame)
             if target_obj is not None:

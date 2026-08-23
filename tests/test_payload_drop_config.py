@@ -237,6 +237,116 @@ def test_returning_payload_red_triangle_uses_red_offset():
     )
 
 
+def _return_sm_tracking(second_color, second_shape, altitude, frame):
+    """RELEASING_RETURNED_PAYLOAD HORIZONTAL fazı için gerçek SM (takip testi)."""
+    from state_machine import MissionStateMachine
+
+    nav = MagicMock()
+    nav.position.return_value = MagicMock(
+        relative_altitude=altitude, latitude=2.0, longitude=3.0, heading_deg=0.0,
+    )
+    camera = MagicMock()
+    camera.latest.return_value = frame
+
+    sm = MissionStateMachine(
+        navigation=nav, camera=camera, payload=MagicMock(),
+        logger=logging.getLogger("t"),
+    )
+    sm.data.second_target = Target(
+        target_id=2, shape=TargetType(second_shape), color=second_color,
+        latitude=1.0, longitude=1.0, confidence=0.9,
+    )
+    sm.data.state = MissionState.RELEASING_RETURNED_PAYLOAD
+    sm._align_phase = "HORIZONTAL"
+    sm._last_align_cmd_t = 0.0
+    sm._target_rough_lat = 1.0
+    sm._target_rough_lon = 1.0
+    sm.position_controller = MagicMock()
+    sm.position_controller.align_detection.return_value = True
+    sm.target_detector = MagicMock()
+    sm.target_detector.detect.return_value = []
+    return sm, nav
+
+
+def test_returning_payload_blue_tracks_region_without_shape_verification():
+    """Geri yük bırakma (2. hedef MAVİ ALTIGEN, 8m): şekil doğrulaması YOK —
+    mavi bölge centroid takibiyle kademeli iniş (3m'ye kadar), tıpkı ilk
+    bırakma akışı gibi. target_detector.detect (şekil doğrulamalı) ÇAĞRILMAZ."""
+    sm, nav = _return_sm_tracking(
+        TargetColor.BLUE, "HEXAGON", BLUE_PAYLOAD_VERIFY_ALTITUDE,
+        frame=_blue_blob_frame(),
+    )
+    # 1. hedefteki pickup fazından kalma ESKİ referans merkez (uzakta)
+    sm.data.pending_detection = Detection(
+        color=TargetColor.RED, shape="PAYLOAD",
+        center_x=100.0, center_y=100.0, area_px=5000.0,
+        bbox_width_px=100.0, bbox_height_px=100.0, confidence=0.9,
+    )
+
+    sm._do_release_returned_payload()
+
+    assert sm._align_phase == "DESCENDING", "8m'de OFFSET değil, takipli iniş"
+    assert sm._alt_target == pytest.approx(BLUE_PAYLOAD_VERIFY_ALTITUDE - 1.0)
+    sm.target_detector.detect.assert_not_called()
+    # Referans merkez TAZELENDİ: eski (100,100) değil, mavi bölge merkezi (960,352)
+    assert sm.data.pending_detection.center_x == pytest.approx(960.0, abs=5)
+    assert sm.data.pending_detection.center_y == pytest.approx(352.0, abs=5)
+    # Kaba GPS de takip edilen konuma tazelendi (ilk bırakma akışıyla aynı)
+    assert sm._target_rough_lat == pytest.approx(2.0)
+    assert sm._target_rough_lon == pytest.approx(3.0)
+
+
+def test_returning_payload_blue_tracking_prefers_refreshed_target():
+    """Takip hedef bölgeyi seçer ve referansı tazeler — uzaktaki yanlış mavi
+    nesneye atlanmaz; sonraki karelerde TAZELENEN merkez referans alınır
+    (1. hedef pickup'ından kalma eski merkeze takılı kalmaz)."""
+    frame = _blue_blob_frame(cx=960, cy=352, w=200, h=200)              # hedef
+    cv2.rectangle(frame, (1500, 60), (1860, 380), (255, 0, 0), -1)      # yanlış nesne
+    sm, nav = _return_sm_tracking(
+        TargetColor.BLUE, "HEXAGON", 6.0, frame=frame,
+    )
+    sm.data.pending_detection = Detection(
+        color=TargetColor.RED, shape="PAYLOAD",
+        center_x=100.0, center_y=100.0, area_px=5000.0,
+        bbox_width_px=100.0, bbox_height_px=100.0, confidence=0.9,
+    )
+
+    sm._do_release_returned_payload()
+
+    assert sm._align_phase == "DESCENDING"
+    assert sm.data.pending_detection.center_x == pytest.approx(960.0, abs=5), \
+        "takip hedef bölgeyi seçmeli — yanlış (uzak) mavi nesneye atlanmamalı"
+
+
+def test_returning_payload_red_still_uses_shape_detection():
+    """Geri yük akışında KIRMIZI ÜÇGEN: takip modu YOK — şekil doğrulamalı
+    detection kullanılır (takip yalnızca mavi altıgen içindir)."""
+    sm, nav = _return_sm_tracking(
+        TargetColor.RED, "TRIANGLE", 8.0,
+        frame=np.zeros((704, 1920, 3), dtype=np.uint8),
+    )
+    sm.target_detector.detect.return_value = [SimpleNamespace(
+        color=TargetColor.RED, shape="TRIANGLE",
+        center_x=960.0, center_y=352.0,
+        bbox_width_px=100.0, bbox_height_px=100.0,
+        area_px=5000.0, confidence=0.9,
+    )]
+    # 1. hedefteki pickup fazından kalma eski referans (kırmızı akışta TAZELENMEZ)
+    sm.data.pending_detection = Detection(
+        color=TargetColor.BLUE, shape="PAYLOAD",
+        center_x=100.0, center_y=100.0, area_px=5000.0,
+        bbox_width_px=100.0, bbox_height_px=100.0, confidence=0.9,
+    )
+
+    sm._do_release_returned_payload()
+
+    assert sm._align_phase == "DESCENDING"
+    sm.target_detector.detect.assert_called()
+    # Kırmızı akışta takip modu YOK: pending_detection / kaba GPS tazelenmez
+    assert sm.data.pending_detection.center_x == pytest.approx(100.0, abs=5)
+    assert sm._target_rough_lat == pytest.approx(1.0)
+
+
 # ── Test 4 — Offset ayrılığı ─────────────────────────────────────────────── #
 def test_offsets_are_separate_and_mapped_per_target():
     """Kırmızı/mavi offsetler FARKLI ve doğru hedefe bağlıdır."""

@@ -325,6 +325,35 @@ def test_pilot_control_no_auto_resume_when_guided_again():
     nav.goto_global.assert_not_called()
 
 
+def test_no_log_spam_after_pause(caplog):
+    """Pause sonrası her tick yeniden CRITICAL log + STATE geçişi ÜRETİLMEZ.
+
+    Regresyon: PILOT_CONTROL'deyken takeover kontrolü tekrar çalışıp
+    'PILOT MODE CHANGE DETECTED' + 'STATE: PILOT_CONTROL → PILOT_CONTROL'
+    loglarını ~40 Hz basıyordu (terminal/disk spam). Şimdi yalnızca İLK
+    tick loglar; sonrakiler sessizdir.
+    """
+    nav = MagicMock()
+    nav.current_flight_mode = "STABILIZE"
+    nav.flight_mode_fresh.return_value = True
+    nav.position.return_value = _pos()
+    sm = _make_sm(nav)
+    sm.data.state = MissionState.SEARCHING_FIRST_TARGET
+    sm._mission_start_t = time.monotonic()
+
+    with caplog.at_level(logging.CRITICAL, logger="t"):
+        sm._tick()                       # ilk takeover — log üretir
+        pause_t = sm._pilot_takeover_t
+        for _ in range(10):
+            sm._tick()                   # sonraki tick'ler sessiz olmalı
+
+    assert sm.data.state == MissionState.PILOT_CONTROL
+    assert sm._pilot_takeover_t == pause_t   # yeniden pause edilmedi
+    critical = [r for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert len(critical) == 1, "pause yalnızca BİR kez loglanmalı"
+    assert "PILOT MODE CHANGE DETECTED" in critical[0].getMessage()
+
+
 # ══════════════════════════════════════════════════════════════════════════ #
 #  7) Watchdog'lar PILOT_CONTROL'de RTL tetiklemez
 # ══════════════════════════════════════════════════════════════════════════ #

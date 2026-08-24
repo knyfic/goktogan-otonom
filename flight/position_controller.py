@@ -9,7 +9,10 @@ from config import (
     ALIGN_MAX_STEP_LARGE_M,
     ALIGN_MAX_STEP_M,
     ALIGN_STEP_FULL_ERROR_PX,
-    PIXEL_ALIGNMENT_TOLERANCE_PX,
+    ALIGN_TOL_ALT_HI_M,
+    ALIGN_TOL_ALT_LO_M,
+    ALIGN_TOL_HI_PX,
+    ALIGN_TOL_LO_PX,
 )
 from flight.navigation import Navigation
 from vision.geometry import CameraModel
@@ -42,6 +45,21 @@ class PositionController:
         self.navigation = navigation
         self.camera = camera
 
+    def aligned_tolerance_px(self, altitude_m: float) -> float:
+        """İrtifaya göre 'ortalandım' KABUL toleransı (piksel).
+
+        SADECE acceptance eşiğidir — hareket/gain/adım hesabını ETKİLEMEZ.
+        Yüksek irtifada hedef küçük + kamera jitter'ı (rüzgâr/pitch/yaw) →
+        daha geniş tolerans; alçak irtifada (bırakma öncesi) hassas tolerans
+        korunur. Eşikler config.py → ALIGN_TOL_* (iri değil, piksel).
+        """
+        if altitude_m <= ALIGN_TOL_ALT_LO_M:
+            return ALIGN_TOL_LO_PX
+        if altitude_m >= ALIGN_TOL_ALT_HI_M:
+            return ALIGN_TOL_HI_PX
+        w = (altitude_m - ALIGN_TOL_ALT_LO_M) / (ALIGN_TOL_ALT_HI_M - ALIGN_TOL_ALT_LO_M)
+        return ALIGN_TOL_LO_PX + (ALIGN_TOL_HI_PX - ALIGN_TOL_LO_PX) * w
+
     def align_detection(
         self,
         center_x: float,
@@ -60,7 +78,10 @@ class PositionController:
         dx = center_x - camera_cx  # + = hedef kamerada sağda
         dy = center_y - camera_cy  # + = hedef kamerada aşağıda
 
-        if abs(dx) <= PIXEL_ALIGNMENT_TOLERANCE_PX and abs(dy) <= PIXEL_ALIGNMENT_TOLERANCE_PX:
+        # KABUL eşiği irtifaya göre uyarlanır (aligned_tolerance_px): yüksek
+        # irtifada kamera jitter'ına toleranslı, alçak irtifada hassas.
+        tol = self.aligned_tolerance_px(altitude_m)
+        if abs(dx) <= tol and abs(dy) <= tol:
             return True
 
         # Adım 1: Piksel → araç gövde ekseni (body frame)

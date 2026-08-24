@@ -330,6 +330,28 @@ ALIGN_MAX_STEP_LARGE_M = 1
 # (250 → 125px) — fiziksel adım davranışı değişmez.
 ALIGN_STEP_FULL_ERROR_PX = 180.0
 
+# ── Alignment KABUL eşikleri (ACCEPTANCE — hareket hızları DEĞİŞMEZ) ────────
+# "Ortalandım" kararı irtifaya göre uyarlanır: yüksek irtifada hedef küçüktür ve
+# rüzgâr / küçük pitch-yaw kamera jitter'ı centroid'i birkaç/onlarca piksel
+# oynatabilir; sabit sıkı tolerans bu jitter'ı "hizasız" sanıp confirmation'ı
+# sürekli sıfırlar → iniş hiç başlamaz.
+#   irtifa ≤ ALIGN_TOL_ALT_LO_M → ALIGN_TOL_LO_PX (alçakta HASSAS — mevcut 30px)
+#   irtifa ≥ ALIGN_TOL_ALT_HI_M → ALIGN_TOL_HI_PX (yüksekte jitter'a toleranslı)
+#   arada → doğrusal geçiş
+# Bu SADECE "hizalı" KABUL kararını etkiler; gain/adım/hareket mantığına
+# DOKUNMAZ (PositionController.aligned_tolerance_px — tek kullanım noktası).
+ALIGN_TOL_ALT_LO_M = 3.0            # RED_PAYLOAD_VERIFY_ALTITUDE — bırakma öncesi
+ALIGN_TOL_ALT_HI_M = 8.0            # TARGET_APPROACH_ALTITUDE — yüksek irtifa hizalaması
+ALIGN_TOL_LO_PX    = PIXEL_ALIGNMENT_TOLERANCE_PX   # 30.0 (geriye dönük uyum)
+ALIGN_TOL_HI_PX    = 50.0
+
+# Confirmation hysteresis (jitter dayanıklılığı): bir kez "hizalı" sayıldıktan
+# sonra, tek bir frame'in ENTER toleransı dışı ama EXIT toleransı içindeki
+# küçük oynaması sayacı SIFIRLAMAZ (artmaz da) — yalnızca EXIT dışı gerçek
+# sapma sıfırlar. Böylece ALIGNED ↔ NOT_ALIGNED flip-flop'u önlenir; gerçek
+# sapmada sayaç yine de sıfırlanır (yanlış alignment kabul edilmez).
+ALIGN_TOL_EXIT_FACTOR = 1.6         # exit_tol = enter_tol * bu çarpan
+
 # "Hizalı" kararı için GEREKLİ ardışık frame sayısı (temporal confirmation).
 # Tek bir frame'de hedefin milisaniyelik merkeze denk gelmesi (jitter / tesadüfi
 # geçiş) İHA'yı yanlış "ortaladım" sonucuna götürmesin diye, hedefin merkezde

@@ -37,6 +37,8 @@ from config import (
     COMPETITION_CORNERS,
     ALIGNMENT_DESCENT_STEP_M,
     ALIGNED_FRAMES_REQUIRED,
+    ALIGN_TOL_EXIT_FACTOR,
+    ALIGN_TOL_HI_PX,
     TARGET_ALIGNED_FRAMES_REQUIRED,
     CAMERA_TO_MECHANISM_OFFSET_M,
     BLUE_PAYLOAD_OFFSET_M,
@@ -1392,21 +1394,19 @@ class MissionStateMachine:
             )
         self._last_align_cmd_t = now
 
-        # Ardışık frame onayı: tek frame'de merkezde görünmek (jitter / tesadüfi
-        # geçiş) "hizalı" sayılmaz. ALIGNED_FRAMES_REQUIRED ardışık onay gerekir;
-        # araya hizasız frame girerse sayaç sıfırlanır.
-        if aligned:
-            self._aligned_frame_count += 1
-        else:
-            self._aligned_frame_count = 0
+        # Ardışık frame onayı (jitter'a dayanıklı — hysteresis): tek frame'de
+        # merkezde görünmek (jitter / tesadüfi geçiş) "hizalı" sayılmaz; araya
+        # ENTER dışı ama EXIT içi küçük bir oynama girerse sayaç SIFIRLANMAZ
+        # (yalnızca gerçek sapma sıfırlar).
+        dx = detection.center_x - frame.shape[1] / 2
+        dy = detection.center_y - frame.shape[0] / 2
+        self._update_aligned_counter(dx, dy, pos.relative_altitude, aligned)
         # Yük bırakma hedefi: SIKI ardışık onay (TARGET_ALIGNED_FRAMES_REQUIRED).
         # Search irtifasında yalpa/yaw ile şansa merkeze denk gelen birkaç frame
         # "hizalı" sanılıp erken irtifa düşüşü üretmemeli — şekil BİR SÜRE
         # aralıksız ortada kaldıktan sonra inişe geçilir.
         aligned = self._aligned_frame_count >= TARGET_ALIGNED_FRAMES_REQUIRED
 
-        dx = detection.center_x - frame.shape[1] / 2
-        dy = detection.center_y - frame.shape[0] / 2
         heading = self.nav.position().heading_deg
         self.log.info(
             "ALIGN HORIZONTAL: merkez=(%.0f,%.0f) dx=%.0f dy=%.0f heading=%.0f° "
@@ -1805,12 +1805,13 @@ class MissionStateMachine:
             best.center_x, best.center_y, aligned,
         )
 
-        # Ardışık frame onayı: tek frame'de tesadüfi hizalı görünüm (jitter)
-        # İHA'yı daha hedefi ortalamadan SEARCHING'e göndermesin.
-        if aligned:
-            self._aligned_frame_count += 1
-        else:
-            self._aligned_frame_count = 0
+        # Ardışık frame onayı (jitter'a dayanıklı — hysteresis): tek frame'de
+        # tesadüfi hizalı görünüm (jitter) İHA'yı daha hedefi ortalamadan
+        # SEARCHING'e göndermesin; araya EXIT içi küçük oynama girerse sayaç
+        # SIFIRLANMAZ (yalnızca gerçek sapma sıfırlar).
+        dx = best.center_x - frame.shape[1] / 2
+        dy = best.center_y - frame.shape[0] / 2
+        self._update_aligned_counter(dx, dy, pos.relative_altitude, aligned)
         aligned_confirmed = self._aligned_frame_count >= ALIGNED_FRAMES_REQUIRED
 
         if aligned_confirmed and self._align_for_pickup_start is not None:
@@ -2942,6 +2943,35 @@ class MissionStateMachine:
                     frame, l1, l2, line1_color=(0, 0, 255),
                 )
         # Asla state ilerletme, asla komut gönderme.
+
+    def _update_aligned_counter(self, dx: float, dy: float, altitude_m: float, aligned: bool) -> None:
+        """Hizalı onay sayacını jitter'a dayanıklı günceller (hysteresis).
+
+        - aligned (ENTER toleransı içinde): sayaç +1
+        - değil ama EXIT toleransı içinde ve sayaç > 0: sayaç KORUNUR
+          (küçük kamera jitter'ı — rüzgâr/pitch/yaw — sayacı sıfırlamaz,
+          ALIGNED ↔ NOT_ALIGNED flip-flop'u önlenir)
+        - EXIT toleransı dışı (gerçek sapma): sayaç 0
+
+        ENTER toleransı PositionController.aligned_tolerance_px (irtifaya göre
+        uyarlanır); EXIT = ENTER * ALIGN_TOL_EXIT_FACTOR.
+        """
+        if aligned:
+            self._aligned_frame_count += 1
+            return
+        if self._aligned_frame_count > 0:
+            try:
+                exit_tol = float(
+                    self.position_controller.aligned_tolerance_px(altitude_m)
+                ) * ALIGN_TOL_EXIT_FACTOR
+            except Exception:
+                # Mock/test veya erişilemeyen controller: güvenli varsayılan
+                exit_tol = ALIGN_TOL_HI_PX * ALIGN_TOL_EXIT_FACTOR
+            if abs(dx) > exit_tol or abs(dy) > exit_tol:
+                self._aligned_frame_count = 0
+            # exit içi → sayaç korunur (artmaz, sıfırlanmaz)
+        else:
+            self._aligned_frame_count = 0
 
     def _goto(self, new_state: MissionState) -> None:
         self.log.info("STATE: %s → %s", self.data.state.value, new_state.value)

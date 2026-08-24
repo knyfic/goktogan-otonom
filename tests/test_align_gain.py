@@ -83,9 +83,11 @@ def test_smaller_error_smaller_step():
 
 def test_very_small_error_tiny_step():
     """Deadband'in hemen üstündeki küçük hata → çok küçük hareket."""
-    # Yarı çözünürlük: deadband 60→30px; "hemen üstü" de 65→35px olur.
-    step = _command_step(35.0, 0.0, 11.5)   # 30px deadband üstü
-    assert step < 0.06, f"küçük hata adımı çok küçük olmalı (step={step:.4f}m)"
+    # Yarı çözünürlük: alçak deadband 30px; YÜKSEK İRTİFA (8m+) deadband
+    # 50px'e uyarlanır (ALIGN_TOL_HI_PX) — "hemen üstü" = 55px.
+    # 11.5m'de 55px ≈ 6-7cm adım — ALIGN_MAX_STEP_M (0.5m) yanında çok küçük.
+    step = _command_step(55.0, 0.0, 11.5)   # yüksek irtifa deadband üstü
+    assert step < 0.08, f"küçük hata adımı çok küçük olmalı (step={step:.4f}m)"
 
 
 # ── 2) Yüksek irtifa adımı PATLATMAZ (irtifa kazancı) ──────────────────────── #
@@ -162,13 +164,14 @@ def test_11_5m_large_error_not_slow():
 
 
 def test_altitude_gain_scales_with_ref_ratio():
-    """50px @11.5m: kazanç = ALIGN_GAIN·(hata/eşik)·(ref/alt) — oransal."""
-    # ratio_gain: 50px < 75px → 50/75 (yarı çözünürlükte eşik 150→75px)
-    expected_gain = ALIGN_GAIN * (50.0 / ALIGN_GAIN_FULL_ERROR_PX) * (
+    """60px @11.5m: kazanç = ALIGN_GAIN·(hata/eşik)·(ref/alt) — oransal.
+    (60px, yüksek irtifa deadband 50px'in üstünde → komut gönderilir.)"""
+    # ratio_gain: 60px < 75px → 60/75 (yarı çözünürlükte eşik 150→75px)
+    expected_gain = ALIGN_GAIN * (60.0 / ALIGN_GAIN_FULL_ERROR_PX) * (
         ALIGN_ALT_GAIN_REF_M / 11.5
     )
-    expected = 50.0 * _mpp_x(11.5) * expected_gain
-    got = _command_step(50.0, 0.0, 11.5)
+    expected = 60.0 * _mpp_x(11.5) * expected_gain
+    got = _command_step(60.0, 0.0, 11.5)
     assert got == pytest.approx(expected, rel=0.01)
 
 

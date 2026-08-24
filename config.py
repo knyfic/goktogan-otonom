@@ -434,11 +434,11 @@ LAND_TIMEOUT_S       = 20.0   # LAND'in tamamlanması için maksimum süre
 # LAND sonrası GUIDED restore'un tamamlanması için maksimum süre.
 GUIDED_RESTORE_TIMEOUT_S = 8.0
 
-# ArduPilot LAND_DISARMDELAY hedef değeri (saniye): iniş sonrası otomatik disarm
-# beklemesi. -1 = asla disarm; 15 = touchdown'dan 15 sn sonra disarm.
+# ArduPilot LAND_DISARMDELAY ÖNERİLEN değeri (saniye): iniş sonrası otomatik
+# disarm beklemesi. -1 = asla disarm; 15 = touchdown'dan 15 sn sonra disarm.
 # Pickup akışı (landing doğrulama ~1.5s + 3s bekleme + GUIDED dönüşü + TAKEOFF)
-# bu süreden KISA sürdüğü için normal akışta disarm OLMAZ; yalnızca yerde uzun
-# süre takılı kalınırsa (örn. pilot müdahale etmezse) güvenlik için disarm
-# tetiklenir. LAND'dan ÖNCE FC'ye yazılır, TAKEOFF sonrası orijinal değer geri
-# yüklenir (restore_land_disarmdelay).
+# bu süreden KISA sürdüğü için normal akışta disarm OLMAZ. Bu değer görev
+# tarafından artık FC'ye YAZILMAZ (real TELEM2 linkinde FC parametre isteklerine
+# yanıt vermiyor — o bekleme yalnızca gereksiz gecikmeydi) — Mission Planner'dan
+# FC'ye elle yazılmalıdır. Kodda yalnızca log/uyarı mesajlarında kullanılır.
 LAND_DISARM_DELAY_S = 15.0

@@ -219,6 +219,16 @@ class MissionStateMachine:
         self._land_phase_started: bool = False   # state'in başlangıç adımı yapıldı mı
         self._land_phase_start: float = 0.0      # state'e giriş zamanı (timeout için)
         self._landed_since: float | None = None  # landing doğrulama stabil sayacı
+        # LAND öncesi LAND_DISARMDELAY garantisi — NON-BLOCKING (tick tabanlı,
+        # kamera/HUD donmaz). Fazlar: READ → WAIT → (gerekirse WRITE/VERIFY) → DONE.
+        self._land_param_phase: str = "IDLE"     # IDLE/READ/WAIT/DONE
+        self._land_param_attempts: int = 0       # 3 deneme limiti
+        self._land_param_verified: bool = False  # DONE'da garantinin sonucu
+        self._land_param_waiting_write: bool = False  # WAIT, yazma sonrası doğrulama mı
+        self._land_land_sent: bool = False       # MAV_CMD_NAV_LAND bir kez gönderildi mi
+        # İlk okunan LAND_DISARMDELAY değeri — TAKEOFF sonrası geri yüklemek için
+        # (restore_land_disarmdelay'e iletilir).
+        self._land_disarmdelay_original: float | None = None
 
         # ---- Payload hassas iniş state'i ----
         # _payload_descent_alt: bir sonraki iniş hedefi; None = henüz başlamadı
@@ -2349,6 +2359,10 @@ class MissionStateMachine:
         controller'ı ile iner. Python NORMAL NAVİGASYON KOMUTU GÖNDERMEZ;
         yalnızca telemetri izler (heartbeat/armed/mod/pilot hepsi canlı).
 
+        LAND_DISARMDELAY garantisi NON-BLOCKING yürütülür (tick tabanlı):
+        istek gönderilir, yanıt telemetri akışında işlenir; bekleme süresince
+        HUD/kamera her tick'te çizilir — LAND öncesi donma OLMAZ.
+
         Güvenlik:
           • LAND_DISARMDELAY=LAND_DISARM_DELAY_S (15s) garanti edilir — pickup
             akışı bu süreden kısa sürdüğü için normal akışta disarm OLMAZ.
@@ -2365,28 +2379,51 @@ class MissionStateMachine:
             self._land_phase_started = True
             self._land_phase_start = time.monotonic()
             self._landed_since = None
-            # 1) Disarm garantisi (LAND_DISARMDELAY=LAND_DISARM_DELAY_S) —
-            #    başarısızsa RTL DEĞİL: uyarıyla LAND'e devam et (İHA zaten hedef
-            #    üzerinde hizalı; iniş doğru aksiyon. Param garanti edilemezse en
-            #    kötü durum FC varsayılanı 0'dır → yerde disarm → aşağıdaki armed
-            #    kontrolleri görevi güvenli durdurur, TAKEOFF/re-arm YOK).
-            if not self.nav.prepare_pickup_landing():
+            self._land_param_phase = "READ"
+            self._land_param_attempts = 0
+            self._land_param_verified = False
+            self._land_param_waiting_write = False
+            self._land_land_sent = False
+            self._land_disarmdelay_original = None
+            return
+
+        # HUD her tick'te çizilir — param garantisi bekleme süresinde bile
+        # kamera/overlay DONMAZ (GStreamer dahil telemetri/safety akışı canlı).
+        pos = self.nav.position()
+        frame = self.camera.latest()
+        if frame is not None:
+            if self._land_land_sent:
+                extra = (
+                    f"LANDING {pos.relative_altitude:.2f}m "
+                    f"vz={pos.vertical_speed_mps:+.2f}m/s"
+                )
+            else:
+                extra = "LAND HAZIRLIK"
+            l1, l2 = self._hud_lines(extra=extra)
+            self._pending_display = self._draw_hud(frame, l1, l2)
+
+        # ── 1) LAND_DISARMDELAY garantisi (non-blocking, tick tabanlı) ──
+        if not self._land_land_sent:
+            if self._land_param_phase != "DONE":
+                self._land_param_step()
+                return
+            if self._land_param_verified:
+                self.log.info(
+                    "MAV_CMD_NAV_LAND gönderiliyor — ArduPilot kendi LAND "
+                    "controller'ı iniyor (Python navigation komutu GÖNDERİLMEZ)."
+                )
+            else:
                 self.log.critical(
                     "LAND_DISARMDELAY=%.0f GARANTİ EDİLEMEDİ — uyarıyla LAND'e "
                     "devam ediliyor (disarm riski armed kontrolleriyle yakalanır, "
                     "TAKEOFF/re-arm YAPILMAZ).",
                     LAND_DISARM_DELAY_S,
                 )
-            # 2) ArduPilot native LAND başlat.
-            self.log.info(
-                "MAV_CMD_NAV_LAND gönderiliyor — ArduPilot kendi LAND controller'ı "
-                "iniyor (Python navigation komutu GÖNDERİLMEZ)."
-            )
             self.nav.land()
+            self._land_land_sent = True
             return
 
-        pos = self.nav.position()
-
+        # ── 2) LAND sürüyor: mod/armed/timeout/landing doğrulama ──
         # Pilot/RC müdahalesi: mission LAND beklerken başka mod seçildi → durdur.
         mode = getattr(self.nav, "current_flight_mode", None)
         if isinstance(mode, str) and self.nav.flight_mode_fresh(PILOT_TAKEOVER_MODE_STALE_S):
@@ -2434,15 +2471,86 @@ class MissionStateMachine:
         else:
             self._landed_since = None
 
-        # HUD canlı kalsın (GStreamer dahil — telemetri/safety akışı kesilmez)
-        frame = self.camera.latest()
-        if frame is not None:
-            extra = (
-                f"LANDING {pos.relative_altitude:.2f}m "
-                f"vz={pos.vertical_speed_mps:+.2f}m/s"
-            )
-            l1, l2 = self._hud_lines(extra=extra)
-            self._pending_display = self._draw_hud(frame, l1, l2)
+    # ------------------------------------------------------------------ #
+    def _land_param_step(self) -> None:
+        """LAND_DISARMDELAY garantisi — TEK ADIM (non-blocking, her tick'te çağrılır).
+
+        Fazlar: READ (istek gönder) → WAIT (yanıt bekle — HUD her tick'te çizilir)
+          → okunduysa: değer hedefse DONE(verified=True); değilse PARAM_SET + tekrar
+          oku → DONE(verified=...). 3 deneme sonunda DONE(verified=False) → çağıran
+          uyarıyla LAND'e devam eder.
+        """
+        phase = self._land_param_phase
+
+        if phase == "READ":
+            if self._land_param_attempts >= 3:
+                self._land_param_phase = "DONE"
+                self._land_param_verified = False
+                return
+            self._land_param_phase = "WAIT"
+            self._land_param_waiting_write = False
+            if not self.nav.start_param_read("LAND_DISARMDELAY"):
+                self._land_param_attempts += 1
+                self._land_param_phase = "READ"
+            return
+
+        if phase == "WAIT":
+            got, value = self.nav.poll_param()
+            if got:
+                if not self._land_param_waiting_write:
+                    # ── İlk okuma ──
+                    if self._land_disarmdelay_original is None:
+                        self._land_disarmdelay_original = value
+                    if abs(value - LAND_DISARM_DELAY_S) < 1e-6:
+                        self.log.info(
+                            "LAND_DISARMDELAY zaten %.0f — yazmaya gerek yok.",
+                            LAND_DISARM_DELAY_S,
+                        )
+                        self._land_param_phase = "DONE"
+                        self._land_param_verified = True
+                        return
+                    # Hedef değil → yaz ve doğrula (yeniden oku)
+                    self._land_param_waiting_write = True
+                    if not self.nav.send_param("LAND_DISARMDELAY", LAND_DISARM_DELAY_S):
+                        self._land_param_attempts += 1
+                        self._land_param_phase = "READ"
+                        return
+                    self.nav.start_param_read("LAND_DISARMDELAY")
+                    return
+                # ── Yazma sonrası doğrulama okuması ──
+                if abs(value - LAND_DISARM_DELAY_S) < 1e-6:
+                    self.log.info(
+                        "LAND_DISARMDELAY=%.0f ayarlandı (orijinal: %.1f — görev "
+                        "sonunda geri yüklenecek).",
+                        LAND_DISARM_DELAY_S, self._land_disarmdelay_original,
+                    )
+                    self._land_param_phase = "DONE"
+                    self._land_param_verified = True
+                    return
+                self._land_param_attempts += 1
+                self.log.warning(
+                    "LAND_DISARMDELAY=%.0f doğrulanamadı (okunan: %.1f, deneme %d/3).",
+                    LAND_DISARM_DELAY_S, value, self._land_param_attempts,
+                )
+                self._land_param_phase = "READ"
+                return
+
+            if self.nav.param_read_active():
+                return   # yanıt henüz gelmedi — bir sonraki tick
+            # Timeout — deneme harcandı
+            self._land_param_attempts += 1
+            if self._land_param_waiting_write:
+                self.log.warning(
+                    "LAND_DISARMDELAY=%.0f doğrulanamadı (deneme %d/3).",
+                    LAND_DISARM_DELAY_S, self._land_param_attempts,
+                )
+            else:
+                self.log.warning(
+                    "LAND_DISARMDELAY okunamadı (deneme %d/3).",
+                    self._land_param_attempts,
+                )
+            self._land_param_phase = "READ"
+            return
 
     # ------------------------------------------------------------------ #
     def _do_ascending_after_pickup_land(self) -> None:
@@ -2522,8 +2630,9 @@ class MissionStateMachine:
         self.nav.takeoff_only(PAYLOAD_VERIFY_ALTITUDE)
         # LAND_DISARMDELAY orijinal değerine geri döndür (görev sonu disarm
         # beklemesi vb. davranış bozulmasın).
-        if not self.nav.restore_land_disarmdelay():
+        if not self.nav.restore_land_disarmdelay(self._land_disarmdelay_original):
             self.log.warning("LAND_DISARMDELAY geri yüklenemedi — RTL disarm beklemesi etkilenebilir.")
+        self._land_disarmdelay_original = None
         self.log.info(
             "TAKEOFF → %.1fm (pickup sonrası doğrulama irtifası).",
             PAYLOAD_VERIFY_ALTITUDE,

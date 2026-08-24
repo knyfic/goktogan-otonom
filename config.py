@@ -421,3 +421,15 @@ MISSION_TIMEOUT_S = 11 * 60  # 660 saniye
 # Bu süre içinde tazelenen HEARTBEAT mod bilgisi geçerli sayılır; bayat mod
 # bilgisiyle takeover kararı verilmez (yanlış pozitif riski).
 PILOT_TAKEOVER_MODE_STALE_S = 5.0
+
+# ── Payload alma inişi — ArduPilot native LAND (disarm ASLA) ─────────────────
+# OFFSET sonrası Python'un 0m altitude komutu yerine MAV_CMD_NAV_LAND kullanılır;
+# ArduPilot kendi LAND controller'ı ile iner. Python yalnızca telemetri izler.
+# Landing doğrulama: irtifa ≈ 0 VE dikey hız ≈ 0, LAND_CONFIRM_HOLD_S boyunca
+# stabil kalırsa "landed" kabul edilir (GLOBAL_POSITION_INT — 10Hz).
+LAND_CONFIRM_ALT_M   = 0.30   # irtifa bu değerin ALTINDA olmalı
+LAND_CONFIRM_VS_MPS  = 0.20   # |dikey hız| bu değerin ALTINDA olmalı
+LAND_CONFIRM_HOLD_S  = 1.5    # bu süre stabil kalırsa landed sayılır
+LAND_TIMEOUT_S       = 20.0   # LAND'in tamamlanması için maksimum süre
+# LAND sonrası GUIDED restore'un tamamlanması için maksimum süre.
+GUIDED_RESTORE_TIMEOUT_S = 8.0

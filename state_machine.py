@@ -43,6 +43,11 @@ from config import (
     CAMERA_TO_MECHANISM_OFFSET_M,
     BLUE_PAYLOAD_OFFSET_M,
     RED_PAYLOAD_OFFSET_M,
+    GUIDED_RESTORE_TIMEOUT_S,
+    LAND_CONFIRM_ALT_M,
+    LAND_CONFIRM_HOLD_S,
+    LAND_CONFIRM_VS_MPS,
+    LAND_TIMEOUT_S,
     MISSION_TIMEOUT_S,
     MAX_PICKUP_ATTEMPTS,
     MAX_PAYLOAD_SIZE_FACTOR,
@@ -208,6 +213,12 @@ class MissionStateMachine:
         self._pickup_servo_start: float | None = None
         self._pickup_servo_wait:  float        = PAYLOAD_SERVO_WAIT_S
 
+        # ---- ArduPilot LAND ile pickup inişi ----
+        # LANDING_FOR_PICKUP / ASCENDING_AFTER_PICKUP_LAND state'leri için.
+        self._land_phase_started: bool = False   # state'in başlangıç adımı yapıldı mı
+        self._land_phase_start: float = 0.0      # state'e giriş zamanı (timeout için)
+        self._landed_since: float | None = None  # landing doğrulama stabil sayacı
+
         # ---- Payload hassas iniş state'i ----
         # _payload_descent_alt: bir sonraki iniş hedefi; None = henüz başlamadı
         self._payload_descent_alt: float | None = None
@@ -285,6 +296,11 @@ class MissionStateMachine:
                 MissionState.RTL,
                 MissionState.COMPLETE,
                 MissionState.PILOT_CONTROL,
+                # Mission'ın KENDİ mod değişiklikleri + yer state'i — FC zaten
+                # kendi failsafe'ini/landing'ini yürütür; Python RTL enjekte etmez.
+                MissionState.LANDING_FOR_PICKUP,
+                MissionState.ASCENDING_AFTER_PICKUP_LAND,
+                MissionState.PICKING_UP_PAYLOAD,
             )
         ):
             if not self.nav.heartbeat_ok(self._heartbeat_timeout_s):
@@ -311,6 +327,9 @@ class MissionStateMachine:
                 MissionState.RTL,
                 MissionState.COMPLETE,
                 MissionState.PILOT_CONTROL,
+                MissionState.LANDING_FOR_PICKUP,
+                MissionState.ASCENDING_AFTER_PICKUP_LAND,
+                MissionState.PICKING_UP_PAYLOAD,
             )
         ):
             elapsed = time.monotonic() - self._mission_start_t
@@ -336,9 +355,20 @@ class MissionStateMachine:
         # gönderme, state ilerletme YOK. ArduPilot pilotun seçtiği modda kalır.
         # WAITING_FOR_PREARM/INIT: mission henüz kontrol almamıştır (pilot
         # kendi modunda olabilir) — burada tespit edilmez.
-        # RTL/COMPLETE: mission'ın kendi RTL akışıdır — tespit edilmez.
+        # RTL/COMPLETE + LANDING_FOR_PICKUP/ASCENDING_AFTER_PICKUP_LAND:
+        # mission'ın KENDİ mod değişiklikleridir — bu state'ler KENDİ içlerinde
+        # pilot modunu izler (bkz. _do_land_for_pickup / _do_ascending_after_pickup_land).
         # PILOT_CONTROL: zaten durdurulmuş — yeniden durdurma yok.
-        if self._pilot_mode_check():
+        if self.data.state not in (
+            MissionState.RTL,
+            MissionState.COMPLETE,
+            MissionState.PILOT_CONTROL,
+            MissionState.WAITING_FOR_PREARM,
+            MissionState.INIT,
+            MissionState.LANDING_FOR_PICKUP,
+            MissionState.ASCENDING_AFTER_PICKUP_LAND,
+            MissionState.PICKING_UP_PAYLOAD,
+        ) and self._pilot_mode_check():
             return
 
         s = self.data.state
@@ -393,6 +423,10 @@ class MissionStateMachine:
             self._do_start_rtl()
         elif s == MissionState.PILOT_CONTROL:
             self._do_pilot_control()
+        elif s == MissionState.LANDING_FOR_PICKUP:
+            self._do_land_for_pickup()
+        elif s == MissionState.ASCENDING_AFTER_PICKUP_LAND:
+            self._do_ascending_after_pickup_land()
         elif s == MissionState.RTL:
             self._do_wait_rtl()
         else:
@@ -2210,7 +2244,8 @@ class MissionStateMachine:
         Kamera ile görev mekanizması arasında CAMERA_TO_MECHANISM_OFFSET_M (8cm)
         offset var (kamera önde, mekanizma arkada). Dolayısıyla İHA'nın, payload
         mekanizmasını payload'un üzerine getirmesi için +0.08m (8cm ileri) gitmesi
-        ve ardından yük alım irtifasına (0.0m) inmesi gerekir.
+        gerekir. OFFSET tamamlanınca ESKİ davranış "0m'ye Python inişi" yerine
+        ArduPilot native LAND başlatılır (LANDING_FOR_PICKUP).
         """
         now = time.monotonic()
         pos = self.nav.position()
@@ -2234,24 +2269,16 @@ class MissionStateMachine:
             if elapsed < OFFSET_CORRECTION_WAIT_S:
                 return
 
-            # Offset bitti, şimdi inelim
-            self.log.info("OFFSET bitti. Temas irtifasına (0.0m) iniliyor.")
-            self._send_altitude(PAYLOAD_CONTACT_ALTITUDE, timeout=10.0)
-            self._offset_phase = "WAITING_DESCENT"
-            return
-
-        if self._offset_phase == "WAITING_DESCENT":
-            # İrtifaya ulaşmayı kontrol edelim
-            result = self._altitude_ok()
-            if result is False and elapsed < OFFSET_CORRECTION_WAIT_S + 10.0:
-                return  # hala iniyor ve toplam zaman var
-
-            self._reset_altitude_state()
+            # Offset bitti → Python 0m altitude komutu YERİNE ArduPilot native
+            # LAND. (Eski davranış: _send_altitude(PAYLOAD_CONTACT_ALTITUDE) +
+            # WAITING_DESCENT beklemesi — artık LAND controller yönetiyor.)
             self.log.info(
-                "OFFSET VE İNİŞ tamamlandı (%.2fs). Mevcut irtifa: %.2fm. Pickup başlıyor.",
-                elapsed, pos.relative_altitude,
+                "OFFSET bitti. ArduPilot LAND ile yük alma inişi başlıyor "
+                "(Python 0m inişi kullanılmıyor)."
             )
-            self._goto(MissionState.PICKING_UP_PAYLOAD)
+            self._offset_phase = None
+            self._goto(MissionState.LANDING_FOR_PICKUP)
+            return
 
     # ------------------------------------------------------------------ #
     def _do_pickup(self) -> None:
@@ -2305,12 +2332,194 @@ class MissionStateMachine:
         self._pickup_servo_start = None
         result = self.payload.finish_pickup(self.payload_for_target(target))
         if result.success:
-            self.log.info("Pickup tamamlandı. Doğrulama irtifasına çıkılıyor.")
+            self.log.info("Pickup tamamlandı. GUIDED'a dönülüp 1m'ye kalkış yapılacak.")
             self._reset_altitude_state()
-            self._goto(MissionState.ASCENDING_FOR_VERIFICATION)
+            self._goto(MissionState.ASCENDING_AFTER_PICKUP_LAND)
         else:
             self.data.pickup_attempts += 1
             self._retry_or_fail()
+
+    # ------------------------------------------------------------------ #
+    def _do_land_for_pickup(self) -> None:
+        """Payload alma öncesi iniş — ArduPilot native LAND.
+
+        Eski davranış: Python 0m altitude hedefi (set_relative_altitude).
+        Yeni: MAV_CMD_NAV_LAND → ArduCopter LAND moduna geçer ve kendi
+        controller'ı ile iner. Python NORMAL NAVİGASYON KOMUTU GÖNDERMEZ;
+        yalnızca telemetri izler (heartbeat/armed/mod/pilot hepsi canlı).
+
+        Güvenlik:
+          • LAND_DISARMDELAY=-1 garanti edilir (disarm ASLA) — edilemezse iptal.
+          • LAND sırasında DISARM olursa: görev durdurulur, TAKEOFF/re-arm YOK.
+          • Landing doğrulama: irtifa ≈ 0 VE |dikey hız| ≈ 0, HOLD süresi stabil.
+          • Pilot/RC başka moda geçerse: PILOT_CONTROL (mevcut politika).
+          • LAND_TIMEOUT_S dolarsa: güvenli RTL.
+        """
+        if not self._land_phase_started:
+            self._land_phase_started = True
+            self._land_phase_start = time.monotonic()
+            self._landed_since = None
+            # 1) Disarm garantisi (LAND_DISARMDELAY=-1) — başarısızsa LAND yok.
+            if not self.nav.prepare_pickup_landing():
+                self.log.critical(
+                    "LAND_DISARMDELAY=-1 sağlanamadı — LAND iptal, güvenli RTL."
+                )
+                self.data.mission_failed = True
+                self._do_start_rtl()
+                return
+            # 2) ArduPilot native LAND başlat.
+            self.log.info(
+                "MAV_CMD_NAV_LAND gönderiliyor — ArduPilot kendi LAND controller'ı "
+                "iniyor (Python navigation komutu GÖNDERİLMEZ)."
+            )
+            self.nav.land()
+            return
+
+        pos = self.nav.position()
+
+        # Pilot/RC müdahalesi: mission LAND beklerken başka mod seçildi → durdur.
+        mode = getattr(self.nav, "current_flight_mode", None)
+        if isinstance(mode, str) and self.nav.flight_mode_fresh(PILOT_TAKEOVER_MODE_STALE_S):
+            if mode != "LAND" and mode != "GUIDED":
+                self._pause_for_pilot_takeover(mode)
+                return
+
+        # Güvenlik: LAND sırasında disarm — ASLA TAKEOFF/re-arm; görevi durdur.
+        if not self.nav.armed:
+            self.log.critical(
+                "LAND sırasında araç DISARM oldu — görev durduruluyor "
+                "(otomatik re-arm/TAKEOFF yapılmaz)."
+            )
+            self.data.mission_failed = True
+            self._do_start_rtl()
+            return
+
+        # Zaman aşımı
+        if time.monotonic() - self._land_phase_start > LAND_TIMEOUT_S:
+            self.log.critical(
+                "LAND tamamlanamadı (%.0fs) — görev durduruluyor.", LAND_TIMEOUT_S
+            )
+            self.data.mission_failed = True
+            self._do_start_rtl()
+            return
+
+        # Landing doğrulama: irtifa ≈ 0 + dikey hız ≈ 0, HOLD süresi stabil.
+        landed = (
+            pos.relative_altitude <= LAND_CONFIRM_ALT_M
+            and abs(pos.vertical_speed_mps) <= LAND_CONFIRM_VS_MPS
+        )
+        if landed:
+            if self._landed_since is None:
+                self._landed_since = time.monotonic()
+            elif time.monotonic() - self._landed_since >= LAND_CONFIRM_HOLD_S:
+                self.log.info(
+                    "Landing doğrulandı (irtifa=%.2fm, dikey hız=%.2fm/s, %.1fs stabil). "
+                    "Yük alma başlıyor.",
+                    pos.relative_altitude, pos.vertical_speed_mps, LAND_CONFIRM_HOLD_S,
+                )
+                self._land_phase_started = False
+                self._reset_altitude_state()
+                self._goto(MissionState.PICKING_UP_PAYLOAD)
+            # henüz HOLD dolmadı — bekle
+        else:
+            self._landed_since = None
+
+        # HUD canlı kalsın (GStreamer dahil — telemetri/safety akışı kesilmez)
+        frame = self.camera.latest()
+        if frame is not None:
+            extra = (
+                f"LANDING {pos.relative_altitude:.2f}m "
+                f"vz={pos.vertical_speed_mps:+.2f}m/s"
+            )
+            l1, l2 = self._hud_lines(extra=extra)
+            self._pending_display = self._draw_hud(frame, l1, l2)
+
+    # ------------------------------------------------------------------ #
+    def _do_ascending_after_pickup_land(self) -> None:
+        """LAND sonrası: GUIDED'a güvenli dönüş + 1m TAKEOFF (pickup doğrulaması).
+
+        Sıra (hepsi doğrulanır, körlemesine komut YOK):
+          armed mı? → GUIDED set → GUIDED GERÇEKTEN AKTİF mi? → armed hâlâ mı?
+          → TAKEOFF(PAYLOAD_VERIFY_ALTITUDE=1m) → ASCENDING_FOR_VERIFICATION
+
+        Güvenlik:
+          • Disarm olursa TAKEOFF/re-arm KESİNLİKLE YAPILMAZ — görev durur.
+          • GUIDED doğrulanmadan TAKEOFF gönderilmez.
+          • LAND_DISARMDELAY orijinal değere geri yüklenir.
+          • Pilot/RC müdahalesi → PILOT_CONTROL (mevcut politika).
+        """
+        if not self._land_phase_started:
+            self._land_phase_started = True
+            self._land_phase_start = time.monotonic()
+
+            # 1) Armed kontrolü — disarm ise asla devam etme.
+            if not self.nav.armed:
+                self.log.critical(
+                    "Pickup sonrası araç DISARM — TAKEOFF yapılmıyor, görev duruyor."
+                )
+                self.data.mission_failed = True
+                self._do_start_rtl()
+                return
+
+            # 2) Pilot pickup sırasında müdahale ettiyse mission'ın GUIDED'
+            #    set'i pilot kararını EZMEZ.
+            mode0 = getattr(self.nav, "current_flight_mode", None)
+            if isinstance(mode0, str) and self.nav.flight_mode_fresh(PILOT_TAKEOVER_MODE_STALE_S):
+                if mode0 not in ("LAND", "GUIDED"):
+                    self._pause_for_pilot_takeover(mode0)
+                    return
+
+            if mode0 == "GUIDED":
+                # align-payload fallback yolu: Python zaten GUIDED'da 0m'ye indi —
+                # mod set gerekmez (pilot modu asla ezilmez).
+                self.log.info("Zaten GUIDED modda (Python iniş yolu) — TAKEOFF hazırlığı.")
+            else:
+                # 3) Normal yol: LAND → GUIDED'a dön.
+                self.log.info("Pickup sonrası GUIDED moduna dönülüyor.")
+                self.nav.set_mode("GUIDED")
+            return
+
+        # Pilot/RC müdahalesi: LAND (henüz geçiş penceresi) veya GUIDED dışı
+        # bir mod seçildiyse durdur (mission kendi set komutuyla pilotu EZMEZ).
+        mode = getattr(self.nav, "current_flight_mode", None)
+        if isinstance(mode, str) and self.nav.flight_mode_fresh(PILOT_TAKEOVER_MODE_STALE_S):
+            if mode not in ("LAND", "GUIDED"):
+                self._pause_for_pilot_takeover(mode)
+                return
+
+        # 3) GUIDED gerçekten aktif mi? (doğrulanmadan TAKEOFF YOK)
+        if mode != "GUIDED":
+            if time.monotonic() - self._land_phase_start > GUIDED_RESTORE_TIMEOUT_S:
+                self.log.critical(
+                    "GUIDED'a dönülemedi (mod=%s, %.0fs) — TAKEOFF yapılmıyor, "
+                    "görev duruyor.", mode, GUIDED_RESTORE_TIMEOUT_S,
+                )
+                self.data.mission_failed = True
+                self._do_start_rtl()
+            return
+
+        # 4) Armed hâlâ mı? (tekrar — TAKEOFF öncesi son güvenlik kapısı)
+        if not self.nav.armed:
+            self.log.critical(
+                "GUIDED aktif ama araç DISARM — TAKEOFF yapılmıyor, görev duruyor."
+            )
+            self.data.mission_failed = True
+            self._do_start_rtl()
+            return
+
+        # 5) TAKEOFF (re-arm içermez) → mevcut doğrulama akışına dön.
+        self._land_phase_started = False
+        self.nav.takeoff_only(PAYLOAD_VERIFY_ALTITUDE)
+        # LAND_DISARMDELAY orijinal değerine geri döndür (görev sonu disarm
+        # beklemesi vb. davranış bozulmasın).
+        if not self.nav.restore_land_disarmdelay():
+            self.log.warning("LAND_DISARMDELAY geri yüklenemedi — RTL disarm beklemesi etkilenebilir.")
+        self.log.info(
+            "TAKEOFF → %.1fm (pickup sonrası doğrulama irtifası).",
+            PAYLOAD_VERIFY_ALTITUDE,
+        )
+        self._reset_altitude_state()
+        self._goto(MissionState.ASCENDING_FOR_VERIFICATION)
 
     # ------------------------------------------------------------------ #
     def _do_ascend_for_verification(self) -> None:

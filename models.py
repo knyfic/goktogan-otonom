@@ -37,6 +37,13 @@ class MissionState(str, Enum):
     # otomatik ilerlemez (terminal durdurma — güvenlik). Pilot geri GUIDED'a
     # geçse bile mission otomatik devam ETMEZ.
     PILOT_CONTROL = "PILOT_CONTROL"
+    # ArduPilot native LAND ile yere inme (payload alma öncesi). Python yalnızca
+    # telemetri izler; normal position komutu göndermez. Mission'ın KENDİ mod
+    # değişikliğidir (RTL gibi) — pilot takeover sistemi bunu ezmez.
+    LANDING_FOR_PICKUP = "LANDING_FOR_PICKUP"
+    # LAND tamamlandıktan sonra GUIDED'a güvenli dönüş + 1m TAKEOFF.
+    # GUIDED gerçekten aktif ve araç armed doğrulanmadan TAKEOFF gönderilmez.
+    ASCENDING_AFTER_PICKUP_LAND = "ASCENDING_AFTER_PICKUP_LAND"
     RTL = "RTL"
     COMPLETE = "COMPLETE"
 
@@ -84,6 +91,9 @@ class VehiclePosition:
     heading_deg: float = 0.0
     battery_voltage_v: float = 0.0   # BATTERY_STATUS hücre toplamı (0 = henüz bilinmiyor)
     battery_percent: int = -1        # SYS_STATUS battery_remaining (-1 = bilinmiyor)
+    # GLOBAL_POSITION_INT.vz → dikey hız (m/s, pozitif = yükseliyor).
+    # ArduPilot LAND'de "landed" doğrulamasında kullanılır (10Hz tazelenir).
+    vertical_speed_mps: float = 0.0
 
 
 @dataclass

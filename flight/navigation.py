@@ -85,6 +85,10 @@ class Navigation:
         self._mode_last_t: float = 0.0
         # Teşhis: kaç heartbeat işlendi (ilk N tanesi INFO loglanır).
         self._hb_seen: int = 0
+        # Armed durumu (HEARTBEAT base_mode SAFETY_ARMED biti — _update_mode tazeler).
+        self._armed: bool = False
+        # LAND öncesi saklanan LAND_DISARMDELAY orijinal değeri (restore için).
+        self._land_disarmdelay_original: float | None = None
 
         # ---- Pre-arm / SYS_STATUS / STATUSTEXT durumu ----
         # ArduPilot'un SYS_STATUS sağlık bitleri (onboard_control_sensors_health)
@@ -118,6 +122,10 @@ class Navigation:
         self._position.longitude = msg.lon / 1e7
         self._position.relative_altitude = msg.relative_alt / 1000.0
         self._position.heading_deg = msg.hdg / 100.0
+        # GLOBAL_POSITION_INT.vz (cm/s, NED — pozitif aşağı) → dikey hız (m/s,
+        # pozitif yükseliş). ArduPilot LAND'de "landed" doğrulamasında kullanılır.
+        vz = getattr(msg, "vz", 0) or 0
+        self._position.vertical_speed_mps = -float(vz) / 100.0
         # Bağlantı canlılık işareti — GLOBAL_POSITION_INT uçuşta sürekli akar.
         self._last_message_s = time.monotonic()
 
@@ -235,6 +243,10 @@ class Navigation:
         if not accepted:
             return
 
+        # Armed durumu: HEARTBEAT base_mode SAFETY_ARMED biti (7) — LAND sonrası
+        # "disarm olursa asla TAKEOFF/re-arm yapma" güvenlik kontrolünde kullanılır.
+        self._armed = bool(base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+
         self._mode_custom = int(custom)
         self._mode_last_t = time.monotonic()
         try:
@@ -329,6 +341,16 @@ class Navigation:
     def current_flight_mode(self) -> str | None:
         """Son bilinen flight mode adı ('GUIDED', 'LAND', ...). None = bilinmiyor."""
         return self._mode_name
+
+    @property
+    def armed(self) -> bool:
+        """Araç şu an armed mı? (HEARTBEAT base_mode SAFETY_ARMED biti — ~1Hz taze)
+
+        LAND sonrası "disarm olursa ASLA TAKEOFF/re-arm yapma" güvenlik
+        kontrolünde kullanılır. Bayat olabilir (en fazla ~1s) — kritik kararlar
+        (TAKEOFF) için ayrıca mode/fresh doğrulaması yapılır.
+        """
+        return bool(getattr(self, "_armed", False))
 
     def flight_mode_fresh(self, timeout_s: float = 5.0) -> bool:
         """Mod bilgisi bu süre içinde tazelendi mi?
@@ -590,6 +612,123 @@ class Navigation:
             0,
             0, 0, 0, 0, 0, 0, 0,
         )
+
+    def land(self) -> None:
+        """ArduPilot native LAND (payload alma inişi).
+
+        MAV_CMD_NAV_LAND — ArduCopter bu komutta LAND moduna geçer ve kendi
+        LAND controller'ı ile kontrollü iniş yapar. Mod değiştirir; DISARM
+        içermez (LAND_DISARMDELAY=-1 garanti edilmişse disarm olmaz).
+        """
+        self.master.mav.command_long_send(
+            self.system_id,
+            self.component_id,
+            mavutil.mavlink.MAV_CMD_NAV_LAND,
+            0,
+            0, 0, 0, 0, 0, 0, 0,
+        )
+
+    def takeoff_only(self, altitude_m: float) -> None:
+        """Yalnızca MAV_CMD_NAV_TAKEOFF gönderir — mod DEĞİŞTİRMEZ, ARM ETMEZ.
+
+        Çağıran; GUIDED aktif + araç armed olduğunu DOĞRULAMIŞ olmalıdır.
+        Güvenlik: disarm sonrası otomatik re-arm KESİNLİKLE yapılmaz
+        (Navigation.takeoff()'un arm() davranışından kasıtlı olarak ayrıdır).
+        """
+        self.master.mav.command_long_send(
+            self.system_id,
+            self.component_id,
+            mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+            0,
+            0, 0, 0, 0, 0, 0,
+            altitude_m,
+        )
+
+    def _read_param(self, name: str, timeout_s: float = 2.0) -> float | None:
+        """PARAM_REQUEST_READ gönderir ve PARAM_VALUE döner (kısa, blocking).
+
+        None = okunamadı (timeout / FC yanıt vermedi). Mesaj tüketir —
+        yalnızca kritik parametre doğrulamalarında kullanılır.
+        """
+        try:
+            self.master.mav.param_request_read_send(
+                self.system_id, self.component_id, name.encode(), -1
+            )
+        except Exception:
+            return None
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            msg = self.master.recv_match(type="PARAM_VALUE", blocking=True, timeout=0.5)
+            if msg is None:
+                continue
+            pid = getattr(msg, "param_id", b"")
+            if isinstance(pid, bytes):
+                pid = pid.decode(errors="replace").rstrip("\x00")
+            if pid == name:
+                return float(getattr(msg, "param_value", 0.0))
+        return None
+
+    def prepare_pickup_landing(self) -> bool:
+        """LAND öncesi: LAND_DISARMDELAY=-1 olduğunu GARANTİ ET (disarm ASLA).
+
+        ArduCopter v4.7 varsayılanında LAND_DISARMDELAY=0 → inişte otomatik
+        disarm. Görev "hiçbir şekilde disarm olmamalı" şartını koyduğundan,
+        mevcut değer saklanır, -1'e çekilir ve okuma ile DOĞRULANIR.
+
+        -1 zaten set ise yazmaz. Başarısızsa False — çağıran LAND'i iptal etmeli.
+        """
+        try:
+            cur = self._read_param("LAND_DISARMDELAY")
+        except Exception:
+            cur = None
+        if cur is None:
+            _log.error("LAND_DISARMDELAY okunamadı — LAND güvenli değil.")
+            return False
+        self._land_disarmdelay_original = float(cur)
+        if abs(float(cur) - (-1.0)) < 1e-6:
+            return True   # zaten -1 — yazmaya gerek yok
+        try:
+            self.master.mav.param_set_send(
+                self.system_id,
+                self.component_id,
+                b"LAND_DISARMDELAY",
+                -1.0,
+                mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+            )
+        except Exception:
+            return False
+        back = self._read_param("LAND_DISARMDELAY")
+        if back is None or abs(float(back) - (-1.0)) >= 1e-6:
+            _log.error("LAND_DISARMDELAY=-1 doğrulanamadı (okunan: %s).", back)
+            return False
+        _log.info("LAND_DISARMDELAY=-1 ayarlandı (orijinal: %.1f — görev sonunda geri yüklenecek).",
+                  self._land_disarmdelay_original)
+        return True
+
+    def restore_land_disarmdelay(self) -> bool:
+        """LAND_DISARMDELAY'i LAND öncesindeki orijinal değerine geri yükler.
+
+        Başarısızsa False (log uyarısı — güvenli degrade: -1 kalırsa sonraki
+        RTL disarm beklemesi zaman aşımına düşüp COMPLETE olur).
+        """
+        if self._land_disarmdelay_original is None:
+            return True
+        try:
+            self.master.mav.param_set_send(
+                self.system_id,
+                self.component_id,
+                b"LAND_DISARMDELAY",
+                self._land_disarmdelay_original,
+                mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+            )
+            _log.info("LAND_DISARMDELAY orijinal değerine döndürüldü: %.1f",
+                      self._land_disarmdelay_original)
+            self._land_disarmdelay_original = None
+            return True
+        except Exception:
+            _log.error("LAND_DISARMDELAY geri yüklenemedi (%.1f) — uyarıyı inceleyin.",
+                       self._land_disarmdelay_original)
+            return False
 
     # ------------------------------------------------------------------ #
     #  Bekleme yardımcıları

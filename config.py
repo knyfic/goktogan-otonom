@@ -422,7 +422,7 @@ MISSION_TIMEOUT_S = 11 * 60  # 660 saniye
 # bilgisiyle takeover kararı verilmez (yanlış pozitif riski).
 PILOT_TAKEOVER_MODE_STALE_S = 5.0
 
-# ── Payload alma inişi — ArduPilot native LAND (disarm ASLA) ─────────────────
+# ── Payload alma inişi — ArduPilot native LAND (disarm 15 sn) ───────────────
 # OFFSET sonrası Python'un 0m altitude komutu yerine MAV_CMD_NAV_LAND kullanılır;
 # ArduPilot kendi LAND controller'ı ile iner. Python yalnızca telemetri izler.
 # Landing doğrulama: irtifa ≈ 0 VE dikey hız ≈ 0, LAND_CONFIRM_HOLD_S boyunca
@@ -433,3 +433,12 @@ LAND_CONFIRM_HOLD_S  = 1.5    # bu süre stabil kalırsa landed sayılır
 LAND_TIMEOUT_S       = 20.0   # LAND'in tamamlanması için maksimum süre
 # LAND sonrası GUIDED restore'un tamamlanması için maksimum süre.
 GUIDED_RESTORE_TIMEOUT_S = 8.0
+
+# ArduPilot LAND_DISARMDELAY hedef değeri (saniye): iniş sonrası otomatik disarm
+# beklemesi. -1 = asla disarm; 15 = touchdown'dan 15 sn sonra disarm.
+# Pickup akışı (landing doğrulama ~1.5s + 3s bekleme + GUIDED dönüşü + TAKEOFF)
+# bu süreden KISA sürdüğü için normal akışta disarm OLMAZ; yalnızca yerde uzun
+# süre takılı kalınırsa (örn. pilot müdahale etmezse) güvenlik için disarm
+# tetiklenir. LAND'dan ÖNCE FC'ye yazılır, TAKEOFF sonrası orijinal değer geri
+# yüklenir (restore_land_disarmdelay).
+LAND_DISARM_DELAY_S = 15.0

@@ -8,7 +8,9 @@ YENİ davranış (yalnızca pickup öncesi iniş):
   GUIDED AKTİF mi? → TAKEOFF 1m → ASCENDING_FOR_VERIFICATION
 
 GÜVENLİK kuralları (bu testlerin garantilediği):
-  • İHA HİÇBİR ŞEKİLDE disarm olmaz (LAND_DISARMDELAY=-1 doğrulanmadan LAND yok).
+  • Normal akışta İHA disarm olmaz (LAND_DISARMDELAY=15 LAND öncesi garanti edilir).
+  • Param garanti edilemezse RTL DEĞİL — uyarıyla LAND'e devam edilir (disarm
+    riski aşağıdaki armed kontrolleriyle yakalanır; TAKEOFF/re-arm YOK).
   • Disarm olursa ASLA TAKEOFF/re-arm — görev durur.
   • GUIDED gerçekten aktif doğrulanmadan TAKEOFF gönderilmez.
   • LAND sırasında Python normal navigation komutu göndermez.
@@ -26,6 +28,7 @@ import pytest
 from config import (
     GUIDED_RESTORE_TIMEOUT_S,
     LAND_CONFIRM_HOLD_S,
+    LAND_DISARM_DELAY_S,
     OFFSET_CORRECTION_WAIT_S,
     PAYLOAD_VERIFY_ALTITUDE,
 )
@@ -176,17 +179,21 @@ def test_restore_phase_disarm_aborts_no_takeoff():
     nav.set_mode.assert_not_called()
 
 
-def test_disarmdelay_not_ensured_aborts_landing():
-    """LAND_DISARMDELAY=-1 garanti edilemezse LAND HİÇ BAŞLATILMAZ (disarm riski)."""
+def test_disarmdelay_not_ensured_lands_anyway_with_warning():
+    """Param garanti edilemezse RTL DEĞİL — uyarıyla LAND'e devam edilir.
+
+    İHA zaten hedef üzerinde hizalı; iniş doğru aksiyon. Disarm riski mevcut
+    armed kontrolleriyle yakalanır (TAKEOFF/re-arm YOK).
+    """
     nav = _landing_nav(prepare_ok=False)
     sm = _sm(nav)
     sm.data.state = MissionState.LANDING_FOR_PICKUP
 
     sm._do_land_for_pickup()
 
-    nav.land.assert_not_called()
-    assert sm.data.state == MissionState.RTL
-    assert sm.data.mission_failed is True
+    nav.land.assert_called_once()               # LAND yine de başlatıldı
+    assert sm.data.state == MissionState.LANDING_FOR_PICKUP
+    assert sm.data.mission_failed is False       # görev henüz başarısız sayılmadı
 
 
 # ── 5) Pilot takeover: mission pilot kararını EZMEZ ────────────────────────── #
@@ -279,26 +286,27 @@ def test_takeoff_only_never_arms_or_changes_mode():
     assert nav.master.mav.command_long_send.call_count == 1
 
 
-def test_prepare_pickup_landing_sets_neg1_and_verifies():
+def test_prepare_pickup_landing_sets_15_and_verifies():
     nav = _raw_nav()
-    nav._read_param = MagicMock(side_effect=[0.0, -1.0])  # okundu → set → doğrula
+    # okundu → set → doğrula (dönüş: hedef değer)
+    nav._read_param = MagicMock(side_effect=[0.0, LAND_DISARM_DELAY_S])
 
     assert nav.prepare_pickup_landing() is True
 
     nav.master.mav.param_set_send.assert_called_once()
     args = nav.master.mav.param_set_send.call_args[0]
     assert args[2] == b"LAND_DISARMDELAY"
-    assert args[3] == -1.0
+    assert args[3] == LAND_DISARM_DELAY_S
     assert nav._land_disarmdelay_original == 0.0   # restore için saklandı
 
 
-def test_prepare_pickup_landing_skips_write_if_already_neg1():
+def test_prepare_pickup_landing_skips_write_if_already_15():
     nav = _raw_nav()
-    nav._read_param = MagicMock(return_value=-1.0)
+    nav._read_param = MagicMock(return_value=LAND_DISARM_DELAY_S)
 
     assert nav.prepare_pickup_landing() is True
     nav.master.mav.param_set_send.assert_not_called()
-    assert nav._land_disarmdelay_original == -1.0
+    assert nav._land_disarmdelay_original == LAND_DISARM_DELAY_S
 
 
 def test_prepare_pickup_landing_fails_when_param_unreadable():
@@ -307,6 +315,51 @@ def test_prepare_pickup_landing_fails_when_param_unreadable():
 
     assert nav.prepare_pickup_landing() is False
     nav.master.mav.param_set_send.assert_not_called()
+
+
+def test_prepare_pickup_landing_retries_then_succeeds():
+    """İlk okuma başarısız olursa retry edilir; ikinci denemede başarılı olunur."""
+    nav = _raw_nav()
+    # deneme 1: okuma None → deneme 2: okundu 0.0 → yaz → doğrula 15
+    nav._read_param = MagicMock(
+        side_effect=[None, 0.0, LAND_DISARM_DELAY_S]
+    )
+
+    assert nav.prepare_pickup_landing() is True
+
+    assert nav.master.mav.param_set_send.call_count == 1
+    args = nav.master.mav.param_set_send.call_args[0]
+    assert args[2] == b"LAND_DISARMDELAY"
+    assert args[3] == LAND_DISARM_DELAY_S
+    assert nav._land_disarmdelay_original == 0.0   # ilk okunan değer saklandı
+
+
+def test_prepare_pickup_landing_keeps_first_original_across_retries():
+    """Retry'lar restore için İLK okunan değeri korur (15 ile ezilmez)."""
+    nav = _raw_nav()
+    # deneme 1: okundu 0.0 → yaz → doğrula başarısız (None)
+    # deneme 2: okundu 15.0 (yaz geçmiş) → zaten hedef → True
+    nav._read_param = MagicMock(side_effect=[0.0, None, 15.0])
+
+    assert nav.prepare_pickup_landing() is True
+    assert nav._land_disarmdelay_original == 0.0   # restore için 0.0 korundu
+
+
+def test_read_param_dispatches_telemetry_and_returns_value():
+    """_read_param beklerken diğer telemetriyi de işler (mod/armed bayatmaz)."""
+    nav = _raw_nav()
+    hb = _hb(custom_mode=4, base_mode=129)         # GUIDED + ARMED heartbeat
+    hb.get_type.return_value = "HEARTBEAT"
+    pv = MagicMock()
+    pv.get_type.return_value = "PARAM_VALUE"
+    pv.param_id = b"LAND_DISARMDELAY\x00"
+    pv.param_value = 15.0
+    nav.master.recv_match.side_effect = [hb, pv]   # heartbeat → PARAM_VALUE
+
+    val = nav._read_param("LAND_DISARMDELAY", timeout_s=1.0)
+
+    assert val == 15.0
+    assert nav.armed is True                       # heartbeat işlendi — armed tazelendi
 
 
 def test_restore_land_disarmdelay_restores_original():

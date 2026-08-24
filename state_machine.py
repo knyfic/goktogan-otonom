@@ -48,6 +48,7 @@ from config import (
     LAND_CONFIRM_HOLD_S,
     LAND_CONFIRM_VS_MPS,
     LAND_TIMEOUT_S,
+    LAND_DISARM_DELAY_S,
     MISSION_TIMEOUT_S,
     MAX_PICKUP_ATTEMPTS,
     MAX_PAYLOAD_SIZE_FACTOR,
@@ -2349,7 +2350,12 @@ class MissionStateMachine:
         yalnızca telemetri izler (heartbeat/armed/mod/pilot hepsi canlı).
 
         Güvenlik:
-          • LAND_DISARMDELAY=-1 garanti edilir (disarm ASLA) — edilemezse iptal.
+          • LAND_DISARMDELAY=LAND_DISARM_DELAY_S (15s) garanti edilir — pickup
+            akışı bu süreden kısa sürdüğü için normal akışta disarm OLMAZ.
+            Garanti edilemezse RTL DEĞİL: uyarıyla LAND'e devam edilir (İHA
+            zaten hedef üzerinde hizalı; iniş doğru aksiyon). En kötü durum FC
+            varsayılanı (0) kalır → yerde disarm → aşağıdaki armed kontrolleri
+            görevi güvenli durdurur, TAKEOFF/re-arm YOK.
           • LAND sırasında DISARM olursa: görev durdurulur, TAKEOFF/re-arm YOK.
           • Landing doğrulama: irtifa ≈ 0 VE |dikey hız| ≈ 0, HOLD süresi stabil.
           • Pilot/RC başka moda geçerse: PILOT_CONTROL (mevcut politika).
@@ -2359,14 +2365,18 @@ class MissionStateMachine:
             self._land_phase_started = True
             self._land_phase_start = time.monotonic()
             self._landed_since = None
-            # 1) Disarm garantisi (LAND_DISARMDELAY=-1) — başarısızsa LAND yok.
+            # 1) Disarm garantisi (LAND_DISARMDELAY=LAND_DISARM_DELAY_S) —
+            #    başarısızsa RTL DEĞİL: uyarıyla LAND'e devam et (İHA zaten hedef
+            #    üzerinde hizalı; iniş doğru aksiyon. Param garanti edilemezse en
+            #    kötü durum FC varsayılanı 0'dır → yerde disarm → aşağıdaki armed
+            #    kontrolleri görevi güvenli durdurur, TAKEOFF/re-arm YOK).
             if not self.nav.prepare_pickup_landing():
                 self.log.critical(
-                    "LAND_DISARMDELAY=-1 sağlanamadı — LAND iptal, güvenli RTL."
+                    "LAND_DISARMDELAY=%.0f GARANTİ EDİLEMEDİ — uyarıyla LAND'e "
+                    "devam ediliyor (disarm riski armed kontrolleriyle yakalanır, "
+                    "TAKEOFF/re-arm YAPILMAZ).",
+                    LAND_DISARM_DELAY_S,
                 )
-                self.data.mission_failed = True
-                self._do_start_rtl()
-                return
             # 2) ArduPilot native LAND başlat.
             self.log.info(
                 "MAV_CMD_NAV_LAND gönderiliyor — ArduPilot kendi LAND controller'ı "

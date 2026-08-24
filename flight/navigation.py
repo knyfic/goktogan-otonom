@@ -6,6 +6,7 @@ import time
 from pymavlink import mavutil
 
 from models import VehiclePosition
+from config import LAND_DISARM_DELAY_S
 
 # Mission logger'ıyla aynı ad — setup_logging() ile aynı akışa/format'a yazılır.
 _log = logging.getLogger("iha_mission")
@@ -618,7 +619,9 @@ class Navigation:
 
         MAV_CMD_NAV_LAND — ArduCopter bu komutta LAND moduna geçer ve kendi
         LAND controller'ı ile kontrollü iniş yapar. Mod değiştirir; DISARM
-        içermez (LAND_DISARMDELAY=-1 garanti edilmişse disarm olmaz).
+        içermez (LAND_DISARMDELAY=LAND_DISARM_DELAY_S garanti edilmişse yerde
+        yalnızca 15 sn sonra güvenlik disarm'ı olur — normal pickup akışı bu
+        sürede TAKEOFF'a kalkar).
         """
         self.master.mav.command_long_send(
             self.system_id,
@@ -647,8 +650,11 @@ class Navigation:
     def _read_param(self, name: str, timeout_s: float = 2.0) -> float | None:
         """PARAM_REQUEST_READ gönderir ve PARAM_VALUE döner (kısa, blocking).
 
-        None = okunamadı (timeout / FC yanıt vermedi). Mesaj tüketir —
-        yalnızca kritik parametre doğrulamalarında kullanılır.
+        Beklerken gelen DİĞER telemetri mesajları da işlenir (_dispatch_telemetry)
+        — böylece okuma penceresi boyunca pozisyon/mod/armed bilgisi bayatmaz ve
+        yalnızca PARAM_VALUE filtresiyle başka mesajlar çöpe atılmaz.
+
+        None = okunamadı (timeout / FC yanıt vermedi).
         """
         try:
             self.master.mav.param_request_read_send(
@@ -658,8 +664,11 @@ class Navigation:
             return None
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            msg = self.master.recv_match(type="PARAM_VALUE", blocking=True, timeout=0.5)
+            msg = self.master.recv_match(blocking=True, timeout=0.5)
             if msg is None:
+                continue
+            self._dispatch_telemetry(msg)
+            if msg.get_type() != "PARAM_VALUE":
                 continue
             pid = getattr(msg, "param_id", b"")
             if isinstance(pid, bytes):
@@ -669,47 +678,65 @@ class Navigation:
         return None
 
     def prepare_pickup_landing(self) -> bool:
-        """LAND öncesi: LAND_DISARMDELAY=-1 olduğunu GARANTİ ET (disarm ASLA).
+        """LAND öncesi: LAND_DISARMDELAY=LAND_DISARM_DELAY_S olduğunu GARANTİ ET.
 
-        ArduCopter v4.7 varsayılanında LAND_DISARMDELAY=0 → inişte otomatik
-        disarm. Görev "hiçbir şekilde disarm olmamalı" şartını koyduğundan,
-        mevcut değer saklanır, -1'e çekilir ve okuma ile DOĞRULANIR.
+        ArduCopter v4.7 varsayılanında LAND_DISARMDELAY=0 → inişte anında
+        disarm. Pickup akışının (landing doğrulama + 3s bekleme + GUIDED dönüşü
+        + TAKEOFF) güvenle tamamlanması için LAND_DISARM_DELAY_S (15 sn) garanti
+        edilir: mevcut değer saklanır, hedef değere çekilir ve okuma ile
+        DOĞRULANIR.
 
-        -1 zaten set ise yazmaz. Başarısızsa False — çağıran LAND'i iptal etmeli.
+        Gerçek linkte PARAM_VALUE gecikebildiği için okuma/yazma/doğrulama EN
+        FAZLA 3 DENEME yapılır (her deneme ~2s). İlk okunan değer restore için
+        saklanır (sonraki denemelerde değiştirilmez). Yine de başarısızsa False
+        döner — çağıran artık RTL yerine uyarıyla LAND'e devam eder (disarm
+        riski state_machine'deki mevcut armed kontrolleriyle yakalanır;
+        TAKEOFF/re-arm YOK).
         """
-        try:
-            cur = self._read_param("LAND_DISARMDELAY")
-        except Exception:
-            cur = None
-        if cur is None:
-            _log.error("LAND_DISARMDELAY okunamadı — LAND güvenli değil.")
-            return False
-        self._land_disarmdelay_original = float(cur)
-        if abs(float(cur) - (-1.0)) < 1e-6:
-            return True   # zaten -1 — yazmaya gerek yok
-        try:
-            self.master.mav.param_set_send(
-                self.system_id,
-                self.component_id,
-                b"LAND_DISARMDELAY",
-                -1.0,
-                mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
-            )
-        except Exception:
-            return False
-        back = self._read_param("LAND_DISARMDELAY")
-        if back is None or abs(float(back) - (-1.0)) >= 1e-6:
-            _log.error("LAND_DISARMDELAY=-1 doğrulanamadı (okunan: %s).", back)
-            return False
-        _log.info("LAND_DISARMDELAY=-1 ayarlandı (orijinal: %.1f — görev sonunda geri yüklenecek).",
-                  self._land_disarmdelay_original)
-        return True
+        for attempt in range(1, 4):
+            try:
+                cur = self._read_param("LAND_DISARMDELAY")
+            except Exception:
+                cur = None
+            if cur is None:
+                _log.warning("LAND_DISARMDELAY okunamadı (deneme %d/3).", attempt)
+                continue
+            if self._land_disarmdelay_original is None:
+                self._land_disarmdelay_original = float(cur)
+            if abs(float(cur) - LAND_DISARM_DELAY_S) < 1e-6:
+                _log.info("LAND_DISARMDELAY zaten %.0f — yazmaya gerek yok.",
+                          LAND_DISARM_DELAY_S)
+                return True
+            try:
+                self.master.mav.param_set_send(
+                    self.system_id,
+                    self.component_id,
+                    b"LAND_DISARMDELAY",
+                    LAND_DISARM_DELAY_S,
+                    mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+                )
+            except Exception:
+                _log.warning("LAND_DISARMDELAY yazılamadı (deneme %d/3).", attempt)
+                continue
+            back = self._read_param("LAND_DISARMDELAY")
+            if back is None or abs(float(back) - LAND_DISARM_DELAY_S) >= 1e-6:
+                _log.warning("LAND_DISARMDELAY=%.0f doğrulanamadı "
+                             "(okunan: %s, deneme %d/3).",
+                             LAND_DISARM_DELAY_S, back, attempt)
+                continue
+            _log.info("LAND_DISARMDELAY=%.0f ayarlandı (orijinal: %.1f — "
+                      "görev sonunda geri yüklenecek).",
+                      LAND_DISARM_DELAY_S, self._land_disarmdelay_original)
+            return True
+        _log.error("LAND_DISARMDELAY=%.0f GARANTİ EDİLEMEDİ (3 deneme) — "
+                   "çağıran uyarıyla LAND'e devam edecek.", LAND_DISARM_DELAY_S)
+        return False
 
     def restore_land_disarmdelay(self) -> bool:
         """LAND_DISARMDELAY'i LAND öncesindeki orijinal değerine geri yükler.
 
-        Başarısızsa False (log uyarısı — güvenli degrade: -1 kalırsa sonraki
-        RTL disarm beklemesi zaman aşımına düşüp COMPLETE olur).
+        Başarısızsa False (log uyarısı — güvenli degrade: hedef değer kalırsa
+        sonraki RTL disarm beklemesi zaman aşımına düşüp COMPLETE olur).
         """
         if self._land_disarmdelay_original is None:
             return True

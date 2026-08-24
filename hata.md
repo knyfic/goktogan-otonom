@@ -108,3 +108,5 @@ ilk payloadı kırmızı ucgene bırakacgı icin payloadı bıracak oldugu irtif
 iki ayrı payload bırakma irtifası(daha doguru son goruntu islemenin yapılacagı irtifa)
 iki ayrı offset duzetlme degeri (birisi kırmızı digeri ise mavi hedef icin)
 yani returning payload kısmında da mavi altıgen icin tanımlanmıs offset degerleri kullanılacak
+
+sim dede yuku almak icin yere indigiz zaman zeminde 3 saniye falna beklemlei PAYLOAD_SERVO_WAIT_S = 3

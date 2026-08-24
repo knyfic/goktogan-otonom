@@ -1300,11 +1300,15 @@ class MissionStateMachine:
 
             if detections:
                 picked = self._pick_locked_detection(detections)
-                self.data.pending_detection = picked
-                self._no_detection_count = 0
-                p = self.nav.position()
-                self._target_rough_lat = p.latitude
-                self._target_rough_lon = p.longitude
+                if picked is not None:
+                    self.data.pending_detection = picked
+                    self._no_detection_count = 0
+                    p = self.nav.position()
+                    self._target_rough_lat = p.latitude
+                    self._target_rough_lon = p.longitude
+                else:
+                    # Kilitli tür yok (flicker) — yabancı türe yönelme, kayıp say.
+                    self._no_detection_count += 1
             else:
                 self._no_detection_count += 1
 
@@ -3123,7 +3127,12 @@ class MissionStateMachine:
         return min(candidates, key=dist)
 
     def _filter_active_detections(self, detections: list) -> list:
-        """İşlenmiş hedefleri çıkar; kilit varsa yalnızca kilitli türe odaklan."""
+        """İşlenmiş hedefleri çıkar; kilit varsa yalnızca kilitli türe odaklan.
+
+        GÜVENLİK: kilit varsa ASLA kilitli tür dışı bir tespit döndürülmez.
+        Kilitli tür (örn. RED üçgen) geçici kaybolduğunda (flicker) boş liste
+        döner — başka tür (BLUE altıgen) bu aşamada AKTİF HEDEF OLAMAZ.
+        """
         processed: set[tuple] = set()
         if self.data.first_target is not None and self.data.first_target.payload_released:
             processed.add((self.data.first_target.color, self.data.first_target.shape.value))
@@ -3140,16 +3149,21 @@ class MissionStateMachine:
                 d for d in filtered
                 if d.color == self._locked_color and d.shape == self._locked_shape
             ]
-            if locked:
-                return locked
+            return locked   # kilitli tür yoksa BOŞ — yabancı türe asla düşülmez
         return filtered
 
-    def _pick_locked_detection(self, detections: list) -> Detection:
-        """Kilitli hedef türüne uygun tespiti seç."""
+    def _pick_locked_detection(self, detections: list) -> Detection | None:
+        """Kilitli hedef türüne uygun tespiti seç.
+
+        GÜVENLİK: kilit varsa ASLA kilitli tür dışı bir tespit döndürülmez
+        (RED fazında BLUE asla aktif hedef olamaz — kilitli tür listede yoksa
+        None döner, detections[0]'a düşülmez). Kilit yoksa ilk tespit döner.
+        """
         if self._locked_color is not None and self._locked_shape is not None:
             for d in detections:
                 if d.color == self._locked_color and d.shape == self._locked_shape:
                     return d
+            return None
         return detections[0]
 
     def _return_search(self) -> None:

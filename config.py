@@ -12,7 +12,7 @@ GAZEBO_TRANSPORT_MODULE = "gz.transport"
 
 # Kalkış + HER İKİ hedef araması (kırmızı üçgen / mavi altıgen) bu irtifada yapılır.
 # 11.5m'de kamera 30×100m alanı görür → her arama tek geçiş (single_pass) ile yapılır.
-TAKEOFF_ALTITUDE = 11.5
+TAKEOFF_ALTITUDE = 9
 TARGET_APPROACH_ALTITUDE = 8.0
 
 # ── Yük bırakma — HEDEFE ÖZEL konfigürasyon ────────────────────────────────
@@ -49,7 +49,7 @@ PAYLOAD_DROP_ALIGN_TIMEOUT_S = 0.0
 # Görev 2: küçük yükler yüksekten görülmez — arama bu irtifada başlar
 PAYLOAD_SEARCH_ALTITUDE = 3.0
 # Her kademede: yatay ortala → bu kadar metre in → tekrar ortala ...
-ALIGNMENT_DESCENT_STEP_M = 1.0
+ALIGNMENT_DESCENT_STEP_M = 2.0
 
 # ── Geriye dönük uyumluluk ──────────────────────────────────────────────────
 # Eski ORTAK değerler — yeni kod hedefe özel RED/BLUE_PAYLOAD_* değerlerini
@@ -264,13 +264,13 @@ SCAN_LINE_SPACING = 10
 SEARCH_MARGIN = 2.0
 
 # Arama sırası yatay hız
-SEARCH_SPEED_MPS = 1.0
+SEARCH_SPEED_MPS = 0.5
 # Hedefe yaklaşma hızı (kaba)
-APPROACH_SPEED_MPS = 2.0
+APPROACH_SPEED_MPS = 0.5
 # Hizalama sırası yatay hız (ince)
-ALIGN_SPEED_MPS = 0.8
+ALIGN_SPEED_MPS = 0.5
 # İrtifa değişim hızı
-VERTICAL_SPEED_MPS = 1.0
+VERTICAL_SPEED_MPS = 0.5
 # Hedef kaba GPS'ine bu yarıçaptan UZAKTAYKEN APPROACH_SPEED_MPS kullanılır;
 # yarıçapa girince ALIGN_SPEED_MPS'ye düşülüp görüntü hizalaması başlar.
 # (Eski davranış: tüm hedef transit'i 0.8 m/s'de sürünüyordu — bu kapı
@@ -328,7 +328,7 @@ ALIGN_MAX_STEP_M = 0.5
 ALIGN_MAX_STEP_LARGE_M = 1
 # Aynı gerekçeyle (yarı çözünürlük → yarı piksel hata) eşik de yarıya iner
 # (250 → 125px) — fiziksel adım davranışı değişmez.
-ALIGN_STEP_FULL_ERROR_PX = 125.0
+ALIGN_STEP_FULL_ERROR_PX = 180.0
 
 # "Hizalı" kararı için GEREKLİ ardışık frame sayısı (temporal confirmation).
 # Tek bir frame'de hedefin milisaniyelik merkeze denk gelmesi (jitter / tesadüfi

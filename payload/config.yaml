@@ -10,7 +10,7 @@
 #   simulation  → SimulationBackend  (Gazebo, GPIO yok)
 #   hil         → RemoteRPiBackend   (Ubuntu → Wi-Fi → Raspberry Pi)
 #   real        → LocalRPiBackend    (Raspberry Pi üzerinde, doğrudan GPIO)
-backend: simulation
+backend: real
 
 # ── HIL sunucu (yalnızca Raspberry Pi'de services/hil_entrypoint.py okur) ────
 # Ubuntu tarafı bu bölümü OKUMAZ. RPi'de payload TCP (5700) + kamera TCP (5701)
@@ -156,7 +156,7 @@ flight_controller:
 # dependency DEĞİLDİR — stream kopsa bile görev devam eder.
 video_stream:
   enabled: true
-  host: 192.168.1.5      # Ground station IP (kod içinde hard-code YOK)
+  host: 192.168.144.50      # Ground station IP (kod içinde hard-code YOK)
   port: 5000
   codec: h264
   preset: veryfast         # x264 hız/kalite dengesi: ultrafast…faster önerilir.

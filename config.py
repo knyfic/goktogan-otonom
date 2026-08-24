@@ -62,7 +62,7 @@ FINAL_TARGET_ALTITUDE = PAYLOAD_RELEASE_ALTITUDE
 PAYLOAD_CONTACT_ALTITUDE = 0.0
 
 # Yük doğrulama için yükselme irtifası
-PAYLOAD_VERIFY_ALTITUDE = 1
+PAYLOAD_VERIFY_ALTITUDE = 2
 
 # Empirical pixel expectation for 1m altitude (measured in HIL tests).
 # Use these to prefer payload candidates when at PAYLOAD_VERIFY_ALTITUDE.
@@ -174,11 +174,23 @@ FIELD_LENGTH = 100.0
 #     "C": (41.0086492, 28.9785785),
 #     "D": (41.0077508, 28.9785785),
 # }
+# COMPETITION_CORNERS = {
+#     "A": (37.9336259, 34.6175672),
+#     "B": (37.9338936, 34.6175042),
+#     "C": (37.9339258, 34.6177221),
+#     "D": (37.9336640, 34.6177952),
+# }
+# COMPETITION_CORNERS = {
+#     "A": (37.9336852, 34.6175585), 
+#     "B": (37.9339380, 34.6175162), 
+#     "C": (37.9339702, 34.6178193), 
+#     "D": (37.9337222, 34.6178743), 
+# }
 COMPETITION_CORNERS = {
-    "A": (37.9336259, 34.6175672),
-    "B": (37.9338936, 34.6175042),
-    "C": (37.9339258, 34.6177221),
-    "D": (37.9336640, 34.6177952),
+    "A": (37.9334810, 34.6174975), 
+    "B": (37.9336281, 34.6174626), 
+    "C": (37.9337180, 34.6177670), 
+    "D": (37.9335699, 34.6178448), 
 }
 
 HEXAGON_SIDE_LENGTH = 2.0
@@ -196,7 +208,7 @@ MAX_PAYLOAD_SIZE_FACTOR = 3.0
 
 SEARCH_TIMEOUT = 12.0
 TARGET_LOST_TIMEOUT = 2.0
-PAYLOAD_SEARCH_TIMEOUT = 20.0
+PAYLOAD_SEARCH_TIMEOUT = 5.0
 
 CAMERA_WIDTH_PX = 1920
 CAMERA_HEIGHT_PX = 1080
@@ -285,7 +297,7 @@ ALTITUDE_TOLERANCE_M = 0.20
 # (PAYLOAD_PIXEL_TOLERANCE_PX) kullanmaya devam eder.
 # Yarı çözünürlükte aynı FİZİKSEL tolerans için değer yarıya iner (60 → 30px;
 # aksi halde aşağıdaki yorumda "jitter üretiyor" denilen rejime geri dönülürdü).
-PIXEL_ALIGNMENT_TOLERANCE_PX = 30.0
+PIXEL_ALIGNMENT_TOLERANCE_PX = 45.0
 
 # Hizalama komutu gönderme aralığı (saniye)
 # Her step'te değil, bu aralıkta bir goto_global gönderilir.
@@ -358,7 +370,7 @@ ALIGN_TOL_EXIT_FACTOR = 1.6         # exit_tol = enter_tol * bu çarpan
 # ARDIŞIK bu kadar frame kalması şart koşulur; araya hizasız frame girerse sayaç
 # sıfırlanır. ALIGN_CMD_INTERVAL_S (0.4s) aralığında sayıldığından 3 onay ≈ 1.2s
 # stabil merkezde kalma demektir.
-ALIGNED_FRAMES_REQUIRED = 3
+ALIGNED_FRAMES_REQUIRED = 2
 
 # YÜK BIRAKMA hedef hizalaması için ayrı ve DAHA SIKI ardışık onay sayısı.
 # Search irtifasında (8m) hedef küçük ve yalpa/yaw nedeniyle çerçevede kayabilir;

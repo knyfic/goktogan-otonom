@@ -118,6 +118,14 @@ class Navigation:
         self._position.longitude = msg.lon / 1e7
         self._position.relative_altitude = msg.relative_alt / 1000.0
         self._position.heading_deg = msg.hdg / 100.0
+        # GLOBAL_POSITION_INT hız alanları (cm/s, NED):
+        #   vz → dikey hız (NED'de pozitif aşağı → kuralımızda pozitif yükseliş)
+        #   vx/vy → yatay hız büyüklüğü. Basit yer-teması algılamasında kullanılır.
+        vz = getattr(msg, "vz", 0) or 0
+        self._position.vertical_speed_mps = -float(vz) / 100.0
+        vx = getattr(msg, "vx", 0) or 0
+        vy = getattr(msg, "vy", 0) or 0
+        self._position.horizontal_speed_mps = math.hypot(float(vx), float(vy)) / 100.0
         # Bağlantı canlılık işareti — GLOBAL_POSITION_INT uçuşta sürekli akar.
         self._last_message_s = time.monotonic()
 

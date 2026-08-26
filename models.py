@@ -37,6 +37,11 @@ class MissionState(str, Enum):
     # otomatik ilerlemez (terminal durdurma — güvenlik). Pilot geri GUIDED'a
     # geçse bile mission otomatik devam ETMEZ.
     PILOT_CONTROL = "PILOT_CONTROL"
+    # Basit yer-teması doğrulaması (GUIDED, LAND mode YOK): offset sonrası
+    # aşağı iniş komutu verilir; telemetri "araç artık aşağı/yatay hareket
+    # etmiyor + irtifa sabit" olduğunu GROUND_CONTACT_HOLD_S boyunca gösterirse
+    # yere temas kabul edilir → PICKING_UP_PAYLOAD (yerde armed pickup).
+    GROUND_CONTACT_CHECK = "GROUND_CONTACT_CHECK"
     RTL = "RTL"
     COMPLETE = "COMPLETE"
 
@@ -84,6 +89,12 @@ class VehiclePosition:
     heading_deg: float = 0.0
     battery_voltage_v: float = 0.0   # BATTERY_STATUS hücre toplamı (0 = henüz bilinmiyor)
     battery_percent: int = -1        # SYS_STATUS battery_remaining (-1 = bilinmiyor)
+    # GLOBAL_POSITION_INT.vz (cm/s, NED — pozitif aşağı) → dikey hız (m/s,
+    # pozitif yükseliş). Basit yer-teması algılamasında kullanılır.
+    vertical_speed_mps: float = 0.0
+    # GLOBAL_POSITION_INT.vx/vy (cm/s, NED) → yatay hız büyüklüğü (m/s).
+    # "araç artık yatay hareket etmiyor" kontrolünde kullanılır.
+    horizontal_speed_mps: float = 0.0
 
 
 @dataclass

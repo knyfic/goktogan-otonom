@@ -82,6 +82,12 @@ from config import (
     VERIFY_BAND_HIGH,
     VERIFY_FALLBACK_CONFIDENCE,
     VERTICAL_SPEED_MPS,
+    GROUND_CONTACT_MAX_ALT_M,
+    GROUND_CONTACT_MAX_ALT_DRIFT_M,
+    GROUND_CONTACT_MAX_VS_MPS,
+    GROUND_CONTACT_MAX_H_SPEED_MPS,
+    GROUND_CONTACT_HOLD_S,
+    GROUND_CONTACT_TIMEOUT_S,
 )
 from flight.navigation import Navigation, haversine_m
 from flight.position_controller import PositionController
@@ -225,6 +231,15 @@ class MissionStateMachine:
         self._offset_correction_start: float | None = None
         self._offset_phase: str | None = None
 
+        # ---- Basit yer-teması doğrulaması (GROUND_CONTACT_CHECK) ----
+        # Offset sonrası aşağı iniş komutu verilir; telemetri "araç artık
+        # aşağı/yatay hareket etmiyor + irtifa sabit" durumunu HOLD süresi
+        # boyunca gösterirse yere temas kabul edilir. Yeni sensör YOK.
+        self._contact_started: bool = False
+        self._contact_start: float = 0.0
+        self._contact_since: float | None = None   # koşulların kesintisiz başlangıcı
+        self._contact_alt_ref: float = 0.0         # adaylık başlangıcındaki irtifa
+
         # ---- Hedef üzerinde hizalama (pickup öncesi) ----
         # ALIGNING_ON_TARGET_FOR_PICKUP state'inde kullanılır
         self._align_for_pickup_deadline: float | None = None
@@ -285,6 +300,9 @@ class MissionStateMachine:
                 MissionState.RTL,
                 MissionState.COMPLETE,
                 MissionState.PILOT_CONTROL,
+                # Yer-teması inişi: telemetri kaybında Python RTL enjekte etmez
+                # (FC kendi failsafe'ini yürütür).
+                MissionState.GROUND_CONTACT_CHECK,
             )
         ):
             if not self.nav.heartbeat_ok(self._heartbeat_timeout_s):
@@ -311,6 +329,8 @@ class MissionStateMachine:
                 MissionState.RTL,
                 MissionState.COMPLETE,
                 MissionState.PILOT_CONTROL,
+                # İniş: görev zaman aşımı RTL enjekte etmez.
+                MissionState.GROUND_CONTACT_CHECK,
             )
         ):
             elapsed = time.monotonic() - self._mission_start_t
@@ -377,6 +397,8 @@ class MissionStateMachine:
             self._do_align_payload()
         elif s == MissionState.OFFSET_CORRECTION:
             self._do_offset_correction()
+        elif s == MissionState.GROUND_CONTACT_CHECK:
+            self._do_ground_contact_check()
         elif s == MissionState.PICKING_UP_PAYLOAD:
             self._do_pickup()
         elif s == MissionState.ASCENDING_FOR_VERIFICATION:
@@ -2035,13 +2057,16 @@ class MissionStateMachine:
             self._reset_altitude_state()
 
             if reached <= PAYLOAD_CONTACT_ALTITUDE + ALTITUDE_TOLERANCE_M:
-                # Yere ulaştık → pickup
+                # İrtifa ~0'a ulaşıldı ama bu TEK BAŞINA yere oturulduğunu
+                # göstermez. Yer temasını basit telemetri doğrulaması onaylar
+                # (GROUND_CONTACT_CHECK — LAND mode YOK).
                 self.log.info(
-                    "Temas irtifasına ulaşıldı (%.2fm). Pickup başlıyor.", reached
+                    "Temas irtifasına ulaşıldı (%.2fm). Yer teması doğrulanıyor...",
+                    reached,
                 )
                 self._align_phase = "HORIZONTAL"
                 self._payload_descent_alt = None
-                self._goto(MissionState.PICKING_UP_PAYLOAD)
+                self._goto(MissionState.GROUND_CONTACT_CHECK)
                 return
 
             # Bir sonraki basamak için yatay hizalamaya dön
@@ -2234,24 +2259,112 @@ class MissionStateMachine:
             if elapsed < OFFSET_CORRECTION_WAIT_S:
                 return
 
-            # Offset bitti, şimdi inelim
-            self.log.info("OFFSET bitti. Temas irtifasına (0.0m) iniliyor.")
-            self._send_altitude(PAYLOAD_CONTACT_ALTITUDE, timeout=10.0)
-            self._offset_phase = "WAITING_DESCENT"
+            # Offset bitti → basit yer-teması inişi (GUIDED, LAND mode YOK).
+            # GROUND_CONTACT_CHECK: aşağı iniş komutu verir ve telemetrinin
+            # gerçekten durduğunu doğrular (irtifa sabit + hızlar ≈ 0).
+            self.log.info(
+                "OFFSET bitti. GUIDED aşağı iniş + yer-teması doğrulaması "
+                "başlıyor (LAND mode kullanılmaz)."
+            )
+            self._offset_phase = None
+            self._goto(MissionState.GROUND_CONTACT_CHECK)
             return
 
-        if self._offset_phase == "WAITING_DESCENT":
-            # İrtifaya ulaşmayı kontrol edelim
-            result = self._altitude_ok()
-            if result is False and elapsed < OFFSET_CORRECTION_WAIT_S + 10.0:
-                return  # hala iniyor ve toplam zaman var
+    # ------------------------------------------------------------------ #
+    def _do_ground_contact_check(self) -> None:
+        """Basit yer-teması doğrulaması (GUIDED, LAND mode YOK, sensör YOK).
 
-            self._reset_altitude_state()
+        Fikir (kullanıcı gereksinimi): "Aşağı inmeye çalışıyorum fakat araç
+        artık aşağı inmiyor." Aşağı iniş komutu (mevcut altitude komutu) aktif
+        ken telemetri izlenir:
+
+          • irtifa adaylık başlangıcına göre DONMUŞ (≤ MAX_ALT_DRIFT_M)
+          • dikey hız aşağı yönlü DEĞİL (|vz| ≤ MAX_VS_MPS)
+          • yatay hareket DURMUŞ (hız ≤ MAX_H_SPEED_MPS)
+
+        Bu koşullar GROUND_CONTACT_HOLD_S boyunca KESİNTİSİZ sürerse yere
+        temas kabul edilir → PICKING_UP_PAYLOAD (yerde ARMED pickup; DISARM
+        YOK). GROUND_CONTACT_TIMEOUT_S dolarsa güvenli RTL.
+        """
+        if not self._contact_started:
+            self._contact_started = True
+            self._contact_start = time.monotonic()
+            self._contact_since = None
+            self._reset_altitude_state()   # olası bekleyen irtifa hedefini temizle
+            # Aşağı iniş komutu — mevcut GUIDED altitude komutu ("DOWN COMMAND
+            # ACTIVE"). İniş bitince _reset_altitude_state ile durdurulur.
+            self._send_altitude(PAYLOAD_CONTACT_ALTITUDE, timeout=GROUND_CONTACT_TIMEOUT_S)
             self.log.info(
-                "OFFSET VE İNİŞ tamamlandı (%.2fs). Mevcut irtifa: %.2fm. Pickup başlıyor.",
-                elapsed, pos.relative_altitude,
+                "GROUND CONTACT CHECK: aşağı iniş komutu aktif (0.0m) — "
+                "telemetri izleniyor (irtifa sabit + hızlar ≈ 0)."
             )
-            self._goto(MissionState.PICKING_UP_PAYLOAD)
+            return
+
+        pos = self.nav.position()
+
+        # Zaman aşımı → güvenli RTL (temas doğrulanamadı).
+        if time.monotonic() - self._contact_start > GROUND_CONTACT_TIMEOUT_S:
+            self.log.critical(
+                "Yer teması %.0fs içinde doğrulanamadı (irtifa=%.2fm, vz=%.2fm/s, "
+                "vh=%.2fm/s) — güvenli RTL.",
+                GROUND_CONTACT_TIMEOUT_S, pos.relative_altitude,
+                pos.vertical_speed_mps, pos.horizontal_speed_mps,
+            )
+            self._reset_altitude_state()
+            self.data.mission_failed = True
+            self._do_start_rtl()
+            return
+
+        # Temas adaylığı: yalnızca düşük irtifa (karar tek başına değil).
+        if pos.relative_altitude > GROUND_CONTACT_MAX_ALT_M:
+            self._contact_since = None
+            return   # hâlâ iniyor/yüksek — beklemeye devam
+
+        # Adaylık başlangıcındaki irtifa referansı ("irtifa dondu mu" için).
+        if self._contact_since is None:
+            self._contact_alt_ref = pos.relative_altitude
+
+        if self._ground_contact_ok(pos):
+            if self._contact_since is None:
+                self._contact_since = time.monotonic()
+            elif time.monotonic() - self._contact_since >= GROUND_CONTACT_HOLD_S:
+                self.log.info(
+                    "GROUND CONTACT doğrulandı (irtifa=%.2fm, vz=%.2fm/s, %.1fs stabil). "
+                    "Yerde ARMED pickup başlıyor (DISARM YOK).",
+                    pos.relative_altitude, pos.vertical_speed_mps,
+                    GROUND_CONTACT_HOLD_S,
+                )
+                self._reset_altitude_state()   # iniş komutunu durdur
+                self._contact_started = False
+                self._goto(MissionState.PICKING_UP_PAYLOAD)
+        else:
+            self._contact_since = None
+
+        # HUD canlı kalsın
+        frame = self.camera.latest()
+        if frame is not None:
+            extra = (
+                f"TEMAS {pos.relative_altitude:.2f}m "
+                f"vz={pos.vertical_speed_mps:+.2f} vh={pos.horizontal_speed_mps:.2f}"
+            )
+            l1, l2 = self._hud_lines(extra=extra)
+            self._pending_display = self._draw_hud(frame, l1, l2)
+
+    # ------------------------------------------------------------------ #
+    def _ground_contact_ok(self, pos) -> bool:
+        """Basit yer-teması koşulları — yalnızca mevcut telemetri.
+
+          • irtifa adaylık başlangıcına göre donmuş (≤ GROUND_CONTACT_MAX_ALT_DRIFT_M)
+          • |dikey hız| ≤ GROUND_CONTACT_MAX_VS_MPS (aşağı iniş durmuş)
+          • yatay hız ≤ GROUND_CONTACT_MAX_H_SPEED_MPS (ilerleme durmuş)
+        """
+        alt_frozen = (
+            abs(pos.relative_altitude - self._contact_alt_ref)
+            <= GROUND_CONTACT_MAX_ALT_DRIFT_M
+        )
+        vz_stopped = abs(pos.vertical_speed_mps) <= GROUND_CONTACT_MAX_VS_MPS
+        horiz_stopped = pos.horizontal_speed_mps <= GROUND_CONTACT_MAX_H_SPEED_MPS
+        return alt_frozen and vz_stopped and horiz_stopped
 
     # ------------------------------------------------------------------ #
     def _do_pickup(self) -> None:

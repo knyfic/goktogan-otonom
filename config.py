@@ -127,6 +127,19 @@ PAYLOAD_ALIGN_TIMEOUT_S = 4.0
 # kadar ileri giderek mekanizmayı payload'ın tam üzerine getirir.
 CAMERA_TO_MECHANISM_OFFSET_M = 0.16
 
+# ── Basit yer-teması algılama (GUIDED, LAND mode YOK, yeni sensör YOK) ──────
+# Offset correction sonrası aşağı iniş komutu verilir (mevcut altitude komutu).
+# Temas kararı: düşük irtifa (yalnızca adaylık) + irtifa donmuş + dikey hız
+# aşağı yönlü değil + yatay hareket durmuş → bu durum GROUND_CONTACT_HOLD_S
+# boyunca KESİNTİSİZ sürerse yere temas kabul edilir (dwell / hysteresis).
+GROUND_CONTACT_MAX_ALT_M       = 0.30   # temas adaylığı: irtifa bu değerin ALTINDA
+GROUND_CONTACT_MAX_ALT_DRIFT_M = 0.05   # adaylık boyunca irtifa bu kadar oynayabilir
+                                         # ("irtifa artık anlamlı şekilde değişmiyor")
+GROUND_CONTACT_MAX_VS_MPS      = 0.15   # |dikey hız| bu değerin ALTINDA — aşağı iniş durmuş
+GROUND_CONTACT_MAX_H_SPEED_MPS = 0.20   # yatay hız bu değerin ALTINDA — ilerleme durmuş
+GROUND_CONTACT_HOLD_S          = 1.5    # koşullar bu süre KESİNTİSİZ → GROUND CONTACT
+GROUND_CONTACT_TIMEOUT_S       = 20.0   # temas doğrulanamazsa güvenli RTL
+
 # Yük BIRAKMA offseti — ARTIK HEDEFE ÖZEL: RED_PAYLOAD_OFFSET_M (kırmızı üçgen)
 # ve BLUE_PAYLOAD_OFFSET_M (mavi altıgen) ayrı ayrı tanımlıdır (yukarıya bak).
 # Bu takma ad yalnızca eski referanslar için korunur; bırakma akışı hedefe

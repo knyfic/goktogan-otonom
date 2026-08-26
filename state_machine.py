@@ -82,6 +82,15 @@ from config import (
     VERIFY_BAND_HIGH,
     VERIFY_FALLBACK_CONFIDENCE,
     VERTICAL_SPEED_MPS,
+    GROUND_CONTACT_DESCENT_SPEED_MPS,
+    GROUND_CONTACT_MAX_ALT_M,
+    GROUND_CONTACT_MAX_VS_MPS,
+    GROUND_CONTACT_MAX_THROTTLE_PCT,
+    GROUND_CONTACT_MAX_TILT_DEG,
+    GROUND_CONTACT_HOLD_S,
+    GROUND_CONTACT_CMD_INTERVAL_S,
+    GROUND_CONTACT_TIMEOUT_S,
+    LANDED_HOLD_WAIT_S,
 )
 from flight.navigation import Navigation, haversine_m
 from flight.position_controller import PositionController
@@ -218,6 +227,21 @@ class MissionStateMachine:
         # onay gereklidir. Hizasız frame sayaçı sıfırlar.
         self._aligned_frame_count: int = 0
 
+        # ---- GUIDED yer-teması doğrulaması (GROUND_CONTACT_CHECK) ----
+        # ArduPilot LAND detektöründen uyarlanan iniş + temas algılama.
+        # İniş dikey HIZ komutuyla; temas, koşulların GROUND_CONTACT_HOLD_S
+        # boyunca kesintisiz sağlanmasıyla doğrulanır (dwell/hysteresis).
+        self._contact_started: bool = False
+        self._contact_start: float = 0.0
+        self._contact_since: float | None = None   # temas koşullarının kesintisiz başlangıcı
+        self._last_contact_cmd_t: float = 0.0      # iniş hızı komutu yenileme zamanı
+        # Temas sinyalleri hakkında bir kez bilgilendirme (throttle/attitude mevcut mu)
+        self._contact_signals_logged: bool = False
+
+        # ---- LANDED_HOLD: yerde GUIDED+ARMED bekleme (pickup öncesi) ----
+        self._landed_hold_started: bool = False
+        self._landed_hold_t: float = 0.0
+
         # ---- SEARCHING_PAYLOAD timeout ----
         # Payload bulunamazsa bu süre sonunda yukarı çıkıp yeniden merkezle.
         # Geçici frame kayıplarında (1-2 tick) tetiklenmez; sadece timeout dolunca.
@@ -285,6 +309,11 @@ class MissionStateMachine:
                 MissionState.RTL,
                 MissionState.COMPLETE,
                 MissionState.PILOT_CONTROL,
+                # Yer-teması inişi/yerde bekleme: telemetri kaybında Python RTL
+                # enjekte edilmez — FC kendi failsafe'ini yürütür (yerde RTL
+                # enjekte etmek İHA'yı KALKIRIR).
+                MissionState.GROUND_CONTACT_CHECK,
+                MissionState.LANDED_HOLD,
             )
         ):
             if not self.nav.heartbeat_ok(self._heartbeat_timeout_s):
@@ -311,6 +340,10 @@ class MissionStateMachine:
                 MissionState.RTL,
                 MissionState.COMPLETE,
                 MissionState.PILOT_CONTROL,
+                # İniş/yerde bekleme: görev zaman aşımı RTL enjekte etmez
+                # (yerde RTL İHA'yı kaldırır).
+                MissionState.GROUND_CONTACT_CHECK,
+                MissionState.LANDED_HOLD,
             )
         ):
             elapsed = time.monotonic() - self._mission_start_t
@@ -377,6 +410,10 @@ class MissionStateMachine:
             self._do_align_payload()
         elif s == MissionState.OFFSET_CORRECTION:
             self._do_offset_correction()
+        elif s == MissionState.GROUND_CONTACT_CHECK:
+            self._do_ground_contact_check()
+        elif s == MissionState.LANDED_HOLD:
+            self._do_landed_hold()
         elif s == MissionState.PICKING_UP_PAYLOAD:
             self._do_pickup()
         elif s == MissionState.ASCENDING_FOR_VERIFICATION:
@@ -1976,7 +2013,8 @@ class MissionStateMachine:
         Mimari (hepsi non-blocking, tek state içinde yönetilir):
           _align_phase == "HORIZONTAL"  → yatay hizalama; hizalınca DESCENDING'e geç
           _align_phase == "DESCENDING"  → basamak inişi bekle; inince HORIZONTAL'a dön
-          Basamak hedefi PAYLOAD_CONTACT_ALTITUDE'a ulaşınca → PICKING_UP_PAYLOAD
+          Basamak hedefi PAYLOAD_CONTACT_ALTITUDE'a ulaşınca → GROUND_CONTACT_CHECK
+          (yer teması doğrulaması — yalnızca irtifaya bakılmaz).
 
         Böylece:
           PAYLOAD_SEARCH_ALTITUDE (2m)
@@ -2035,13 +2073,16 @@ class MissionStateMachine:
             self._reset_altitude_state()
 
             if reached <= PAYLOAD_CONTACT_ALTITUDE + ALTITUDE_TOLERANCE_M:
-                # Yere ulaştık → pickup
+                # İrtifa ~0'a ulaşıldı ama bu TEK BAŞINA yere oturulduğunu
+                # göstermez (estimator birkaç cm hata yapabilir). Yer temasını
+                # GUIDED ground-contact doğrulaması onaylar (LAND mode YOK).
                 self.log.info(
-                    "Temas irtifasına ulaşıldı (%.2fm). Pickup başlıyor.", reached
+                    "Temas irtifasına ulaşıldı (%.2fm). Yer teması doğrulanıyor...",
+                    reached,
                 )
                 self._align_phase = "HORIZONTAL"
                 self._payload_descent_alt = None
-                self._goto(MissionState.PICKING_UP_PAYLOAD)
+                self._goto(MissionState.GROUND_CONTACT_CHECK)
                 return
 
             # Bir sonraki basamak için yatay hizalamaya dön
@@ -2234,24 +2275,164 @@ class MissionStateMachine:
             if elapsed < OFFSET_CORRECTION_WAIT_S:
                 return
 
-            # Offset bitti, şimdi inelim
-            self.log.info("OFFSET bitti. Temas irtifasına (0.0m) iniliyor.")
-            self._send_altitude(PAYLOAD_CONTACT_ALTITUDE, timeout=10.0)
-            self._offset_phase = "WAITING_DESCENT"
+            # Offset bitti → GUIDED yer-teması inişi (LAND mode YOK).
+            # İniş dikey hız komutuyla yapılır; temas doğrulaması
+            # GROUND_CONTACT_CHECK state'inde (ArduPilot LAND detektörü uyarlaması).
+            self.log.info(
+                "OFFSET bitti. GUIDED yer-teması inişi başlıyor "
+                "(LAND mode kullanılmaz)."
+            )
+            self._offset_phase = None
+            self._goto(MissionState.GROUND_CONTACT_CHECK)
             return
 
-        if self._offset_phase == "WAITING_DESCENT":
-            # İrtifaya ulaşmayı kontrol edelim
-            result = self._altitude_ok()
-            if result is False and elapsed < OFFSET_CORRECTION_WAIT_S + 10.0:
-                return  # hala iniyor ve toplam zaman var
+    # ------------------------------------------------------------------ #
+    def _do_ground_contact_check(self) -> None:
+        """GUIDED yer-teması inişi + doğrulama (ArduPilot LAND uyarlaması).
 
-            self._reset_altitude_state()
+        İniş, dikey HIZ komutuyla yapılır (ArduPilot LAND gibi) — altitude
+        estimator hatasına bağışık: FC, "estimator 0 gösterdi" diye havada
+        durmaz, fiziksel zemine kadar inmeye devam eder.
+
+        Temas koşulları (hep birlikte, GROUND_CONTACT_HOLD_S boyunca
+        KESİNTİSİZ — tek koşulun kısa süreli bozulması sayacı sıfırlar):
+          • irtifa ≤ GROUND_CONTACT_MAX_ALT_M
+          • |dikey hız| ≤ GROUND_CONTACT_MAX_VS_MPS   (descent_rate_low)
+          • throttle ≤ GROUND_CONTACT_MAX_THROTTLE_PCT (motor_at_lower_limit —
+            yerdeyken motor yükü kaldıramaz; VFR_HUD yoksa koşul atlanır)
+          • |roll|,|pitch| ≤ GROUND_CONTACT_MAX_TILT_DEG (stabil eğim;
+            ATTITUDE yoksa koşul atlanır)
+
+        Temas doğrulanınca iniş komutu durdurulur (0 hız) ve LANDED_HOLD'a
+        geçilir — araç GUIDED + ARMED yerde bekler, DISARM YOK, LAND mode YOK.
+        GROUND_CONTACT_TIMEOUT_S dolarsa güvenli RTL.
+        """
+        if not self._contact_started:
+            self._contact_started = True
+            self._contact_start = time.monotonic()
+            self._contact_since = None
+            self._last_contact_cmd_t = 0.0
+            self._reset_altitude_state()   # olası beklemede irtifa hedefini temizle
+            thr = getattr(self.nav, "throttle_pct", None)
+            roll, pitch = getattr(self.nav, "attitude", (None, None))
             self.log.info(
-                "OFFSET VE İNİŞ tamamlandı (%.2fs). Mevcut irtifa: %.2fm. Pickup başlıyor.",
-                elapsed, pos.relative_altitude,
+                "GROUND CONTACT CHECK: GUIDED iniş %.1f m/s. Sinyaller: "
+                "throttle=%s attitude=%s",
+                GROUND_CONTACT_DESCENT_SPEED_MPS,
+                "OK" if thr is not None else "yok (koşul atlanır)",
+                "OK" if roll is not None else "yok (koşul atlanır)",
             )
+            return
+
+        pos = self.nav.position()
+
+        # İniş hızı komutunu periyodik yenile — FC zemine kadar inmeye devam eder.
+        if time.monotonic() - self._last_contact_cmd_t >= GROUND_CONTACT_CMD_INTERVAL_S:
+            self.nav.descent_velocity(GROUND_CONTACT_DESCENT_SPEED_MPS)
+            self._last_contact_cmd_t = time.monotonic()
+
+        # Zaman aşımı → güvenli RTL (temas doğrulanamadı — araç takılı kaldı).
+        if time.monotonic() - self._contact_start > GROUND_CONTACT_TIMEOUT_S:
+            self.log.critical(
+                "Yer teması %.0fs içinde doğrulanamadı (irtifa=%.2fm, vz=%.2fm/s) "
+                "— güvenli RTL.",
+                GROUND_CONTACT_TIMEOUT_S, pos.relative_altitude,
+                pos.vertical_speed_mps,
+            )
+            self.data.mission_failed = True
+            self._do_start_rtl()
+            return
+
+        if self._ground_contact_ok(pos):
+            if self._contact_since is None:
+                self._contact_since = time.monotonic()
+            elif time.monotonic() - self._contact_since >= GROUND_CONTACT_HOLD_S:
+                self.log.info(
+                    "Yer teması doğrulandı (irtifa=%.2fm, vz=%.2fm/s, %.1fs stabil). "
+                    "LANDED_HOLD → pickup.",
+                    pos.relative_altitude, pos.vertical_speed_mps,
+                    GROUND_CONTACT_HOLD_S,
+                )
+                self.nav.descent_velocity(0.0)   # iniş komutunu durdur
+                self._contact_started = False
+                self._goto(MissionState.LANDED_HOLD)
+        else:
+            self._contact_since = None
+
+        # HUD canlı kalsın
+        frame = self.camera.latest()
+        if frame is not None:
+            extra = (
+                f"TEMAS {pos.relative_altitude:.2f}m "
+                f"vz={pos.vertical_speed_mps:+.2f}m/s"
+            )
+            l1, l2 = self._hud_lines(extra=extra)
+            self._pending_display = self._draw_hud(frame, l1, l2)
+
+    # ------------------------------------------------------------------ #
+    def _ground_contact_ok(self, pos) -> bool:
+        """Yer-teması koşulları — ArduPilot LAND detektörü uyarlaması.
+
+        Tüm koşullar aynı anda sağlanmalı. VFR_HUD / ATTITUDE verisi yoksa
+        ilgili koşul atlanır (ArduPilot'ın sağlıksız rangefinder'ı atlaması gibi).
+        """
+        alt_ok = pos.relative_altitude <= GROUND_CONTACT_MAX_ALT_M
+        vs_ok = abs(pos.vertical_speed_mps) <= GROUND_CONTACT_MAX_VS_MPS
+
+        thr = getattr(self.nav, "throttle_pct", None)
+        thr_ok = thr is None or thr <= GROUND_CONTACT_MAX_THROTTLE_PCT
+
+        roll, pitch = getattr(self.nav, "attitude", (None, None))
+        tilt_ok = (
+            (roll is None or abs(roll) <= GROUND_CONTACT_MAX_TILT_DEG)
+            and (pitch is None or abs(pitch) <= GROUND_CONTACT_MAX_TILT_DEG)
+        )
+        return alt_ok and vs_ok and thr_ok and tilt_ok
+
+    # ------------------------------------------------------------------ #
+    def _do_landed_hold(self) -> None:
+        """LANDED_HOLD: yerde GUIDED + ARMED bekleme (pickup öncesi).
+
+        Araç yere oturdu; DISARM YOK, LAND mode YOK, motorlar kapatılmaz.
+        LANDED_HOLD_WAIT_S sonrası PICKING_UP_PAYLOAD'a geçilir.
+
+        Güvenlik:
+          • Bu sırada DISARM olursa görev durdurulur, TAKEOFF/re-arm YOK.
+          • Pilot/RC başka moda geçerse mevcut PILOT_CONTROL politikası devrede
+            (global pilot takeover bu state'te de çalışır).
+        """
+        if not self._landed_hold_started:
+            self._landed_hold_started = True
+            self._landed_hold_t = time.monotonic()
+            self.log.info(
+                "LANDED_HOLD: yer teması doğrulandı, GUIDED+ARMED yerde "
+                "bekleniyor (%.1fs sonra pickup).", LANDED_HOLD_WAIT_S,
+            )
+            return
+
+        # Güvenlik: disarm olduysa asla TAKEOFF/re-arm — görevi durdur.
+        if not self.nav.armed:
+            self.log.critical(
+                "LANDED_HOLD sırasında araç DISARM oldu — görev durduruluyor "
+                "(otomatik re-arm/TAKEOFF yapılmaz)."
+            )
+            self.data.mission_failed = True
+            self._do_start_rtl()
+            return
+
+        if time.monotonic() - self._landed_hold_t >= LANDED_HOLD_WAIT_S:
+            self._landed_hold_started = False
+            self.log.info("LANDED_HOLD bitti. Pickup mekanizması çalıştırılıyor.")
             self._goto(MissionState.PICKING_UP_PAYLOAD)
+            return
+
+        # HUD canlı kalsın
+        frame = self.camera.latest()
+        if frame is not None:
+            pos = self.nav.position()
+            extra = f"LANDED_HOLD {pos.relative_altitude:.2f}m (armed)"
+            l1, l2 = self._hud_lines(extra=extra)
+            self._pending_display = self._draw_hud(frame, l1, l2)
 
     # ------------------------------------------------------------------ #
     def _do_pickup(self) -> None:

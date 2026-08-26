@@ -85,6 +85,10 @@ class Navigation:
         self._mode_last_t: float = 0.0
         # Teşhis: kaç heartbeat işlendi (ilk N tanesi INFO loglanır).
         self._hb_seen: int = 0
+        # Armed durumu (HEARTBEAT base_mode SAFETY_ARMED biti — _update_mode
+        # tazeler). LANDED_HOLD'da "disarm olursa asla TAKEOFF/re-arm" güvenlik
+        # kontrolünde kullanılır.
+        self._armed: bool = False
 
         # ---- Pre-arm / SYS_STATUS / STATUSTEXT durumu ----
         # ArduPilot'un SYS_STATUS sağlık bitleri (onboard_control_sensors_health)
@@ -96,6 +100,18 @@ class Navigation:
         self._status_text = ""
         self._prearm_reason: str | None = None
         self._prearm_reason_t = 0.0
+
+        # ---- Yer-teması doğrulama sinyalleri ----
+        # ArduPilot LAND detektöründen uyarlanan sinyaller (GUIDED payload inişi):
+        #   • VFR_HUD.throttle → motor_at_lower_limit karşılığı (yük kaldırılamıyor)
+        #   • ATTITUDE roll/pitch → large_angle_request/error karşılığı (stabil eğim)
+        # Her ikisi de akışta yoksa/bayatsa koşul atlanır (ArduPilot'ın sağlıksız
+        # rangefinder'ı atlaması gibi). GLOBAL_POSITION_INT.vz her zaman vardır.
+        self._throttle_pct: float | None = None
+        self._throttle_last_t: float = 0.0
+        self._roll_deg: float | None = None
+        self._pitch_deg: float | None = None
+        self._attitude_last_t: float = 0.0
 
     # ------------------------------------------------------------------ #
     #  Pozisyon
@@ -118,12 +134,36 @@ class Navigation:
         self._position.longitude = msg.lon / 1e7
         self._position.relative_altitude = msg.relative_alt / 1000.0
         self._position.heading_deg = msg.hdg / 100.0
+        # GLOBAL_POSITION_INT.vz (cm/s, NED — pozitif aşağı) → dikey hız (m/s,
+        # pozitif yükseliş). Yer-teması doğrulamasında kullanılır.
+        vz = getattr(msg, "vz", 0) or 0
+        self._position.vertical_speed_mps = -float(vz) / 100.0
         # Bağlantı canlılık işareti — GLOBAL_POSITION_INT uçuşta sürekli akar.
         self._last_message_s = time.monotonic()
 
         if self.home_lat is None and self._position.latitude != 0.0:
             self.home_lat = self._position.latitude
             self.home_lon = self._position.longitude
+
+    def _update_vfr_hud(self, msg) -> None:
+        """VFR_HUD: throttle çıkışı — yer-teması doğrulaması.
+
+        ArduPilot LAND detektörünün motor_at_lower_limit sinyalinin MAVLink
+        karşılığı: araç fiziksel olarak yerdeyken motor yükü kaldıramaz ve
+        throttle çıkışı dibe oturur (havadayken hover ~%40-60).
+        """
+        self._throttle_pct = float(getattr(msg, "throttle", 0) or 0)
+        self._throttle_last_t = time.monotonic()
+
+    def _update_attitude(self, msg) -> None:
+        """ATTITUDE: roll/pitch — yer-teması doğrulaması.
+
+        ArduPilot LAND detektörünün large_angle_request/error karşılığı:
+        zemine oturmuş, sallanmayan araç küçük ve stabil eğimde olur.
+        """
+        self._roll_deg = math.degrees(float(getattr(msg, "roll", 0.0) or 0.0))
+        self._pitch_deg = math.degrees(float(getattr(msg, "pitch", 0.0) or 0.0))
+        self._attitude_last_t = time.monotonic()
 
     def _update_battery_status(self, msg) -> None:
         """BATTERY_STATUS: hücre voltajlarının (mV) toplamı → toplam voltaj.
@@ -235,6 +275,10 @@ class Navigation:
         if not accepted:
             return
 
+        # Armed durumu: HEARTBEAT base_mode SAFETY_ARMED biti (7) — LANDED_HOLD
+        # "disarm olursa asla TAKEOFF/re-arm yapma" güvenlik kontrolünde kullanılır.
+        self._armed = bool(base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+
         self._mode_custom = int(custom)
         self._mode_last_t = time.monotonic()
         try:
@@ -282,6 +326,10 @@ class Navigation:
             self._update_sys_status(msg)
         elif t == "STATUSTEXT":
             self._update_status_text(msg)
+        elif t == "VFR_HUD":
+            self._update_vfr_hud(msg)
+        elif t == "ATTITUDE":
+            self._update_attitude(msg)
         elif t == "HEARTBEAT":
             self._update_mode(msg)
 
@@ -351,6 +399,16 @@ class Navigation:
         """
         return self.last_message_age_s <= timeout_s
 
+    @property
+    def armed(self) -> bool:
+        """Araç şu an armed mı? (HEARTBEAT base_mode SAFETY_ARMED biti — ~1Hz taze)
+
+        LANDED_HOLD'da "disarm olursa asla TAKEOFF/re-arm yapma" güvenlik
+        kontrolünde kullanılır. Bayat olabilir (en fazla ~1s) — kritik kararlar
+        (TAKEOFF) için ayrıca mod doğrulaması yapılır.
+        """
+        return bool(getattr(self, "_armed", False))
+
     # ------------------------------------------------------------------ #
     #  Pre-arm durumu (ArduPilot)
     # ------------------------------------------------------------------ #
@@ -391,6 +449,41 @@ class Navigation:
     def prearm_reason(self) -> str | None:
         """Son bilinen 'PreArm: ...' STATUSTEXT mesajı (HUD için). None = yok."""
         return self._prearm_reason
+
+    # ------------------------------------------------------------------ #
+    #  Yer-teması doğrulama sinyalleri (ArduPilot LAND detektörü uyarlaması)
+    # ------------------------------------------------------------------ #
+
+    # VFR_HUD / ATTITUDE ~10 Hz akar; bu süre içinde tazelenmediyse bayat sayılır
+    # ve ilgili koşul atlanır (ArduPilot'ın sağlıksız rangefinder'ı atlaması gibi).
+    _VFR_FRESH_S    = 2.0
+    _ATTITUDE_FRESH_S = 2.0
+
+    @property
+    def throttle_pct(self) -> float | None:
+        """Son VFR_HUD throttle çıkışı (%). Yoksa/bayatsa None → koşul atlanır.
+
+        Yerdeyken motor yükü kaldıramaz → throttle dibe oturur (ArduPilot
+        motor_at_lower_limit karşılığı). Havadayken hover ~%40-60'tır.
+        """
+        if self._throttle_last_t == 0.0:
+            return None
+        if time.monotonic() - self._throttle_last_t > self._VFR_FRESH_S:
+            return None
+        return self._throttle_pct
+
+    @property
+    def attitude(self) -> tuple[float | None, float | None]:
+        """Son ATTITUDE (roll, pitch) derece. Yoksa/bayatsa (None, None).
+
+        Zemine oturmuş, sallanmayan araç küçük ve stabil eğimde olur
+        (ArduPilot large_angle_request/error karşılığı).
+        """
+        if self._attitude_last_t == 0.0:
+            return None, None
+        if time.monotonic() - self._attitude_last_t > self._ATTITUDE_FRESH_S:
+            return None, None
+        return self._roll_deg, self._pitch_deg
 
     # ------------------------------------------------------------------ #
     #  Mod & Arm
@@ -579,6 +672,37 @@ class Navigation:
             0, 0, 0,    # ax, ay, az
             yaw_rad,    # yaw — mevcut heading'i koru
             0,          # yaw_rate
+        )
+
+    def descent_velocity(self, downward_mps: float) -> None:
+        """Dikey iniş hızı komutu — GUIDED, LOCAL_NED (yalnızca vz aktif).
+
+        ArduPilot LAND gibi irtifa hedefine DEĞİL hıza komut verilir: FC,
+        altitude estimator hatasına bakmadan fiziksel zemine kadar inmeye
+        devam eder ("estimator 0 gösterdi ama araç havada" durumunda havada
+        durmaz). downward_mps > 0 → aşağı (NED +z). İniş bitince
+        descent_velocity(0.0) ile durdurulur.
+
+        type_mask: x/y/z (pozisyon) yoksay, vx/vy/vz AKTİF, ax/ay/az yoksay,
+        yaw/yaw_rate yoksay.
+        """
+        type_mask = (
+            (1 << 0) | (1 << 1) | (1 << 2)    # x, y, z yoksay
+            # bit 3,4,5 (vx, vy, vz) = 0 → AKTİF
+            | (1 << 6) | (1 << 7) | (1 << 8)  # ax, ay, az yoksay
+            | (1 << 10)                       # yaw yoksay
+            | (1 << 11)                       # yaw_rate yoksay
+        )
+        self.master.mav.set_position_target_local_ned_send(
+            int(time.time() * 1000) & 0xFFFFFFFF,
+            self.system_id,
+            self.component_id,
+            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            type_mask,
+            0, 0, 0,                 # x, y, z
+            0, 0, float(downward_mps),  # vx, vy, vz (NED: aşağı = +z)
+            0, 0, 0,                 # ax, ay, az
+            0, 0,                    # yaw, yaw_rate
         )
 
     def rtl(self) -> None:

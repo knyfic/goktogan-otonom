@@ -127,6 +127,33 @@ PAYLOAD_ALIGN_TIMEOUT_S = 4.0
 # kadar ileri giderek mekanizmayı payload'ın tam üzerine getirir.
 CAMERA_TO_MECHANISM_OFFSET_M = 0.16
 
+# ── Payload alımı inişi — GUIDED yer-teması doğrulaması (LAND mode YOK) ──────
+# ArduPilot LAND detektöründen uyarlanan, GUIDED altında çalışan yer teması
+# algılama. İniş dikey HIZ komutuyla yapılır (ArduPilot LAND gibi) — altitude
+# estimator hatasına bağışık: FC fiziksel zemine kadar inmeye devam eder,
+# "estimator 0 gösterdi" diye havada durmaz. Temas, aşağıdaki koşulların
+# GROUND_CONTACT_HOLD_S boyunca KESİNTİSİZ sağlanmasıyla doğrulanır (dwell /
+# hysteresis — kısa süreli yanlış koşullar sayılmaz).
+GROUND_CONTACT_DESCENT_SPEED_MPS = 0.3   # iniş dikey hızı (m/s, aşağı)
+GROUND_CONTACT_MAX_ALT_M         = 0.30  # irtifa bu değerin ALTINDA olmalı
+GROUND_CONTACT_MAX_VS_MPS        = 0.15  # |dikey hız| bu değerin ALTINDA olmalı
+                                          # (ArduPilot descent_rate_low karşılığı)
+GROUND_CONTACT_MAX_THROTTLE_PCT  = 20.0  # motor çıkışı (VFR_HUD) bu değerin ALTINDA —
+                                          # yerdeyken motor yükü kaldıramaz
+                                          # (ArduPilot motor_at_lower_limit karşılığı).
+                                          # VFR_HUD yoksa/bayatsa koşul atlanır.
+GROUND_CONTACT_MAX_TILT_DEG      = 8.0   # |roll|,|pitch| bu değerin ALTINDA (ATTITUDE) —
+                                          # zemine oturmuş, sallanmıyor (ArduPilot
+                                          # large_angle_request/error karşılığı).
+                                          # ATTITUDE yoksa/bayatsa koşul atlanır.
+GROUND_CONTACT_HOLD_S            = 1.5   # koşullar bu süre KESİNTİSİZ → LANDED_HOLD
+                                          # (ArduPilot LAND_DETECTOR_TRIGGER_SEC ≈ 0.5s'ten
+                                          # sıkı — payload teması için daha temkinli)
+GROUND_CONTACT_CMD_INTERVAL_S    = 0.2   # iniş hızı komutu yenileme aralığı (5 Hz)
+GROUND_CONTACT_TIMEOUT_S         = 20.0  # temas doğrulanamazsa güvenli RTL
+# Temas doğrulandıktan sonra LANDED_HOLD bekleme süresi (pickup öncesi)
+LANDED_HOLD_WAIT_S               = 1.0
+
 # Yük BIRAKMA offseti — ARTIK HEDEFE ÖZEL: RED_PAYLOAD_OFFSET_M (kırmızı üçgen)
 # ve BLUE_PAYLOAD_OFFSET_M (mavi altıgen) ayrı ayrı tanımlıdır (yukarıya bak).
 # Bu takma ad yalnızca eski referanslar için korunur; bırakma akışı hedefe

@@ -37,6 +37,14 @@ class MissionState(str, Enum):
     # otomatik ilerlemez (terminal durdurma — güvenlik). Pilot geri GUIDED'a
     # geçse bile mission otomatik devam ETMEZ.
     PILOT_CONTROL = "PILOT_CONTROL"
+    # Payload alımı inişi: GUIDED dikey hız ile yere iniş + ArduPilot LAND
+    # detektöründen uyarlanan yer-teması doğrulaması (LAND mode KULLANILMAZ).
+    # Koşullar (alçak irtifa + dikey hız≈0 + throttle düşük + eğim küçük)
+    # GROUND_CONTACT_HOLD_S boyunca kesintisiz sağlanınca LANDED_HOLD'a geçer.
+    GROUND_CONTACT_CHECK = "GROUND_CONTACT_CHECK"
+    # Araç yere oturdu, GUIDED + ARMED olarak yerde bekliyor (disarm YOK,
+    # LAND mode YOK). LANDED_HOLD_WAIT_S sonrası PICKING_UP_PAYLOAD.
+    LANDED_HOLD = "LANDED_HOLD"
     RTL = "RTL"
     COMPLETE = "COMPLETE"
 
@@ -84,6 +92,10 @@ class VehiclePosition:
     heading_deg: float = 0.0
     battery_voltage_v: float = 0.0   # BATTERY_STATUS hücre toplamı (0 = henüz bilinmiyor)
     battery_percent: int = -1        # SYS_STATUS battery_remaining (-1 = bilinmiyor)
+    # GLOBAL_POSITION_INT.vz (cm/s, NED — pozitif aşağı) → dikey hız (m/s,
+    # pozitif yükseliş). Yer-teması doğrulamasında kullanılır (ArduPilot
+    # descent_rate_low karşılığı).
+    vertical_speed_mps: float = 0.0
 
 
 @dataclass

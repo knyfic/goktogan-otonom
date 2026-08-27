@@ -690,6 +690,26 @@ class MissionStateMachine:
         self._alt_deadline = time.monotonic() + timeout
         self._alt_waiting = True
 
+    def _send_takeoff(self, target: float, timeout: float = 30.0) -> None:
+        """Yer-teması sonrası kalkış — MAV_CMD_NAV_TAKEOFF + position hedefi yedeği.
+
+        ArduPilot yeniden kalkışı land_complete durumuna göre kabul eder
+        (gerçek uçuş + SITL'de gözlemlendi):
+          • land_complete=true  (gerçek iniş) → MAV_CMD_NAV_TAKEOFF çalışır,
+            SET_POSITION_TARGET kaldırmaz.
+          • land_complete=false (SITL / iniş detektörü tetiklenmedi) →
+            MAV_CMD_NAV_TAKEOFF REDDEDİLİR, position hedefi çalışır.
+
+        Bu yüzden İKİSİ DE gönderilir — ikisi de aynı hedef irtifayı ister;
+        hangisi geçerliyse yükselişi o başlatır. Aynı _alt_target/_alt_waiting
+        bekleme mekanizması kullanılır; _altitude_ok() irtifaya varışı doğrular.
+        """
+        self.nav.takeoff_only(target)
+        self.nav.set_relative_altitude(target)
+        self._alt_target = target
+        self._alt_deadline = time.monotonic() + timeout
+        self._alt_waiting = True
+
     def _altitude_ok(self) -> bool | None:
         """True=ulaşıldı  False=bekleniyor  None=timeout"""
         if not self._alt_waiting:
@@ -2313,6 +2333,19 @@ class MissionStateMachine:
             self._contact_since = None
             self._last_contact_cmd_t = 0.0
             self._reset_altitude_state()   # olası beklemede irtifa hedefini temizle
+            # ── Mıknatıslar HAVADAYKEN aktif (offset düzeltmesi bitti, iniş öncesi) ──
+            # Yükü almak için yere inmek BEKLENMEZ: mekanizma sabittir, mıknatıs
+            # yükü iniş anında zaten tutar. (Retry'da backend clear_attached ile
+            # READY'ye döner — komut yeniden gönderilebilir.)
+            target = self.data.first_target
+            if target is None:
+                self._goto(MissionState.TASK_2_FAILED)
+                return
+            self.payload.send_pickup_command(self.payload_for_target(target))
+            self.log.info(
+                "Mıknatıslar HAVADAYKEN aktif edildi (offset sonrası, iniş öncesi) "
+                "— yük almak için iniş beklenmiyor."
+            )
             thr = getattr(self.nav, "throttle_pct", None)
             roll, pitch = getattr(self.nav, "attitude", (None, None))
             self.log.info(
@@ -2436,10 +2469,11 @@ class MissionStateMachine:
 
     # ------------------------------------------------------------------ #
     def _do_pickup(self) -> None:
-        """
-        Non-blocking servo bekleme.
-        İlk çağrıda servo komutunu gönder; sonraki tick'lerde
-        bekleme süresi doldu mu diye kontrol et.
+        """Non-blocking pickup bekleme + tamamlama.
+
+        Mıknatıs komutu ARTIK burada gönderilmez — GROUND_CONTACT_CHECK
+        girişinde (offset sonrası, HAVADAYKEN) gönderildi. Bu state yalnızca
+        pickup bekleme süresi boyunca bekler ve finish_pickup ile tamamlar.
 
         Bekleme süresi: payload.servo_wait_s → pickup bekleme süresi
         (LocalRPiBackend/RemoteRPiBackend — pickup_wait_s, varsayılan 3.0s;
@@ -2452,8 +2486,6 @@ class MissionStateMachine:
             return
 
         if self._pickup_servo_start is None:
-            payload_type = self.payload_for_target(target)
-            self.payload.send_pickup_command(payload_type)
             self._pickup_servo_start = time.monotonic()
             # Pickup bekleme süresini backend'den al, yoksa simulation değeri
             wait = self.payload.servo_wait_s
@@ -2461,8 +2493,9 @@ class MissionStateMachine:
                 wait = PAYLOAD_SERVO_WAIT_S
             self._pickup_servo_wait = wait
             self.log.info(
-                "Pickup komutu gönderildi (%s). %.1fs bekleniyor...",
-                payload_type.value, self._pickup_servo_wait,
+                "Pickup bekleme başladı (mıknatıslar havadayken aktif). %.1fs "
+                "bekleniyor...",
+                self._pickup_servo_wait,
             )
             return
 
@@ -2497,14 +2530,20 @@ class MissionStateMachine:
     def _do_ascend_for_verification(self) -> None:
         pos = self.nav.position()
 
-        # Faz 1: Henüz altitude komutu verilmediyse ver
+        # Faz 1: Henüz kalkış komutu verilmediyse ver.
+        # Yer-teması inişi sonrası (land_complete=true) SET_POSITION_TARGET
+        # aracı kaldırmaz — MAV_CMD_NAV_TAKEOFF kullanılır (real uçuşta
+        # gözlemlendi: araç yerde armed kalıp kalkamıyordu).
         if not self._alt_waiting and self._verify_stabilize_start is None:
-            self.log.info("Doğrulama irtifasına çıkılıyor: %.1fm", PAYLOAD_VERIFY_ALTITUDE)
+            self.log.info(
+                "Doğrulama irtifasına KALKIŞ: %.1fm (MAV_CMD_NAV_TAKEOFF).",
+                PAYLOAD_VERIFY_ALTITUDE,
+            )
             self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
-            self._send_altitude(PAYLOAD_VERIFY_ALTITUDE, timeout=30.0)
+            self._send_takeoff(PAYLOAD_VERIFY_ALTITUDE, timeout=30.0)
             return
 
-        # Faz 2: Altitude komutu verildi, irtifaya ulaşılmasını bekle
+        # Faz 2: Takeoff komutu verildi, irtifaya ulaşılmasını bekle
         if self._alt_waiting:
             result = self._altitude_ok()
             if result is False:

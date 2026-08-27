@@ -25,6 +25,7 @@ from config import (
     GROUND_CONTACT_TIMEOUT_S,
     LANDED_HOLD_WAIT_S,
     OFFSET_CORRECTION_WAIT_S,
+    PAYLOAD_VERIFY_ALTITUDE,
 )
 from flight.navigation import Navigation
 from models import MissionState, Target, TargetColor, TargetType, VehiclePosition
@@ -145,6 +146,31 @@ def test_landed_hold_keeps_armed_no_disarm():
     assert sm.data.state == MissionState.PICKING_UP_PAYLOAD
     nav.arm.assert_not_called()                   # re-arm YOK
     nav.set_mode.assert_not_called()              # LAND mode YOK
+
+
+# ── Mıknatıslar HAVADAYKEN aktif (iniş öncesi) ────────────────────────────── #
+def test_magnets_activated_airborne_before_descent():
+    """Mıknatıs komutu GROUND_CONTACT_CHECK girişinde — offset sonrası,
+    HAVADAYKEN, inişten ÖNCE gönderilir (yük almak için yere inilmez)."""
+    sm, nav = _sm(alt=0.4, vz=0.0, throttle=45.0, roll=1.0, pitch=1.0)
+    sm.data.state = MissionState.GROUND_CONTACT_CHECK
+
+    sm._do_ground_contact_check()   # başlat → mıknatıslar aktif
+
+    sm.payload.send_pickup_command.assert_called_once()
+    assert sm.data.state == MissionState.GROUND_CONTACT_CHECK
+
+
+def test_pickup_state_does_not_resend_magnet_command():
+    """PICKING_UP_PAYLOAD mıknatıs komutunu YENİDEN göndermez — komut zaten
+    havadayken (GROUND_CONTACT_CHECK girişinde) gönderildi."""
+    sm, nav = _sm(alt=0.0, vz=0.0, throttle=10.0)
+    sm.data.state = MissionState.PICKING_UP_PAYLOAD
+
+    sm._do_pickup()
+
+    sm.payload.send_pickup_command.assert_not_called()
+    assert sm._pickup_servo_start is not None   # bekleme sayacı yine başladı
 
 
 def test_landed_hold_disarm_stops_mission_no_takeoff():
@@ -320,3 +346,61 @@ def test_armed_tracked_from_heartbeat_base_mode():
     hb.base_mode = 1     # disarm edildi
     nav._update_mode(hb)
     assert nav.armed is False
+
+
+# ── Doğrulama yükselişi: yer-teması sonrası MAV_CMD_NAV_TAKEOFF ──────────── #
+def test_takeoff_only_sends_nav_takeoff_without_mode_or_arm():
+    """takeoff_only: MAV_CMD_NAV_TAKEOFF gönderir, mod DEĞİŞTİRMEZ, ARM ETMEZ."""
+    from pymavlink import mavutil
+
+    nav = object.__new__(Navigation)
+    nav.master = MagicMock()
+    nav.system_id = 1
+    nav.component_id = 1
+
+    nav.takeoff_only(1.0)
+
+    args = nav.master.mav.command_long_send.call_args[0]
+    assert args[2] == mavutil.mavlink.MAV_CMD_NAV_TAKEOFF
+    assert args[10] == 1.0   # param7 = irtifa
+    nav.master.set_mode.assert_not_called()
+    nav.master.arducopter_arm.assert_not_called()
+
+
+def test_ascend_for_verification_uses_takeoff_command():
+    """Yer-teması (land_complete) sonrası yükseliş TAKEOFF + position hedefi
+    yedeğiyle yapılır — ikisi de aynı hedef irtifayı ister:
+      • land_complete=true  (gerçek iniş) → MAV_CMD_NAV_TAKEOFF çalışır
+      • land_complete=false (SITL)        → TAKEOFF reddedilir, position çalışır
+    Tek komut her iki ortamı birden karşılamadığı için ikisi gönderilir."""
+    sm, nav = _sm(alt=0.0, vz=0.0)
+    sm.data.state = MissionState.ASCENDING_FOR_VERIFICATION
+
+    sm._do_ascend_for_verification()
+
+    nav.takeoff_only.assert_called_once_with(PAYLOAD_VERIFY_ALTITUDE)
+    nav.set_relative_altitude.assert_called_once_with(PAYLOAD_VERIFY_ALTITUDE)
+    assert sm._alt_waiting is True
+
+
+def test_ascend_for_verification_waits_until_altitude_then_stabilizes():
+    """Takeoff sonrası hedef irtifaya varış _altitude_ok ile doğrulanır;
+    varınca stabilizasyon başlar (mevcut akış korunur)."""
+    sm, nav = _sm(alt=0.0, vz=0.0)
+    sm.data.state = MissionState.ASCENDING_FOR_VERIFICATION
+
+    sm._do_ascend_for_verification()      # takeoff komutu
+    assert sm._alt_waiting is True
+    assert sm._verify_stabilize_start is None
+
+    # Hâlâ yerde — bekliyor
+    sm._do_ascend_for_verification()
+    assert sm._verify_stabilize_start is None
+
+    # 1m'ye ulaştı → stabilizasyon başlar
+    nav.position.return_value = VehiclePosition(
+        latitude=1.0, longitude=1.0, relative_altitude=PAYLOAD_VERIFY_ALTITUDE,
+        heading_deg=0.0, vertical_speed_mps=0.0,
+    )
+    sm._do_ascend_for_verification()
+    assert sm._verify_stabilize_start is not None

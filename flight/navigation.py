@@ -517,6 +517,27 @@ class Navigation:
             altitude_m,
         )
 
+    def takeoff_only(self, altitude_m: float) -> None:
+        """Yalnızca MAV_CMD_NAV_TAKEOFF gönderir — mod DEĞİŞTİRMEZ, ARM ETMEZ.
+
+        Çağıran; GUIDED aktif + araç armed olduğunu DOĞRULAMIŞ olmalıdır.
+
+        Neden gerekli (gerçek uçuşta gözlemlendi): araç yer-teması inişini
+        tamamlayınca ArduPilot ap.land_complete=true yapar ve motorları
+        GROUND_IDLE'a indirir. Bu durumda GUIDED'daki SET_POSITION_TARGET
+        (position hedefi) aracı GÜVENİLİR KALDIRMAZ — yeniden kalkış için
+        MAV_CMD_NAV_TAKEOFF gerekir (mission başlangıcındaki kalkışla aynı
+        mekanizma; komut land_complete=true + armed olmayı zorunlu kılar).
+        """
+        self.master.mav.command_long_send(
+            self.system_id,
+            self.component_id,
+            mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+            0,
+            0, 0, 0, 0, 0, 0,
+            altitude_m,
+        )
+
     def set_max_speed(self, horizontal_mps: float, vertical_mps: float | None = None) -> None:
         """
         ArduPilot GUIDED mod hız parametrelerini günder.

@@ -188,16 +188,16 @@ FIELD_LENGTH = 100.0
 #     "D": (37.9336640, 34.6177952),
 # }
 # COMPETITION_CORNERS = {
-#     "A": (37.9336852, 34.6175585), 
-#     "B": (37.9339380, 34.6175162), 
-#     "C": (37.9339702, 34.6178193), 
-#     "D": (37.9337222, 34.6178743), 
+#     "A": (37.9336852, 34.6175585),
+#     "B": (37.9339380, 34.6175162),
+#     "C": (37.9339702, 34.6178193),
+#     "D": (37.9337222, 34.6178743),
 # }
 COMPETITION_CORNERS = {
-    "A": (37.9334810, 34.6174975), 
-    "B": (37.9336281, 34.6174626), 
-    "C": (37.9337180, 34.6177670), 
-    "D": (37.9335699, 34.6178448), 
+    "A": (37.9334810, 34.6174975),
+    "B": (37.9336281, 34.6174626),
+    "C": (37.9337180, 34.6177670),
+    "D": (37.9335699, 34.6178448),
 }
 
 HEXAGON_SIDE_LENGTH = 2.0
@@ -208,6 +208,18 @@ PAYLOAD_WIDTH = 0.10
 PAYLOAD_HEIGHT = 0.10
 
 MAX_PICKUP_ATTEMPTS = 5
+
+# ── Görev modu seçimi ────────────────────────────────────────────────────────
+# ENABLE_RETURN_PICKUP = True  → TAM görev: yükler hedeflere bırakıldıktan sonra
+#                                 ilk hedefteki yükü tekrar alıp ikinci hedefe
+#                                 bırakır (pickup + redrop) ve ardından RTL yapar.
+# ENABLE_RETURN_PICKUP = False → Pickup/redrop aşaması TAMAMEN ATLANIR: yükler
+#                                 aynı şekilde bulunup doğru hedeflere bırakılır,
+#                                 pickup YAPILMAZ ve doğrudan RTL'ye geçilir.
+#                                 (Örn. pickup denemesi başarısız olduysa kodu
+#                                 değiştirmeden pickup'sız tekrar yarışılabilir.)
+# Varsayılan True — mevcut (pickup'lu) davranışı korur.
+ENABLE_RETURN_PICKUP = False
 
 # Payload arama: beklenen boyutun bu katını aşan tespitler payload değil hedeftir.
 # Payload 10cm kare, hedefler metre ölçeğinde olduğundan 3x lineer tolerans güvenlidir.

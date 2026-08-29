@@ -35,6 +35,7 @@ from config import (
     VISION_WIDTH_PX,
     VISION_VERTICAL_FOV_DEG,
     COMPETITION_CORNERS,
+    ENABLE_RETURN_PICKUP,
     ALIGNMENT_DESCENT_STEP_M,
     ALIGNED_FRAMES_REQUIRED,
     ALIGN_TOL_EXIT_FACTOR,
@@ -1597,7 +1598,15 @@ class MissionStateMachine:
             )
             self._goto(MissionState.ASCENDING_AFTER_FIRST_RELEASE)
         else:
-            # Her iki hedef de tamamlandı → Görev 2
+            if not ENABLE_RETURN_PICKUP:
+                # Config: pickup görevi kapalı — yükler bırakıldı, doğrudan RTL.
+                self.log.info(
+                    "ENABLE_RETURN_PICKUP=False: her iki yük bırakıldı, "
+                    "pickup/redrop atlanıyor → RTL."
+                )
+                self._do_start_rtl()
+                return
+            # Her iki hedef de tamamlandı → Görev 2 (pickup)
             self._goto(MissionState.NAVIGATING_TO_FIRST_TARGET)
 
     # ------------------------------------------------------------------ #
@@ -2553,6 +2562,14 @@ class MissionStateMachine:
             target.latitude, target.longitude,
         )
         self._reset_altitude_state()
+        if not ENABLE_RETURN_PICKUP:
+            # Savunma (normalde _do_release'te zaten RTL'ye geçilir):
+            # pickup kapalıyken redrop akışına asla girilmez.
+            self.log.info(
+                "ENABLE_RETURN_PICKUP=False: redrop atlanıyor → RTL."
+            )
+            self._do_start_rtl()
+            return
         self._goto(MissionState.RETURNING_PAYLOAD)
 
     # ------------------------------------------------------------------ #

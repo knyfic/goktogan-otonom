@@ -147,6 +147,40 @@ class CompetitionField:
         x, y = self.gps_to_local(lat, lon)
         return self.contains_local(x, y)
 
+    # ── Kısa kenarlar ──────────────────────────────────────────────────────── #
+    def short_edge_midpoints_local(self) -> list[tuple[float, float]]:
+        """İki KISA kenarın orta noktaları — GERÇEK kenar uzunluklarına göre.
+
+        'Kısa' olmak varsayılmaz; kenar uzunlukları GPS köşelerinden türetilir:
+          - genişlik (A-D/B-C) kısa  → (W/2, 0) ve (W/2, L)  [eski 30x100 alan]
+          - uzunluk (A-B/C-D) kısa  → (0, L/2) ve (W, L/2)  [gerçek yarışma alanı]
+        """
+        w, h = self._width_m, self._length_m
+        if w <= h:
+            return [(w / 2.0, 0.0), (w / 2.0, h)]
+        return [(0.0, h / 2.0), (w, h / 2.0)]
+
+    def nearest_short_edge_midpoint_local(self, x_m: float, y_m: float) -> tuple[float, float]:
+        """İki kısa kenar orta noktasından (x_m, y_m)'ye EN YAKIN olanı döndürür.
+
+        İHA ister alan İÇİNDE ister DIŞINDA olsun aynı hesap geçerlidir —
+        dışarıda başlamak özel/abort durumu değildir. Eşitlikte ilk aday
+        seçilir (eski davranış: ly == L/2 → alt kenar).
+        """
+        m1, m2 = self.short_edge_midpoints_local()
+        d1 = (x_m - m1[0]) ** 2 + (y_m - m1[1]) ** 2
+        d2 = (x_m - m2[0]) ** 2 + (y_m - m2[1]) ** 2
+        return m1 if d1 <= d2 else m2
+
+    # ── Yönler ─────────────────────────────────────────────────────────────── #
+    def width_heading_deg(self) -> float:
+        """Genişlik ekseninin (x) pusula yönü (derece) — uzunluk eksenine dik.
+
+        Kısa kenarlar uzunluk kenarlarıysa (A-B/C-D, gerçek alan) tek geçiş
+        taraması bu yönde yapılır.
+        """
+        return math.degrees(math.atan2(self._v_hat[1], self._v_hat[0])) % 360.0
+
 
 def reorder_search_from_drone(
     points: list[SearchPoint],

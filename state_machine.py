@@ -693,14 +693,17 @@ class MissionStateMachine:
         İHA'nın o anki GPS'i (launch) kullanılır.
 
         Her iki hedef araması da TEK GEÇİŞ (single_pass) geometrisini kullanır:
-        en yakın KISA KENARIN ORTASINA gidilir, yaw ile ön kısa kenara dik
-        yapılır ve uzun eksen (100m) boyunca tek düz geçişle taranır. Arama
-        irtifası = TAKEOFF_ALTITUDE (11.5m). Lawnmower/boustrophedon mission
-        flow'da KULLANILMAZ (algoritma search/coverage_planner.py'de korunur).
+        en yakın KISA KENARIN ORTASINA gidilir, yaw ile kısa kenara dik yapılır
+        ve karşı kısa kenara tek düz geçişle taranır. Arama irtifası =
+        TAKEOFF_ALTITUDE (11.5m). Lawnmower/boustrophedon mission flow'da
+        KULLANILMAZ (algoritma search/coverage_planner.py'de korunur).
 
         1. Referans GPS → competition frame'e çevrilir.
-        2. Referans alan dışındaysa search başlatılmaz → hata + RTL.
-        3. Tek geçiş rotası kurulur (kısa kenar ortası → karşı kısa kenar).
+        2. İki KISA kenar GERÇEK kenar uzunluklarından belirlenir (varsayım
+           yok) ve referansa en yakın olanın ORTASI başlangıç waypoint'i olur.
+        3. Referans alan DIŞINDA olsa bile aynı mantık çalışır — abort/hataya
+           düşülmez: İHA önce en yakın kısa kenar ortasına uçar, sonra alanı
+           tarar (alan dışı başlangıç özel durum değildir).
         """
         self._search_count += 1
         if reference_lat is None or reference_lon is None:
@@ -714,29 +717,41 @@ class MissionStateMachine:
         field = CompetitionField(COMPETITION_CORNERS)
         lx, ly = field.gps_to_local(ref_lat, ref_lon)
         if not field.contains_local(lx, ly):
-            self.log.error(
-                "Search referansı competition alanı dışında: "
-                "GPS=(%.7f, %.7f) local=(%.1f, %.1f) — alan [0..%.0f]x[0..%.0f] m",
+            # Abort DEĞİL: İHA alan dışında başlayabilir. Tek geçiş rotası
+            # zaten en yakın kısa kenar ORTASINDAN başladığı için aynı mantık
+            # geçerlidir — önce o noktaya uçulur, ardından alan taranır.
+            self.log.warning(
+                "Search referansı competition alanı DIŞINDA: "
+                "GPS=(%.7f, %.7f) local=(%.1f, %.1f) — alan [0..%.0f]x[0..%.0f] m. "
+                "En yakın kısa kenar ortasından taramaya başlanacak.",
                 ref_lat, ref_lon, lx, ly,
                 field.width_m, field.length_m,
             )
-            self.data.mission_failed = True
-            self._goto(MissionState.RTL)
-            return
 
-        # ── Tek geçiş (single_pass): en yakın kısa kenarın ORTASI → karşı kısa kenar ──
-        # Kısa kenar = genişlik (30m), uzun eksen = boy (100m). Arama çizgisi
-        # alanın merkezinden geçer (kamera 11.5m'de 30×100m alanı görür).
-        length = field.length_m
-        near_edge_y = 0.0 if ly <= length / 2.0 else length
-        start = SearchPoint(field.width_m / 2.0, near_edge_y)
-        end = SearchPoint(field.width_m / 2.0, length - near_edge_y)
+        # ── Tek geçiş (single_pass): en yakın KISA KENARIN ORTASI → karşı kısa kenar ──
+        # Kısa kenarlar GERÇEK uzunluklarından belirlenir (alan yönüne göre
+        # genişlik kenarları veya uzunluk kenarları olabilir). Referansın iki
+        # kısa kenar orta noktasına olan GERÇEK mesafesi karşılaştırılır; en
+        # yakın olanın ORTASINDAN tarama başlar. Referans içeride/dışarıda
+        # fark etmez — aynı geometri.
+        m1, m2 = field.short_edge_midpoints_local()
+        start_x, start_y = field.nearest_short_edge_midpoint_local(lx, ly)
+        end_x, end_y = m2 if (start_x, start_y) == m1 else m1
+        start = SearchPoint(start_x, start_y)
+        end = SearchPoint(end_x, end_y)
         self._search_points = [start, end]
-        # Yaw: uzun eksen (y) yönü — kısa kenara dik. Uzak kenara bakacak
-        # şekilde başlangıç kenarına göre 180° çevrilir.
-        heading = field.length_heading_deg()
-        if near_edge_y > 0.0:
-            heading = (heading + 180.0) % 360.0
+        # Yaw: kısa kenara DİK (tarama yönü). Uzak kenara bakacak şekilde
+        # başlangıç kenarına göre 180° çevrilir.
+        if field.width_m <= field.length_m:
+            # Kısa kenar = genişlik kenarları → tarama uzunluk ekseninde.
+            heading = field.length_heading_deg()
+            if start_y > 0.0:
+                heading = (heading + 180.0) % 360.0
+        else:
+            # Kısa kenar = uzunluk kenarları (A-B/C-D) → tarama genişlik ekseninde.
+            heading = field.width_heading_deg()
+            if start_x > 0.0:
+                heading = (heading + 180.0) % 360.0
         self._search_yaw_deg = heading
         self._search_field = field
         self._search_idx = 0

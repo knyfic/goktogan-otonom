@@ -581,6 +581,34 @@ class Navigation:
             0,          # yaw_rate
         )
 
+    def descent_velocity(self, vz_down_mps: float) -> None:
+        """
+        GUIDED modda yalnızca DİKEY hız komutu gönder (SET_POSITION_TARGET_LOCAL_NED).
+
+        Pozisyon/ivme/yaw YOKSAYILIR; yalnızca vx, vy, vz AKTİFTİR:
+          vx=0, vy=0 → yatay konum korunur (sürüklenme yok)
+          vz_down_mps > 0 → AŞAĞI (NED z ekseni yere bakar)
+
+        İrtifa hedefi GÖNDERMEZ — bu yüzden LiDAR/baro tahmini 0m gösterse bile
+        İHA düşük hızla zemine bastırılmaya devam eder (LiDAR okuma hatası törpülenir).
+        """
+        # type_mask: pos(0,1,2) + accel(6,7,8) + yaw(9) + yaw_rate(10) + force(11)
+        # YOKSAYILIR; vel(3,4,5) AKTİF → 0b110111000111
+        type_mask = 0b110111000111
+
+        self.master.mav.set_position_target_local_ned_send(
+            int(time.time() * 1000) & 0xFFFFFFFF,
+            self.system_id,
+            self.component_id,
+            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            type_mask,
+            0, 0, 0,          # x, y, z (yoksayılır)
+            0, 0, vz_down_mps,  # vx, vy, vz — NED'de pozitif AŞAĞI
+            0, 0, 0,          # ax, ay, az
+            0,                # yaw
+            0,                # yaw_rate
+        )
+
     def rtl(self) -> None:
         """Return To Launch. DISARM komutu içermez."""
         self.master.mav.command_long_send(

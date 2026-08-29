@@ -106,6 +106,13 @@ PAYLOAD_DESCENT_STEP_M = 0.4
 # kadar ileri gidip yere iner ve mekanizmayı aktive eder.
 PAYLOAD_ALIGN_ALTITUDE_M = 0.4
 
+# ── Offset sonrası zemin yaklaşımı (LiDAR hatası törpüleme) ─────────────────
+# İrtifa hedefi (0m) yerine DOĞRUDAN dikey AŞAĞI HIZ komutu kullanılır:
+# LiDAR 1cm yanlış okusa bile İHA, belirlenen süre boyunca düşük hızla
+# zemine bastırılır → fiziksel temas garanti edilir (irtifa düşürme değil).
+PAYLOAD_DESCENT_SPEED_MPS = 0.3   # zemin teması dikey aşağı hızı (m/s)
+PAYLOAD_DESCENT_HOLD_S    = 3.0   # hız komutunun sürdürüleceği süre (s)
+
 # Payload alımı: bu irtifanın ALTINDA köşe/kenar tespitleri de geçerlidir.
 # Alçak irtifada İHA payload'ı ortalayamayabilir ve payload köşelere/kenarlara
 # kayabilir; bu yüzden normalde uygulanan %15 kenar marjı (köşe eleme) kaldırılır

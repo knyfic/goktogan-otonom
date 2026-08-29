@@ -54,6 +54,8 @@ from config import (
     RED_PAYLOAD_VERIFY_ALTITUDE,
     PAYLOAD_CONTACT_ALTITUDE,
     PAYLOAD_CORNER_PICK_ALT_M,
+    PAYLOAD_DESCENT_HOLD_S,
+    PAYLOAD_DESCENT_SPEED_MPS,
     PAYLOAD_DESCENT_STEP_M,
     PAYLOAD_HEIGHT,
     PAYLOAD_PICKUP_VISION_MIN_S,
@@ -224,6 +226,10 @@ class MissionStateMachine:
         self._payload_search_start: float | None = None
         self._offset_correction_start: float | None = None
         self._offset_phase: str | None = None
+        # Offset sonrası dikey aşağı HIZ komutu inişi (LiDAR hatası törpüleme):
+        # başlangıç zamanı + son komut gönderim zamanı (ALIGN_CMD_INTERVAL_S ile).
+        self._descent_velocity_start: float | None = None
+        self._descent_velocity_last_t: float = 0.0
 
         # ---- Hedef üzerinde hizalama (pickup öncesi) ----
         # ALIGNING_ON_TARGET_FOR_PICKUP state'inde kullanılır
@@ -2206,11 +2212,20 @@ class MissionStateMachine:
     # ------------------------------------------------------------------ #
     def _do_offset_correction(self) -> None:
         """
-        Kamera payload'u 0.4m'de ortaladı. 
-        Kamera ile görev mekanizması arasında CAMERA_TO_MECHANISM_OFFSET_M (8cm)
+        Kamera payload'u ~0.4m'de ortaladı.
+        Kamera ile görev mekanizması arasında CAMERA_TO_MECHANISM_OFFSET_M (16cm)
         offset var (kamera önde, mekanizma arkada). Dolayısıyla İHA'nın, payload
-        mekanizmasını payload'un üzerine getirmesi için +0.08m (8cm ileri) gitmesi
-        ve ardından yük alım irtifasına (0.0m) inmesi gerekir.
+        mekanizmasını payload'un üzerine getirmesi için +0.16m (16cm ileri) gitmesi
+        gerekir.
+
+        Offset tamamlanınca:
+          1. Mıknatıslar HAVADAYKEN aktive edilir (inmeden önce — yükü almak için
+             yere inmeye gerek yoktur).
+          2. İrtifa hedefi (0m) GÖNDERİLMEZ; bunun yerine DOĞRUDAN dikey AŞAĞI
+             hız komutu (PAYLOAD_DESCENT_SPEED_MPS) PAYLOAD_DESCENT_HOLD_S süre
+             gönderilir. Bu, LiDAR'ın 1cm'lik okuma hatasını törpüler: İHA irtifa
+             tahmini 0m gösterse bile fiziksel temas sağlanana kadar düşük hızla
+             zemine bastırılır.
         """
         now = time.monotonic()
         pos = self.nav.position()
@@ -2230,26 +2245,51 @@ class MissionStateMachine:
         elapsed = now - self._offset_correction_start
 
         if self._offset_phase == "WAITING_OFFSET":
-            # 8cm için birkaç saniye bekleme güvenli ve yeterlidir.
+            # 16cm için birkaç saniye bekleme güvenli ve yeterlidir.
             if elapsed < OFFSET_CORRECTION_WAIT_S:
                 return
 
-            # Offset bitti, şimdi inelim
-            self.log.info("OFFSET bitti. Temas irtifasına (0.0m) iniliyor.")
-            self._send_altitude(PAYLOAD_CONTACT_ALTITUDE, timeout=10.0)
-            self._offset_phase = "WAITING_DESCENT"
+            # Offset bitti. Mıknatısları HAVADAYKEN aktive et — yere inmeye gerek yok.
+            target = self.data.first_target
+            if target is not None:
+                payload_type = self.payload_for_target(target)
+                self.payload.send_pickup_command(payload_type)
+                self.log.info(
+                    "OFFSET bitti. Mıknatıslar HAVADAYKEN aktive edildi (%s).",
+                    payload_type.value,
+                )
+            else:
+                self.log.warning(
+                    "OFFSET bitti ama first_target yok — mıknatıs aktive edilemedi."
+                )
+
+            # LiDAR hatasını törpülemek için DOĞRUDAN dikey aşağı hız komutu
+            self.log.info(
+                "OFFSET bitti. Zemin teması için dikey aşağı hız komutu: %.2f m/s, "
+                "%.1fs (irtifa hedefi kullanılmıyor).",
+                PAYLOAD_DESCENT_SPEED_MPS, PAYLOAD_DESCENT_HOLD_S,
+            )
+            self.nav.descent_velocity(PAYLOAD_DESCENT_SPEED_MPS)
+            self._descent_velocity_start = now
+            self._descent_velocity_last_t = now
+            self._offset_phase = "DESCENDING_VELOCITY"
             return
 
-        if self._offset_phase == "WAITING_DESCENT":
-            # İrtifaya ulaşmayı kontrol edelim
-            result = self._altitude_ok()
-            if result is False and elapsed < OFFSET_CORRECTION_WAIT_S + 10.0:
-                return  # hala iniyor ve toplam zaman var
+        if self._offset_phase == "DESCENDING_VELOCITY":
+            # Hız komutu periyodik yeniden gönderilir (GUIDED velocity beslemesi).
+            if now - self._descent_velocity_last_t >= ALIGN_CMD_INTERVAL_S:
+                self.nav.descent_velocity(PAYLOAD_DESCENT_SPEED_MPS)
+                self._descent_velocity_last_t = now
+
+            descent_start = self._descent_velocity_start
+            if descent_start is None \
+                    or now - descent_start < PAYLOAD_DESCENT_HOLD_S:
+                return  # hâlâ düşük hızla zemine bastırılıyor
 
             self._reset_altitude_state()
             self.log.info(
-                "OFFSET VE İNİŞ tamamlandı (%.2fs). Mevcut irtifa: %.2fm. Pickup başlıyor.",
-                elapsed, pos.relative_altitude,
+                "Dikey iniş tamamlandı (%.1fs, mevcut irtifa %.2fm). Pickup başlıyor.",
+                PAYLOAD_DESCENT_HOLD_S, pos.relative_altitude,
             )
             self._goto(MissionState.PICKING_UP_PAYLOAD)
 
@@ -2257,8 +2297,11 @@ class MissionStateMachine:
     def _do_pickup(self) -> None:
         """
         Non-blocking servo bekleme.
-        İlk çağrıda servo komutunu gönder; sonraki tick'lerde
-        bekleme süresi doldu mu diye kontrol et.
+
+        Mıknatıslar OFFSET_CORRECTION sonunda HAVADAYKEN aktive edildi (iniş
+        öncesi). Bu state'te yalnızca bekleme süresi başlatılır; komut TEKRAR
+        GÖNDERİLMEZ (backend state PICKING_UP zaten — tekrar göndermek
+        INVALID_STATE hatası üretir).
 
         Bekleme süresi: payload.servo_wait_s → pickup bekleme süresi
         (LocalRPiBackend/RemoteRPiBackend — pickup_wait_s, varsayılan 3.0s;
@@ -2271,17 +2314,14 @@ class MissionStateMachine:
             return
 
         if self._pickup_servo_start is None:
-            payload_type = self.payload_for_target(target)
-            self.payload.send_pickup_command(payload_type)
-            self._pickup_servo_start = time.monotonic()
-            # Pickup bekleme süresini backend'den al, yoksa simulation değeri
             wait = self.payload.servo_wait_s
             if wait is None:
                 wait = PAYLOAD_SERVO_WAIT_S
             self._pickup_servo_wait = wait
+            self._pickup_servo_start = time.monotonic()
             self.log.info(
-                "Pickup komutu gönderildi (%s). %.1fs bekleniyor...",
-                payload_type.value, self._pickup_servo_wait,
+                "Pickup bekleme başladı (mıknatıslar havada aktifti). %.1fs bekleniyor...",
+                self._pickup_servo_wait,
             )
             return
 

@@ -10,7 +10,7 @@
 #   simulation  → SimulationBackend  (Gazebo, GPIO yok)
 #   hil         → RemoteRPiBackend   (Ubuntu → Wi-Fi → Raspberry Pi)
 #   real        → LocalRPiBackend    (Raspberry Pi üzerinde, doğrudan GPIO)
-backend: real
+backend: simulation
 
 # ── HIL sunucu (yalnızca Raspberry Pi'de services/hil_entrypoint.py okur) ────
 # Ubuntu tarafı bu bölümü OKUMAZ. RPi'de payload TCP (5700) + kamera TCP (5701)

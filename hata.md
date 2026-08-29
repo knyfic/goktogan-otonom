@@ -113,3 +113,5 @@ sim dede yuku almak icin yere indigiz zaman zeminde 3 saniye falna beklemlei PAY
 
 
 new1: ucgen tespit etti ve onu kaybetttiyse surekli olarak onu search durumda kalmamalı. zaten mevcut program en son sekil gordugu konuma gidip bir search yapıyor fakat burada bir tmieout olmalı. kareyi ucgen sandıgı durumda sonsuza kadar o yanlıs gordugu ucgeni aramamalı. timoout sonrası tekrar devam ettigi search line a geri donup search yapmaya devam etmelidir.
+
+new 2: ucgenin tamamı eger kadrajda gozukmuyorsa onu asla ucgen olarak isaretleme yoksa kare ucgen olarak alıglanablir

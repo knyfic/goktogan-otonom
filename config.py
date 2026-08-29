@@ -294,6 +294,11 @@ TARGET_DETECTOR_AUTO_SWAP = False
 SCAN_LINE_SPACING = 10
 SEARCH_MARGIN = 2.0
 
+# Kamera yatay zemin görüş genişliği (m) — search irtifasında (~11.5m).
+# Search line'ları bu değere göre konumlanır: ilk/son line uzun kenarlardan
+# SEARCH_FOV_WIDTH_M/2 (=6.490 m) İÇERİDE olur; orta line'lar arayı dengeler.
+SEARCH_FOV_WIDTH_M = 12.980
+
 # Arama sırası yatay hız
 SEARCH_SPEED_MPS = 0.5
 # Hedefe yaklaşma hızı (kaba)

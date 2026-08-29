@@ -1,13 +1,15 @@
 """
-CompetitionField — 4 GPS köşesinden SABİT local frame + dinamik launch search.
+CompetitionField + FOV tabanlı 3-line search planner testleri.
 
-Gereksinimler:
-  - Yarışma alanı GPS köşeleriyle (A,B,C,D — 30×100 m) tanımlanır.
-  - İHA'nın runtime GPS konumu competition frame'e çevrilir (launch'a göre
-    kod değişmez; alan dünya sabitidir).
-  - Lawnmower pattern korunur; rota İHA'ya en yakın hattan başlar.
-  - Tüm waypoint'ler alan içinde kalır; alan dışı launch reddedilir.
-  - Alan orientation'ı kuzeye hizalı olmak zorunda değildir (0°/30°/45°/90°).
+Yeni geometri (30x100 varsayımı YOK):
+  - Kenar uzunlukları GERÇEK GPS köşelerinden hesaplanır.
+  - Uzun kenarlara paralel SEARCH_FOV_WIDTH_M (12.980 m) tabanlı 3 search line.
+  - İlk/son line uzun kenarlardan FOV/2 (6.490 m) İÇERİDE — kamera alan dışını
+    gereksiz görmez, görüşün dış sınırı alan kenarına oturur.
+  - Orta line iki sınır arasını dengeler.
+  - Line uçları gerçek dörtgen sınırıyla kesişir (alan dışı waypoint YOK).
+  - Sıra zig-zag (→ ← →) — yaw değişimi gerektirmez.
+  - Bozuk/trapez dörtgenler ve GPS perturbasyonları desteklenir.
 """
 import logging
 import math
@@ -16,15 +18,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from config import SEARCH_MARGIN, SCAN_LINE_SPACING
+from config import SEARCH_FOV_WIDTH_M
 from search.coverage_planner import (
     CompetitionField,
     LawnmowerPlanner,
     SearchPoint,
-    reorder_search_from_drone,
+    point_in_polygon,
 )
 
-_ORIGIN = (47.0, 8.0)
+_ORIGIN = (37.9334810, 34.6174975)
 
 
 def _gps_from_origin(o_lat, o_lon, north_m, east_m):
@@ -36,13 +38,7 @@ def _gps_from_origin(o_lat, o_lon, north_m, east_m):
 
 
 def _field(width=30.0, length=100.0, theta_deg=0.0, origin=_ORIGIN):
-    """
-    θ dönüşlü dikdörtgen köşeleri üretir.
-
-    A = origin (alt-sol kavramsal). B = A + length·(cosθ, sinθ) kuzey/doğu,
-    D = A + width·(−sinθ, cosθ) — yani B yönünün 90° saat yönünde diki.
-    θ = 0 → kuzeye hizalı alan (B kuzeyde, D doğuda).
-    """
+    """θ dönüşlü DİKDÖRTGEN köşeleri üretir (ideal alanlar için)."""
     o_lat, o_lon = origin
     th = math.radians(theta_deg)
     b = _gps_from_origin(o_lat, o_lon,
@@ -57,16 +53,43 @@ def _field(width=30.0, length=100.0, theta_deg=0.0, origin=_ORIGIN):
     return CompetitionField({"A": origin, "B": b, "C": c, "D": d})
 
 
-def _route(field, lat, lon, spacing=SCAN_LINE_SPACING, margin=SEARCH_MARGIN):
-    """Planner + competition kaydırma + en yakın hattan başlatma (state machine ile aynı)."""
-    planner = LawnmowerPlanner(field.width_m, field.length_m, spacing, margin)
-    points = [SearchPoint(p.x_m + field.width_m / 2.0, p.y_m)
-              for p in planner.generate()]
-    lx, ly = field.gps_to_local(lat, lon)
-    return reorder_search_from_drone(points, lx, ly)
+def _quad(local_corners, theta_deg=0.0, origin=_ORIGIN):
+    """Local (x: genişlik, y: uzunluk) köşelerini θ döndürmeli GPS'e çevirir.
+
+    _field ile AYNI model: y → kuzey, x → doğu (θ=0). Bozuk/trapez dörtgenler
+    üretmek için kullanılır (dikdörtgen OLMAK zorunda değildir).
+    """
+    o_lat, o_lon = origin
+    th = math.radians(theta_deg)
+    pts = []
+    for (x, y) in local_corners:
+        north = y * math.cos(th) - x * math.sin(th)
+        east = y * math.sin(th) + x * math.cos(th)
+        pts.append(_gps_from_origin(o_lat, o_lon, north, east))
+    return CompetitionField({"A": pts[0], "B": pts[1], "C": pts[2], "D": pts[3]})
 
 
-# ── 1) Köşeler → local frame ─────────────────────────────────────────────── #
+def _gps_corners(field):
+    """Local köşeleri GPS'e geri çevirir (pertürbasyon testleri için)."""
+    return {k: field.local_to_gps(*loc) for k, loc in field.corner_local().items()}
+
+
+def _line_transversal_offsets(field, fov=SEARCH_FOV_WIDTH_M, count=3):
+    """Her line'ın transversal konumu (ilk uzun kenardan, GERÇEK metre) + alan genişliği."""
+    d = field.search_direction_local()
+    t = (-d[1], d[0])
+    scale_t = math.sqrt(1.0 + 2.0 * field.axis_cos * t[0] * t[1])
+    p_vals = [x * t[0] + y * t[1] for x, y in field.corner_local().values()]
+    p_min, p_max = min(p_vals), max(p_vals)
+    width = (p_max - p_min) * scale_t
+    offsets = []
+    for (s, e) in field.search_lines_local(fov, count):
+        pm = ((s[0] + e[0]) / 2.0) * t[0] + ((s[1] + e[1]) / 2.0) * t[1]
+        offsets.append((pm - p_min) * scale_t)
+    return sorted(offsets), width
+
+
+# ── 1) Köşeler → local frame (korunan temel geometri) ─────────────────────── #
 def test_corner_frame():
     f = _field(30.0, 100.0, 0.0)
     assert f.width_m == pytest.approx(30.0, abs=0.1)
@@ -85,7 +108,6 @@ def test_corner_frame():
     assert f.gps_to_local(lat, lon) == pytest.approx((15.0, 50.0), abs=0.1)
 
 
-# ── 2) Ortadaki launch ────────────────────────────────────────────────────── #
 def test_center_launch():
     f = _field(30.0, 100.0, 0.0)
     gps = f.local_to_gps(15.0, 50.0)
@@ -94,122 +116,217 @@ def test_center_launch():
     assert f.contains(*gps)
 
 
-# ── 3) Farklı launch noktaları — aynı kod adapte olur ─────────────────────── #
-def test_various_launch_points():
+# ── 2) Kenar uzunlukları / uzun-kısa tespiti (varsayım YOK) ───────────────── #
+def test_edge_lengths_ideal_30x100():
     f = _field(30.0, 100.0, 0.0)
-    planner = LawnmowerPlanner(f.width_m, f.length_m, SCAN_LINE_SPACING, SEARCH_MARGIN)
-    expected = {(p.x_m + f.width_m / 2.0, p.y_m) for p in planner.generate()}
-
-    for dx, dy in [(2, 5), (28, 5), (15, 50), (5, 90), (27, 95)]:
-        gps = f.local_to_gps(dx, dy)
-        route = _route(f, *gps)
-        assert len(route) == len(expected), f"launch ({dx},{dy}) rota eksik"
-        assert {(p.x_m, p.y_m) for p in route} == expected, \
-            f"launch ({dx},{dy}) rota tüm noktaları içermeli"
-        for p in route:
-            assert f.contains_local(p.x_m, p.y_m)
+    edges = f.edge_lengths_m()
+    assert edges["AB"] == pytest.approx(100.0, abs=0.2)
+    assert edges["CD"] == pytest.approx(100.0, abs=0.2)
+    assert edges["BC"] == pytest.approx(30.0, abs=0.2)
+    assert edges["DA"] == pytest.approx(30.0, abs=0.2)
+    long_names, short_names = f.long_short_edges()
+    assert sorted(long_names) == ["AB", "CD"]
+    assert sorted(short_names) == ["BC", "DA"]
 
 
-# ── 4) 1000 rastgele launch — tüm waypoint'ler içeride ────────────────────── #
-def test_1000_random_launches_all_inside():
-    rng = random.Random(1234)
+def test_edge_lengths_real_competition_corners():
+    """GERÇEK COMPETITION_CORNERS: A-B/C-D ~17m KISA, B-C/D-A ~28-32m UZUN."""
+    from config import COMPETITION_CORNERS
+
+    f = CompetitionField(COMPETITION_CORNERS)
+    edges = f.edge_lengths_m()
+    assert edges["AB"] == pytest.approx(16.66, abs=0.5)
+    assert edges["CD"] == pytest.approx(17.85, abs=0.5)
+    assert edges["BC"] == pytest.approx(28.54, abs=0.5)
+    assert edges["DA"] == pytest.approx(32.06, abs=0.5)
+    long_names, short_names = f.long_short_edges()
+    assert sorted(long_names) == ["BC", "DA"]    # uzun kenarlar
+    assert sorted(short_names) == ["AB", "CD"]   # kısa kenarlar
+
+
+def test_edge_lengths_distorted_quad_no_30x100_assumption():
+    """28/35/102/112 benzeri bozuk dörtgen: uzun/kısa GERÇEK ölçümden bulunur."""
+    f = _quad([(0, 0), (0, 102), (28, 105), (35, 3)])
+    edges = f.edge_lengths_m()
+    assert edges["AB"] == pytest.approx(102.0, abs=0.5)
+    assert edges["BC"] == pytest.approx(28.2, abs=0.5)
+    assert edges["CD"] == pytest.approx(102.2, abs=0.5)
+    assert edges["DA"] == pytest.approx(35.1, abs=0.5)
+    long_names, short_names = f.long_short_edges()
+    assert all(edges[n] >= 90.0 for n in long_names)
+    assert all(edges[n] <= 40.0 for n in short_names)
+
+
+# ── 3) FOV tabanlı 3 search line ──────────────────────────────────────────── #
+def test_search_lines_ideal_30x100_positions():
+    """Test A — ideal 30x100: 3 line; transversal konumlar 6.490 / 15.000 / 23.510."""
     f = _field(30.0, 100.0, 0.0)
-    for _ in range(1000):
-        dx = rng.uniform(0.01, 29.99)
-        dy = rng.uniform(0.01, 99.99)
-        gps = f.local_to_gps(dx, dy)
-        route = _route(f, *gps)
-        assert len(route) > 0
-        for p in route:
-            assert f.contains_local(p.x_m, p.y_m), f"waypoint dışarıda: {p}"
+    lines = f.search_lines_local(SEARCH_FOV_WIDTH_M, line_count=3)
+    assert len(lines) == 3
+    half = SEARCH_FOV_WIDTH_M / 2.0
+    xs = sorted((s[0] + e[0]) / 2.0 for s, e in lines)
+    assert xs == pytest.approx([half, 15.0, 30.0 - half], abs=0.05)
+    # Line uçları KISA kenarlarda (y=0 ve y=100) — alan dışına taşmaz
+    for (s, e) in lines:
+        assert any(abs(s[1] - y) < 0.1 for y in (0.0, 100.0))
+        assert any(abs(e[1] - y) < 0.1 for y in (0.0, 100.0))
+        assert abs(s[1] - e[1]) > 99.0
+        assert e[0] == pytest.approx(s[0], abs=0.01)   # uzun kenara paralel
 
 
-# ── 5) Kenar launch ───────────────────────────────────────────────────────── #
-def test_edge_launch():
+def test_search_lines_ideal_coverage():
+    """Test E — coverage: ilk line'ın FOV sınırı bir uzun kenarda, son line'ınki
+    karşı uzun kenarda — alan dışı gereksiz görüş YOK, boşluk da YOK."""
     f = _field(30.0, 100.0, 0.0)
-    margin = SEARCH_MARGIN
-    for dx, dy in [(margin + 0.01, 50.0),
-                   (30.0 - margin - 0.01, 50.0),
-                   (15.0, margin + 0.01),
-                   (15.0, 100.0 - margin - 0.01)]:
-        gps = f.local_to_gps(dx, dy)
-        assert f.contains(*gps), f"kenar launch ({dx},{dy}) alan içinde olmalı"
-        for p in _route(f, *gps):
-            assert f.contains_local(p.x_m, p.y_m)
+    half = SEARCH_FOV_WIDTH_M / 2.0
+    lines = f.search_lines_local(SEARCH_FOV_WIDTH_M, line_count=3)
+    xs = sorted((s[0] + e[0]) / 2.0 for s, e in lines)
+    assert xs[0] - half == pytest.approx(0.0, abs=0.05)
+    assert xs[-1] + half == pytest.approx(30.0, abs=0.05)
+    for i in range(len(xs) - 1):
+        assert xs[i] + half >= xs[i + 1] - half - 1e-6   # overlap/temas
 
 
-# ── 6) Köşe launch ────────────────────────────────────────────────────────── #
-def test_corner_launches():
+def test_search_lines_distorted_quad():
+    """Test B — 28/35/102/112 benzeri bozuk dörtgen: 3 line, uzun kenar
+    doğrultusunda, ilk/son line 6.490 m içeride, uçlar sınırda, dışarıda yok."""
+    f = _quad([(0, 0), (0, 102), (28, 105), (35, 3)])
+    half = SEARCH_FOV_WIDTH_M / 2.0
+    lines = f.search_lines_local(SEARCH_FOV_WIDTH_M, line_count=3)
+    assert len(lines) == 3
+    poly = list(f.corner_local().values())
+    for (s, e) in lines:
+        assert point_in_polygon(*s, poly)
+        assert point_in_polygon(*e, poly)
+    # Line'lar uzun kenar doğrultusunda
+    d = f.search_direction_local()
+    for (s, e) in lines:
+        v = (e[0] - s[0], e[1] - s[1])
+        n = math.hypot(*v)
+        assert n > 1.0
+        assert abs((v[0] * d[0] + v[1] * d[1]) / n) > 0.99
+    # İlk/son line uzun kenarlardan FOV/2 içeride; orta line arayı dengeler
+    offsets, width = _line_transversal_offsets(f)
+    assert offsets[0] == pytest.approx(half, abs=0.1)
+    assert offsets[1] == pytest.approx(width / 2.0, abs=0.1)
+    assert offsets[-1] == pytest.approx(width - half, abs=0.1)
+
+
+def test_search_lines_distorted_coverage():
+    """Bozuk dörtgende de coverage: dış sınırlar alan kenarlarına oturur."""
+    f = _quad([(0, 0), (0, 102), (28, 105), (35, 3)])
+    half = SEARCH_FOV_WIDTH_M / 2.0
+    offsets, width = _line_transversal_offsets(f)
+    assert offsets[0] - half == pytest.approx(0.0, abs=0.1)
+    assert offsets[-1] + half == pytest.approx(width, abs=0.1)
+    for i in range(len(offsets) - 1):
+        assert offsets[i] + half >= offsets[i + 1] - half - 1e-6
+
+
+def test_search_lines_trapezoid():
+    """Test C — karşılıklı kenarları paralel OLMAYAN dörtgen: çökmez, 3 line,
+    line'lar içeride, uçlar sınırda."""
+    f = _quad([(0, 0), (0, 100), (30, 98), (32, 0)])   # üst/alt kenarlar kaymış
+    lines = f.search_lines_local(SEARCH_FOV_WIDTH_M, line_count=3)
+    assert len(lines) == 3
+    poly = list(f.corner_local().values())
+    for (s, e) in lines:
+        assert point_in_polygon(*s, poly)
+        assert point_in_polygon(*e, poly)
+
+
+def test_search_lines_gps_perturbation_stable():
+    """Test D — köşelere küçük GPS hataları: çökmez, 3 line kalır, içeride kalır."""
+    rng = random.Random(42)
+    base = _field(30.0, 100.0, 0.0)
+    base_corners = _gps_corners(base)
+    for _ in range(20):
+        corners = {
+            k: (lat + rng.uniform(-1e-6, 1e-6), lon + rng.uniform(-1e-6, 1e-6))
+            for k, (lat, lon) in base_corners.items()
+        }
+        f = CompetitionField(corners)
+        lines = f.search_lines_local(SEARCH_FOV_WIDTH_M, line_count=3)
+        assert len(lines) == 3
+        poly = list(f.corner_local().values())
+        for (s, e) in lines:
+            assert point_in_polygon(*s, poly)
+            assert point_in_polygon(*e, poly)
+
+
+@pytest.mark.parametrize("theta", [0.0, 30.0, 45.0, 90.0])
+def test_rotated_fields(theta):
+    """Döndürülmüş alanlar: 3 line üretilir, waypoint'ler içeride kalır."""
+    f = _field(30.0, 100.0, theta)
+    poly = list(f.corner_local().values())
+    route = LawnmowerPlanner(f, SEARCH_FOV_WIDTH_M).generate()
+    assert len(route) == 6
+    for p in route:
+        assert point_in_polygon(p.x_m, p.y_m, poly)
+
+
+def test_planner_zigzag_order():
+    """Waypoint sırası zig-zag: line1 →, line2 ←, line3 → (yaw değişimi yok)."""
     f = _field(30.0, 100.0, 0.0)
-    for dx, dy in [(0.1, 0.1), (29.9, 0.1), (0.1, 99.9), (29.9, 99.9)]:
-        gps = f.local_to_gps(dx, dy)
-        assert f.contains(*gps)
-        for p in _route(f, *gps):
-            assert f.contains_local(p.x_m, p.y_m), f"waypoint dışarıda: {p}"
+    pts = LawnmowerPlanner(f, SEARCH_FOV_WIDTH_M).generate()
+    assert len(pts) == 6
+    # P1-P2 (line1), P3-P4 (line2), P5-P6 (line3): her line sabit x'te (uzun kenara paralel)
+    for i in range(0, 6, 2):
+        assert pts[i].x_m == pytest.approx(pts[i + 1].x_m, abs=0.01)
+    assert len({round(p.x_m, 3) for p in pts}) == 3     # 3 farklı line
+    # Yönler: line1 ile line3 aynı, line2 TERS (→ ← →)
+    y1 = pts[0].y_m - pts[1].y_m
+    y2 = pts[2].y_m - pts[3].y_m
+    y3 = pts[4].y_m - pts[5].y_m
+    assert y1 * y2 < 0
+    assert y1 * y3 > 0
 
 
-# ── 7) Alan dışı launch reddedilir ────────────────────────────────────────── #
+def test_planner_debug_summary():
+    """Debug çıktısı kenar uzunluklarını, FOV'u, line sayısını ve GPS uçlarını içerir."""
+    f = _field(30.0, 100.0, 0.0)
+    s = LawnmowerPlanner(f, SEARCH_FOV_WIDTH_M).debug_summary()
+    assert "Detected edge lengths:" in s
+    assert "Long edges:" in s and "Short edges:" in s
+    assert "Search FOV width: 12.980 m" in s
+    assert "Search half FOV: 6.490 m" in s
+    assert "Search line count: 3" in s
+    assert "Line 1:" in s and "Line 2:" in s and "Line 3:" in s
+    assert "start=" in s and "end=" in s
+
+
 def test_outside_launch_rejected():
+    """contains() gerçek dış noktaları reddeder (frame doğrulaması)."""
     f = _field(30.0, 100.0, 0.0)
     for dx, dy in [(-5.0, 50.0), (35.0, 50.0), (15.0, -5.0), (15.0, 105.0)]:
         gps = f.local_to_gps(dx, dy)
         assert not f.contains(*gps), f"alan dışı ({dx},{dy}) reddedilmeli"
 
 
-# ── 8) Farklı alan orientation'ları ───────────────────────────────────────── #
-@pytest.mark.parametrize("theta", [0.0, 30.0, 45.0, 90.0])
-def test_rotated_fields(theta):
-    f = _field(30.0, 100.0, theta)
-    assert f.width_m == pytest.approx(30.0, abs=0.2)
-    assert f.length_m == pytest.approx(100.0, abs=0.2)
-
-    th = math.radians(theta)
-    assert f.gps_to_local(*_ORIGIN) == pytest.approx((0.0, 0.0), abs=0.2)
-    b = _gps_from_origin(*_ORIGIN, 100.0 * math.cos(th), 100.0 * math.sin(th))
-    assert f.gps_to_local(*b) == pytest.approx((0.0, 100.0), abs=0.2)
-    d = _gps_from_origin(*_ORIGIN, -30.0 * math.sin(th), 30.0 * math.cos(th))
-    assert f.gps_to_local(*d) == pytest.approx((30.0, 0.0), abs=0.2)
-
-    lat, lon = f.local_to_gps(15.0, 50.0)
-    assert f.gps_to_local(lat, lon) == pytest.approx((15.0, 50.0), abs=0.2)
-
-    # Döndürülmüş alanda da tüm rotalar içeride
-    rng = random.Random(7)
-    for _ in range(50):
-        dx = rng.uniform(0.1, 29.9)
-        dy = rng.uniform(0.1, 99.9)
-        gps = f.local_to_gps(dx, dy)
-        for p in _route(f, *gps):
-            assert f.contains_local(p.x_m, p.y_m)
-
-
 # ── State machine entegrasyonu ────────────────────────────────────────────── #
-def test_init_search_outside_area_builds_route():
-    """İHA alan DIŞINDA başlasa bile search kurulur — abort/RTL YOK.
-
-    Tek geçiş rotası en yakın KISA KENAR ORTASINDAN başlar; dışarıdaki
-    referans için önce o noktaya uçulur, ardından alan taranır.
-    """
-    from models import MissionState
+def _make_sm(nav):
     from state_machine import MissionStateMachine
+
+    return MissionStateMachine(navigation=nav, camera=MagicMock(),
+                               payload=MagicMock(),
+                               logger=logging.getLogger("t"))
+
+
+def test_init_search_outside_area_builds_route():
+    """İHA alan DIŞINDA başlasa bile search kurulur — abort/RTL YOK."""
+    from models import MissionState
 
     nav = MagicMock()
     nav.fresh_position.return_value = MagicMock(latitude=48.0, longitude=8.0)  # alan dışı
-    sm = MissionStateMachine(navigation=nav, camera=MagicMock(), payload=MagicMock(),
-                             logger=logging.getLogger("t"))
+    sm = _make_sm(nav)
     sm._init_search()
     assert sm.data.mission_failed is False
     assert sm.data.state != MissionState.RTL
     assert sm._search_field is not None
-    assert len(sm._search_points) == 2
-    # İki waypoint de birer KISA KENAR ORTASI olmalı ve birbirinden farklı olmalı
-    field = sm._search_field
-    short_mids = field.short_edge_midpoints_local()
-    first = (sm._search_points[0].x_m, sm._search_points[0].y_m)
-    second = (sm._search_points[1].x_m, sm._search_points[1].y_m)
-    assert first in short_mids
-    assert second in short_mids
-    assert first != second
+    assert len(sm._search_points) == 6    # 3 line × 2 uç
+    poly = list(sm._search_field.corner_local().values())
+    for p in sm._search_points:
+        assert point_in_polygon(p.x_m, p.y_m, poly)
 
 
 def test_init_search_inside_area_builds_route():
@@ -223,10 +340,97 @@ def test_init_search_inside_area_builds_route():
                              logger=logging.getLogger("t"))
     sm._init_search()
     assert sm._search_field is not None
-    assert len(sm._search_points) > 0
+    assert len(sm._search_points) == 6
+    poly = list(sm._search_field.corner_local().values())
     for p in sm._search_points:
-        assert sm._search_field.contains_local(p.x_m, p.y_m), \
+        assert point_in_polygon(p.x_m, p.y_m, poly), \
             f"waypoint alan dışında: ({p.x_m:.1f}, {p.y_m:.1f})"
+
+
+def test_init_search_outside_field_still_builds_route():
+    """İHA alan dışında (batıda) başlasa bile FOV tabanlı 3 line kurulur."""
+    from config import COMPETITION_CORNERS
+    from models import MissionState
+    from state_machine import MissionStateMachine
+
+    field = CompetitionField(COMPETITION_CORNERS)
+    west_lat, west_lon = field.local_to_gps(-50.0, field.length_m / 2.0)
+    nav = MagicMock()
+    nav.fresh_position.return_value = MagicMock(latitude=west_lat, longitude=west_lon)
+    sm = MissionStateMachine(navigation=nav, camera=MagicMock(), payload=MagicMock(),
+                             logger=logging.getLogger("t"))
+    sm._init_search()
+    assert sm.data.state != MissionState.RTL
+    assert sm.data.mission_failed is False
+    assert len(sm._search_points) == 6
+
+
+def test_first_search_uses_takeoff_reference():
+    """İlk arama: launch referansı kullanılır; rota FOV tabanlı 3 line'dır."""
+    from config import COMPETITION_CORNERS
+
+    field = CompetitionField(COMPETITION_CORNERS)
+    launch_lat, launch_lon = field.local_to_gps(
+        field.width_m * 0.4, field.length_m * 0.4,
+    )
+    nav = MagicMock()
+    nav.fresh_position.return_value = MagicMock(
+        latitude=launch_lat, longitude=launch_lon,
+    )
+    sm = _make_sm(nav)
+    sm._init_search()
+    assert sm._search_origin_lat == pytest.approx(launch_lat, abs=1e-9)
+    assert sm._search_origin_lon == pytest.approx(launch_lon, abs=1e-9)
+    assert len(sm._search_points) == 6
+    assert nav.set_max_speed.call_count == 1
+    # Yaw: uzun kenar GENEL doğrultusu — line değişimlerinde dönme YOK (sabit)
+    assert sm._search_yaw_deg == pytest.approx(field.search_direction_deg())
+
+
+def test_init_search_yaw_is_long_edge_direction():
+    """Search yaw'ı uzun kenar doğrultusunda SABİTTİR — konumdan bağımsız."""
+    from config import COMPETITION_CORNERS
+
+    field = CompetitionField(COMPETITION_CORNERS)
+    launch_lat, launch_lon = field.local_to_gps(
+        field.width_m * 0.9, field.length_m * 0.5,
+    )
+    nav = MagicMock()
+    nav.fresh_position.return_value = MagicMock(
+        latitude=launch_lat, longitude=launch_lon,
+    )
+    sm = _make_sm(nav)
+    sm._init_search()
+    assert sm._search_yaw_deg == pytest.approx(field.search_direction_deg())
+    # 6 waypoint = 3 line; hiçbir line değişimi 180° yaw gerektirmez
+    # (yaw tek değerdir ve _advance_search her goto'ya aynı değeri iletir)
+    nav.position.return_value = MagicMock(
+        latitude=launch_lat, longitude=launch_lon, heading_deg=0.0, relative_altitude=8.0,
+    )
+    sm._search_field = field
+    sm._search_idx = 0
+    nav.reset_mock()
+    sm._advance_search()
+    assert nav.goto_global.call_args[1].get("yaw_deg") == pytest.approx(sm._search_yaw_deg)
+
+
+def test_advance_search_sends_yaw():
+    """Tek geçiş yaw hedefi goto_global'e iletilir."""
+    nav = MagicMock()
+    nav.position.return_value = MagicMock(
+        latitude=_ORIGIN[0], longitude=_ORIGIN[1], heading_deg=0.0, relative_altitude=8.0,
+    )
+    sm = _make_sm(nav)
+    f = _field(30.0, 100.0, 0.0)
+    sm._search_field = f
+    sm._search_points = [SearchPoint(15.0, 5.0), SearchPoint(15.0, 95.0)]
+    sm._search_idx = 0
+    sm._search_yaw_deg = 0.0   # SITL alanı kuzeye hizalı → 0°
+
+    sm._advance_search()
+
+    kwargs = nav.goto_global.call_args[1]
+    assert kwargs.get("yaw_deg") == 0.0
 
 
 def test_advance_search_uses_field_gps():
@@ -241,8 +445,6 @@ def test_advance_search_uses_field_gps():
     )
     sm = MissionStateMachine(navigation=nav, camera=MagicMock(), payload=MagicMock(),
                              logger=logging.getLogger("t"))
-    # Alan içi basit bir rota kur
-    from search.coverage_planner import CompetitionField
     f = _field(30.0, 100.0, 0.0)
     sm._search_field = f
     sm._search_points = [SearchPoint(5.0, 5.0), SearchPoint(5.0, 95.0)]
@@ -253,23 +455,12 @@ def test_advance_search_uses_field_gps():
     expected_lat, expected_lon = f.local_to_gps(5.0, 5.0)
     nav.goto_global.assert_called_once()
     args = nav.goto_global.call_args[0]
-    kwargs = nav.goto_global.call_args[1]
     assert args[0] == pytest.approx(expected_lat, abs=1e-6)
     assert args[1] == pytest.approx(expected_lon, abs=1e-6)
-    # Arama irtifası = TAKEOFF_ALTITUDE (11.5m); yaw kurulmamışsa gönderilmez
     assert args[2] == pytest.approx(TAKEOFF_ALTITUDE)
-    assert kwargs.get("yaw_deg") is None
 
 
-# ── 9) SEARCH_SPEED_MPS config'ten gelir; yalnızca search'te geçerli ──────── #
-def _make_sm(nav):
-    from state_machine import MissionStateMachine
-
-    return MissionStateMachine(navigation=nav, camera=MagicMock(),
-                               payload=MagicMock(),
-                               logger=logging.getLogger("t"))
-
-
+# ── Search hızı ───────────────────────────────────────────────────────────── #
 def test_search_speed_config_drives_nav(monkeypatch):
     """SEARCH_SPEED_MPS değişince set_max_speed de değişmeli (8.0 → 12.0)."""
     import state_machine as sm_mod
@@ -300,81 +491,7 @@ def test_search_speed_not_applied_before_search():
         "kurulumda search hızı uygulanmamalı"
 
 
-# ── 10) İlk search — takeoff referansı + TEK GEÇİŞ (kırmızı üçgen) ────────── #
-def test_first_search_uses_takeoff_reference():
-    """İlk arama (kırmızı üçgen): launch referansı kullanılır; rota en yakın
-    KISA KENAR ORTASINDAN karşı kısa kenara TEK GEÇİŞTİR."""
-    from config import COMPETITION_CORNERS
-
-    field = CompetitionField(COMPETITION_CORNERS)
-    # Alan İÇİNDE, sol yarıda bir launch (kısa kenar seçimi deterministik)
-    launch_lat, launch_lon = field.local_to_gps(
-        field.width_m * 0.4, field.length_m * 0.4,
-    )
-    nav = MagicMock()
-    nav.fresh_position.return_value = MagicMock(
-        latitude=launch_lat, longitude=launch_lon,
-    )
-    sm = _make_sm(nav)
-    sm._init_search()
-    # Referans = takeoff GPS
-    assert sm._search_origin_lat == pytest.approx(launch_lat, abs=1e-9)
-    assert sm._search_origin_lon == pytest.approx(launch_lon, abs=1e-9)
-    # TEK GEÇİŞ rotası: en yakın kısa kenar ortası → karşı kısa kenar ortası
-    m1, m2 = field.short_edge_midpoints_local()
-    assert [(p.x_m, p.y_m) for p in sm._search_points] == [m1, m2]
-    # Arama hızı uygulanır
-    assert nav.set_max_speed.call_count == 1
-    # Yaw: kısa kenara dik (tarama yönü)
-    expected_yaw = field.width_heading_deg() if field.width_m > field.length_m \
-        else field.length_heading_deg()
-    assert sm._search_yaw_deg == pytest.approx(expected_yaw)
-
-
-def test_init_search_far_short_edge_flips_yaw():
-    """Başlangıç kısa kenarı uzak taraftaysa yaw 180° çevrilir — İHA uzak
-    kenara değil tarama yönüne bakar (gerçek alan: C-D kısa kenarı)."""
-    from config import COMPETITION_CORNERS
-
-    field = CompetitionField(COMPETITION_CORNERS)
-    # C-D kısa kenarına yakın (sağ yarı, x > W/2) bir launch
-    launch_lat, launch_lon = field.local_to_gps(
-        field.width_m * 0.9, field.length_m * 0.5,
-    )
-    nav = MagicMock()
-    nav.fresh_position.return_value = MagicMock(
-        latitude=launch_lat, longitude=launch_lon,
-    )
-    sm = _make_sm(nav)
-    sm._init_search()
-    # En yakın kısa kenar C-D → başlangıç (W, L/2); yaw = genişlik yönü + 180°
-    m1, m2 = field.short_edge_midpoints_local()
-    assert [(p.x_m, p.y_m) for p in sm._search_points] == [m2, m1]
-    expected_yaw = (field.width_heading_deg() + 180.0) % 360.0 \
-        if field.width_m > field.length_m else field.length_heading_deg()
-    assert sm._search_yaw_deg == pytest.approx(expected_yaw)
-
-
-def test_advance_search_sends_yaw():
-    """Tek geçiş yaw hedefi (kısa kenara dik) goto_global'e iletilir."""
-    nav = MagicMock()
-    nav.position.return_value = MagicMock(
-        latitude=_ORIGIN[0], longitude=_ORIGIN[1], heading_deg=0.0, relative_altitude=8.0,
-    )
-    sm = _make_sm(nav)
-    f = _field(30.0, 100.0, 0.0)
-    sm._search_field = f
-    sm._search_points = [SearchPoint(15.0, 5.0), SearchPoint(15.0, 95.0)]
-    sm._search_idx = 0
-    sm._search_yaw_deg = 0.0   # SITL alanı kuzeye hizalı → 0°
-
-    sm._advance_search()
-
-    kwargs = nav.goto_global.call_args[1]
-    assert kwargs.get("yaw_deg") == 0.0
-
-
-# ── 11) İkinci search — ilk payload drop referansı ────────────────────────── #
+# ── İlk / ikinci search referansı ─────────────────────────────────────────── #
 def _enter_second_search(sm, drop_lat, drop_lon, nav):
     """İrtifa beklemesini tamamlanmış sayıp _do_ascend_after_first_release çalıştır."""
     from config import TAKEOFF_ALTITUDE
@@ -388,14 +505,12 @@ def _enter_second_search(sm, drop_lat, drop_lon, nav):
 
 
 def test_second_search_uses_first_drop_reference():
-    """İkinci arama (mavi altıgen): DROP konumu referans alınır; aynı TEK GEÇİŞ
-    geometrisi kurulur (en yakın kısa kenar ortası → karşı kısa kenar)."""
+    """İkinci arama: DROP konumu referans alınır; rota yine FOV tabanlı 3 line."""
     from config import COMPETITION_CORNERS
     from models import MissionState, Target, TargetColor, TargetType
 
     field = CompetitionField(COMPETITION_CORNERS)
     takeoff_lat, takeoff_lon = field.local_to_gps(12.0, 5.0)
-    # Drop: sağ yarıda (x > W/2) → en yakın kısa kenar C-D
     drop_lat, drop_lon = field.local_to_gps(
         field.width_m * 0.9, field.length_m * 0.5,
     )
@@ -412,22 +527,17 @@ def test_second_search_uses_first_drop_reference():
     _enter_second_search(sm, drop_lat, drop_lon, nav)
 
     assert sm.data.state == MissionState.SEARCHING_SECOND_TARGET
-    # Referans DROP konumu olmalı — TAKEOFF değil
     assert sm._search_origin_lat == pytest.approx(drop_lat, abs=1e-9)
     assert sm._search_origin_lon == pytest.approx(drop_lon, abs=1e-9)
     assert sm._search_origin_lat != pytest.approx(takeoff_lat, abs=1e-9)
     assert sm._search_origin_lon != pytest.approx(takeoff_lon, abs=1e-9)
-    # Drop sağ yarıda → en yakın kısa kenar C-D → (W, L/2) → (0, L/2)
-    m1, m2 = field.short_edge_midpoints_local()
-    assert [(p.x_m, p.y_m) for p in sm._search_points] == [m2, m1]
-    expected_yaw = (field.width_heading_deg() + 180.0) % 360.0 \
-        if field.width_m > field.length_m else field.length_heading_deg()
-    assert sm._search_yaw_deg == pytest.approx(expected_yaw)
+    assert len(sm._search_points) == 6
+    assert sm._search_yaw_deg == pytest.approx(field.search_direction_deg())
 
 
 @pytest.mark.parametrize("dx,dy", [(2.0, 5.0), (10.0, 8.0), (28.0, 14.0)])
 def test_second_search_different_drop_positions(dx, dy):
-    """Farklı drop konumları → en yakın kısa kenarın ORTASINDAN TEK GEÇİŞ."""
+    """Farklı drop konumları → rota AYNI (konumdan bağımsız 3 line), içeride."""
     from config import COMPETITION_CORNERS
     from models import MissionState, Target, TargetColor, TargetType
 
@@ -445,18 +555,13 @@ def test_second_search_different_drop_positions(dx, dy):
     assert sm.data.state == MissionState.SEARCHING_SECOND_TARGET
     assert sm._search_origin_lat == pytest.approx(drop_lat, abs=1e-9)
     assert sm._search_origin_lon == pytest.approx(drop_lon, abs=1e-9)
-    # En yakın kısa kenarın ORTASI → karşı kısa kenar (tek geçiş)
-    start = field.nearest_short_edge_midpoint_local(dx, dy)
-    m1, m2 = field.short_edge_midpoints_local()
-    end = m2 if start == m1 else m1
-    assert [(p.x_m, p.y_m) for p in sm._search_points] == [start, end]
-    # Tüm waypoint'ler yarışma alanı içinde kalmalı
+    assert len(sm._search_points) == 6
+    poly = list(field.corner_local().values())
     for p in sm._search_points:
-        assert field.contains_local(p.x_m, p.y_m), \
+        assert point_in_polygon(p.x_m, p.y_m, poly), \
             f"ikinci search waypoint'i alan dışında: ({p.x_m:.1f}, {p.y_m:.1f})"
 
 
-# ── 12) Heading bağımsızlığı ──────────────────────────────────────────────── #
 def test_search_route_heading_independent():
     """İHA heading'i değişse bile search rotası aynı kalmalı (dünya sabiti frame)."""
     from config import COMPETITION_CORNERS
@@ -477,7 +582,6 @@ def test_search_route_heading_independent():
     assert routes[0] == routes[1] == routes[2] == routes[3]
 
 
-# ── 13) İlk drop konumu yoksa sessizce yanlış başlangıç yapma ─────────────── #
 def test_second_search_missing_drop_goes_rtl():
     from models import MissionState
 
@@ -492,11 +596,10 @@ def test_second_search_missing_drop_goes_rtl():
     assert sm._search_field is None
 
 
-# ── 14) Search hızı her search girişinde aynı ─────────────────────────────── #
 def test_first_and_second_search_use_same_speed(monkeypatch):
     """SEARCH #1 ve SEARCH #2 aynı SEARCH_SPEED_MPS değerini kullanmalı."""
     import state_machine as sm_mod
-    from config import COMPETITION_CORNERS, TAKEOFF_ALTITUDE
+    from config import COMPETITION_CORNERS
     from models import Target, TargetColor, TargetType
 
     monkeypatch.setattr(sm_mod, "SEARCH_SPEED_MPS", 8.0)
@@ -528,18 +631,17 @@ def test_first_and_second_search_use_same_speed(monkeypatch):
 
 
 def test_return_search_restores_speed_first_target():
-    """Birinci hedef aranırken yaklaşma fazından dönüş → SEARCH_SPEED_MPS geri gelir."""
+    """İlk hedef aranırken hizalama fazından dönüş → SEARCH_SPEED_MPS geri gelir."""
     import state_machine as sm_mod
-    from config import APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS
+    from config import ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS
     from models import MissionState
 
     nav = MagicMock()
     sm = _make_sm(nav)
-    sm.data.state = MissionState.SEARCHING_FIRST_TARGET
     sm.data.first_target = None
+    sm.data.state = MissionState.APPROACHING_TARGET
 
-    # Yaklaşma fazı hızı düşürdü (senaryo simülasyonu)
-    nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
+    nav.set_max_speed(ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS)
     nav.set_max_speed.reset_mock()
 
     sm._return_search()
@@ -567,7 +669,6 @@ def test_return_search_restores_speed_second_target():
     )
     sm.data.state = MissionState.SEARCHING_SECOND_TARGET
 
-    # Hizalama fazı hızı düşürdü (0.8 m/s — ikinci search'teki yavaşlama senaryosu)
     nav.set_max_speed(ALIGN_SPEED_MPS, VERTICAL_SPEED_MPS)
     nav.set_max_speed.reset_mock()
 
@@ -579,7 +680,7 @@ def test_return_search_restores_speed_second_target():
     assert args[1] == VERTICAL_SPEED_MPS
 
 
-# ── 15) En yakın KISA KENAR orta noktası — alan içi / dışı / sınır ──────────── #
+# ── Geriye dönük kısa-kenar geometrisi (korunan API) ───────────────────────── #
 def test_short_edges_wide_field_are_width_edges():
     """30x100 alan: genişlik (30m) KISA → kısa kenar orta noktaları y=0 ve y=L."""
     f = _field(30.0, 100.0, 0.0)
@@ -588,104 +689,26 @@ def test_short_edges_wide_field_are_width_edges():
 
 
 def test_short_edges_tall_field_are_length_edges():
-    """Gerçek alan gibi uzunluğu kısa olan alan (100x30): kısa kenarlar x=0 ve x=W
-    (A-B ve C-D) — 'kısa' olmak varsayılmaz, kenar uzunluklarından bulunur."""
+    """Uzunluğu kısa olan alan (100x30): kısa kenarlar x=0 ve x=W (A-B ve C-D)."""
     f = _field(100.0, 30.0, 0.0)
     assert f.short_edge_midpoints_local()[0] == pytest.approx((0.0, 15.0))
     assert f.short_edge_midpoints_local()[1] == pytest.approx((100.0, 15.0))
 
 
-def test_nearest_short_edge_inside_field():
-    """Test 1 — polygon İÇİNDE: en yakın kısa kenarın orta noktası seçilir."""
-    f = _field(30.0, 100.0, 0.0)
-    assert f.nearest_short_edge_midpoint_local(15.0, 10.0) == pytest.approx((15.0, 0.0))
-    assert f.nearest_short_edge_midpoint_local(15.0, 90.0) == pytest.approx((15.0, 100.0))
-
-
-def test_nearest_short_edge_outside_near_ab():
-    """Test 2 — alan DIŞINDA, A-B kısa kenarına yakın → A-B orta noktası seçilir."""
-    f = _field(100.0, 30.0, 0.0)   # A-B = x=0 kenarı (kısa)
-    # Alanın batısında, A-B'ye yakın
-    assert f.nearest_short_edge_midpoint_local(-40.0, 15.0) == pytest.approx((0.0, 15.0))
-
-
-def test_nearest_short_edge_outside_near_cd():
-    """Test 3 — alan DIŞINDA, C-D kısa kenarına yakın → C-D orta noktası seçilir."""
-    f = _field(100.0, 30.0, 0.0)   # C-D = x=W kenarı (kısa)
-    # Alanın doğusunda, C-D'ye yakın
-    assert f.nearest_short_edge_midpoint_local(140.0, 15.0) == pytest.approx((100.0, 15.0))
-
-
-def test_nearest_short_edge_outside_different_distances():
-    """Test 4 — alan dışında farklı mesafeler: GERÇEKTEN en yakın kısa kenar seçilir."""
-    f = _field(100.0, 30.0, 0.0)
-    # x < W/2 → A-B; x > W/2 → C-D; eşitlik (x == W/2) → ilk aday (A-B)
-    assert f.nearest_short_edge_midpoint_local(45.0, 15.0) == pytest.approx((0.0, 15.0))
-    assert f.nearest_short_edge_midpoint_local(55.0, 15.0) == pytest.approx((100.0, 15.0))
-    assert f.nearest_short_edge_midpoint_local(50.0, 15.0) == pytest.approx((0.0, 15.0))
-    # Geniş alanda (30x100) seçim y eksenine bağlıdır
-    f2 = _field(30.0, 100.0, 0.0)
-    assert f2.nearest_short_edge_midpoint_local(15.0, -40.0) == pytest.approx((15.0, 0.0))
-    assert f2.nearest_short_edge_midpoint_local(15.0, 140.0) == pytest.approx((15.0, 100.0))
-
-
-def test_nearest_short_edge_on_boundary():
-    """Test 5 — polygon SINIRI / kısa kenar üzerinde başlangıç sorunsuz çalışır."""
-    f = _field(100.0, 30.0, 0.0)
-    assert f.nearest_short_edge_midpoint_local(0.0, 15.0) == pytest.approx((0.0, 15.0))
-    assert f.nearest_short_edge_midpoint_local(100.0, 15.0) == pytest.approx((100.0, 15.0))
-    f2 = _field(30.0, 100.0, 0.0)
-    assert f2.nearest_short_edge_midpoint_local(15.0, 0.0) == pytest.approx((15.0, 0.0))
-    assert f2.nearest_short_edge_midpoint_local(15.0, 100.0) == pytest.approx((15.0, 100.0))
-
-
 def test_real_competition_corners_short_edges():
-    """Test 6 — GERÇEK COMPETITION_CORNERS: kısa kenarlar A-B ve C-D'dir.
-
-    Gerçek alan: uzunluk (A-B yönü) ~17m < genişlik (A-D yönü) ~32m → A-B ve
-    C-D fiziksel olarak KISA kenarlardır. Orta noktaları GPS'te ilgili köşe
-    çiftlerinin tam ortasında olmalıdır.
-    """
+    """GERÇEK COMPETITION_CORNERS: kısa kenarlar A-B ve C-D'dir (~17m < ~32m)."""
     from config import COMPETITION_CORNERS
 
     field = CompetitionField(COMPETITION_CORNERS)
-    assert field.length_m < field.width_m, (
-        f"A-B/C-D kısa kenar olmalı: length={field.length_m:.2f}m < "
-        f"width={field.width_m:.2f}m"
-    )
+    assert field.length_m < field.width_m
     m1, m2 = field.short_edge_midpoints_local()
-    # A-B kenarı orta noktası: (0, L/2) local → GPS = A ile B'nin ortası
     lat, lon = field.local_to_gps(*m1)
     a = COMPETITION_CORNERS["A"]
     b = COMPETITION_CORNERS["B"]
     assert lat == pytest.approx((a[0] + b[0]) / 2.0, abs=1e-6)
     assert lon == pytest.approx((a[1] + b[1]) / 2.0, abs=1e-6)
-    # C-D kenarı orta noktası: (W, L/2) local → GPS = C ile D'nin ortası.
-    # Gerçek alan TAM dikdörtgen değildir (küçük açı hatası ~2m), bu yüzden
-    # tolerans A-B'ye göre gevşektir — amaç köşe çiftinin ORTASINA yakınlık.
     lat2, lon2 = field.local_to_gps(*m2)
     c = COMPETITION_CORNERS["C"]
     d = COMPETITION_CORNERS["D"]
     assert lat2 == pytest.approx((c[0] + d[0]) / 2.0, abs=5e-5)
     assert lon2 == pytest.approx((c[1] + d[1]) / 2.0, abs=5e-5)
-
-
-def test_init_search_outside_field_starts_at_nearest_short_edge_midpoint():
-    """İHA alan DIŞINDA ve kısa kenarlardan birine yakınsa search o kenarın
-    ORTASINDAN başlar (abort yok) — alan batısı → A-B orta noktası."""
-    from config import COMPETITION_CORNERS
-    from models import MissionState
-    from state_machine import MissionStateMachine
-
-    field = CompetitionField(COMPETITION_CORNERS)
-    # Alanın BATISINDA (x < 0), A-B kısa kenarına yakın bir konum
-    west_lat, west_lon = field.local_to_gps(-50.0, field.length_m / 2.0)
-    nav = MagicMock()
-    nav.fresh_position.return_value = MagicMock(latitude=west_lat, longitude=west_lon)
-    sm = MissionStateMachine(navigation=nav, camera=MagicMock(), payload=MagicMock(),
-                             logger=logging.getLogger("t"))
-    sm._init_search()
-    assert sm.data.state != MissionState.RTL
-    assert sm.data.mission_failed is False
-    m1, m2 = field.short_edge_midpoints_local()   # gerçek alan: (0, L/2), (W, L/2)
-    assert [(p.x_m, p.y_m) for p in sm._search_points] == [m1, m2]

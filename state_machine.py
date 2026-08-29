@@ -75,6 +75,7 @@ from config import (
     RTL_DISARM_TIMEOUT_S,
     RTL_PREVIEW_HZ,
     SEARCH_SPEED_MPS,
+    SEARCH_FOV_WIDTH_M,
     STATE_TIMEOUT,
     TARGET_APPROACH_ALTITUDE,
     TAKEOFF_ALTITUDE,
@@ -98,7 +99,7 @@ from models import (
     TargetType,
 )
 from payload.payload_controller import PayloadController
-from search.coverage_planner import CompetitionField, SearchPoint
+from search.coverage_planner import CompetitionField, LawnmowerPlanner
 from vision.camera import CameraLike
 from vision.geometry import CameraModel, expected_payload_pixels
 from vision.payload_detector import PayloadDetector
@@ -690,20 +691,24 @@ class MissionStateMachine:
 
         reference_lat/lon verilirse O GPS referans alınır — ikinci search,
         launch konumu yerine İLK PAYLOAD BIRAKMA konumundan başlar. Verilmezse
-        İHA'nın o anki GPS'i (launch) kullanılır.
+        İHA'nın o anki GPS'i (launch) kullanılır. Referans yalnızca log/izleme
+        içindir — rota konumdan BAĞIMSIZDIR (saf alan geometrisi).
 
-        Her iki hedef araması da TEK GEÇİŞ (single_pass) geometrisini kullanır:
-        en yakın KISA KENARIN ORTASINA gidilir, yaw ile kısa kenara dik yapılır
-        ve karşı kısa kenara tek düz geçişle taranır. Arama irtifası =
-        TAKEOFF_ALTITUDE (11.5m). Lawnmower/boustrophedon mission flow'da
-        KULLANILMAZ (algoritma search/coverage_planner.py'de korunur).
+        Her iki hedef araması da FOV tabanlı 3 uzun search line kullanır
+        (LawnmowerPlanner):
+          - Kenar uzunlukları GERÇEK GPS köşelerinden hesaplanır (30×100
+            varsayımı YOK); line'lar UZUN kenarlara paraleldir.
+          - İlk/son line uzun kenarlardan SEARCH_FOV_WIDTH_M/2 (6.490 m)
+            İÇERİDEDİR — kameranın görüş dış sınırı alan kenarına oturur,
+            alan dışı gereksiz görüş olmaz. Orta line arayı dengeler.
+          - Line uçları gerçek dörtgen sınırıyla kesişir (alan dışı waypoint
+            YOK).
+          - Sıra zig-zag (→ ← →): İHA yaw yapmadan ileri/geri hareket eder
+            (doğrultu sabit).
 
-        1. Referans GPS → competition frame'e çevrilir.
-        2. İki KISA kenar GERÇEK kenar uzunluklarından belirlenir (varsayım
-           yok) ve referansa en yakın olanın ORTASI başlangıç waypoint'i olur.
-        3. Referans alan DIŞINDA olsa bile aynı mantık çalışır — abort/hataya
-           düşülmez: İHA önce en yakın kısa kenar ortasına uçar, sonra alanı
-           tarar (alan dışı başlangıç özel durum değildir).
+        Referans alan DIŞINDA olsa bile aynı mantık çalışır — abort/hataya
+        düşülmez: İHA önce ilk search line'ın başlangıcına uçar, sonra alanı
+        tarar (alan dışı başlangıç özel durum değildir).
         """
         self._search_count += 1
         if reference_lat is None or reference_lon is None:
@@ -717,52 +722,34 @@ class MissionStateMachine:
         field = CompetitionField(COMPETITION_CORNERS)
         lx, ly = field.gps_to_local(ref_lat, ref_lon)
         if not field.contains_local(lx, ly):
-            # Abort DEĞİL: İHA alan dışında başlayabilir. Tek geçiş rotası
-            # zaten en yakın kısa kenar ORTASINDAN başladığı için aynı mantık
-            # geçerlidir — önce o noktaya uçulur, ardından alan taranır.
+            # Abort DEĞİL: İHA alan dışında başlayabilir. Rota alan geometrisine
+            # bağlı olduğu için konumdan bağımsız çalışır — önce ilk line'a
+            # uçulur, ardından alan taranır.
             self.log.warning(
                 "Search referansı competition alanı DIŞINDA: "
                 "GPS=(%.7f, %.7f) local=(%.1f, %.1f) — alan [0..%.0f]x[0..%.0f] m. "
-                "En yakın kısa kenar ortasından taramaya başlanacak.",
+                "İlk search line'ından taramaya başlanacak.",
                 ref_lat, ref_lon, lx, ly,
                 field.width_m, field.length_m,
             )
 
-        # ── Tek geçiş (single_pass): en yakın KISA KENARIN ORTASI → karşı kısa kenar ──
-        # Kısa kenarlar GERÇEK uzunluklarından belirlenir (alan yönüne göre
-        # genişlik kenarları veya uzunluk kenarları olabilir). Referansın iki
-        # kısa kenar orta noktasına olan GERÇEK mesafesi karşılaştırılır; en
-        # yakın olanın ORTASINDAN tarama başlar. Referans içeride/dışarıda
-        # fark etmez — aynı geometri.
-        m1, m2 = field.short_edge_midpoints_local()
-        start_x, start_y = field.nearest_short_edge_midpoint_local(lx, ly)
-        end_x, end_y = m2 if (start_x, start_y) == m1 else m1
-        start = SearchPoint(start_x, start_y)
-        end = SearchPoint(end_x, end_y)
-        self._search_points = [start, end]
-        # Yaw: kısa kenara DİK (tarama yönü). Uzak kenara bakacak şekilde
-        # başlangıç kenarına göre 180° çevrilir.
-        if field.width_m <= field.length_m:
-            # Kısa kenar = genişlik kenarları → tarama uzunluk ekseninde.
-            heading = field.length_heading_deg()
-            if start_y > 0.0:
-                heading = (heading + 180.0) % 360.0
-        else:
-            # Kısa kenar = uzunluk kenarları (A-B/C-D) → tarama genişlik ekseninde.
-            heading = field.width_heading_deg()
-            if start_x > 0.0:
-                heading = (heading + 180.0) % 360.0
-        self._search_yaw_deg = heading
+        # ── 3 uzun search line (FOV tabanlı lawnmower) ──────────────────────
+        planner = LawnmowerPlanner(field, SEARCH_FOV_WIDTH_M)
+        self._search_points = planner.generate()
+        self._search_yaw_deg = field.search_direction_deg()
         self._search_field = field
         self._search_idx = 0
         # SEARCH_SPEED_MPS — yalnızca search rotasında geçerli (config'ten).
         self.nav.set_max_speed(SEARCH_SPEED_MPS, VERTICAL_SPEED_MPS)
+        self.log.debug("Search planner: %s", planner.debug_summary())
         start = self._search_points[0] if self._search_points else None
         self.log.info(
-            "SEARCH #%d başlatıldı (single_pass, %.1fm): %d nokta | "
+            "SEARCH #%d başlatıldı (FOV=%.3fm, %d line, %.1fm): %d waypoint | "
             "referans GPS=(%.7f, %.7f) local=(%.1f, %.1f) | "
             "ilk waypoint local=(%.1f, %.1f) | hız=%.1f m/s | yaw=%.1f°",
-            self._search_count, TAKEOFF_ALTITUDE, len(self._search_points),
+            self._search_count, SEARCH_FOV_WIDTH_M,
+            len(self._search_points) // 2, TAKEOFF_ALTITUDE,
+            len(self._search_points),
             ref_lat, ref_lon, lx, ly,
             start.x_m if start else 0.0, start.y_m if start else 0.0,
             SEARCH_SPEED_MPS, self._search_yaw_deg,

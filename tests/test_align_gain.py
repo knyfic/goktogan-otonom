@@ -67,6 +67,56 @@ def _mpp_x(alt_m: float) -> float:
     return w / _FW
 
 
+def _north_east_offset(dx_px: float, dy_px: float, alt_m: float, heading_deg: float):
+    """align_detection'ın gönderdiği hedefin NED (kuzey/doğu metre) offseti.
+
+    Rotasyonun body → NED doğruluğunu sıfır olmayan heading'lerde test etmek
+    için — TBE (toilet bowl) ancak bu dönüşüm yanlışsa oluşur.
+    """
+    nav = MagicMock()
+    nav.position.return_value = MagicMock(
+        latitude=41.0, longitude=28.9, heading_deg=heading_deg,
+    )
+    pc = PositionController(nav, _CAM)
+    pc.align_detection(_CX + dx_px, _CY + dy_px, _FW, _FH, alt_m)
+    args = nav.goto_global.call_args[0]
+    north = (args[0] - 41.0) * math.pi / 180.0 * _EARTH_R
+    east = (args[1] - 28.9) * math.pi / 180.0 * _EARTH_R * math.cos(math.radians(41.0))
+    return north, east
+
+
+def test_body_to_ned_rotation_heading_east():
+    """İHA DOĞUYA bakarken (yaw=90°): image'da SAĞDAKİ hedef fiziksel olarak
+    GÜNEYDE olmalı (kuzey negatif), image'da ÜSTTEKİ (dy<0, ilerideki) hedef
+    DOĞUDA olmalı — rotasyon vücut eksenini doğru NED frame'e çevirir."""
+    alt = 3.0
+    north_r, east_r = _north_east_offset(60.0, 0.0, alt, 90.0)   # hedef SAĞDA
+    assert north_r < 0, "yaw=90'da sağdaki hedef güneyde olmalı"
+    assert abs(east_r) < abs(north_r) * 0.05, "saf sağ hatası doğu üretmemeli"
+    north_f, east_f = _north_east_offset(0.0, -60.0, alt, 90.0)  # hedef ÜSTTE/İLERİDE
+    assert east_f > 0, "yaw=90'da ilerideki hedef doğuda olmalı"
+    assert abs(north_f) < abs(east_f) * 0.05
+
+
+def test_body_to_ned_rotation_heading_west():
+    """İHA BATIYA bakarken (yaw=270°): image'da SAĞDAKİ hedef KUZEYDE olmalı."""
+    alt = 3.0
+    north_r, east_r = _north_east_offset(60.0, 0.0, alt, 270.0)
+    assert north_r > 0, "yaw=270'de sağdaki hedef kuzeyde olmalı"
+    assert abs(east_r) < abs(north_r) * 0.05
+
+
+def test_body_to_ned_rotation_all_headings_forward():
+    """Her heading'de SAF İLERİ (image üstü, dy<0) hatası, İHA'nın baktığı
+    yönde NED offset üretir — rotasyon matrisi heading'den bağımsız doğrudur."""
+    alt = 3.0
+    for heading in (0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0):
+        north, east = _north_east_offset(0.0, -60.0, alt, heading)
+        ang = math.degrees(math.atan2(east, north)) % 360.0
+        assert ang == pytest.approx(heading % 360.0, abs=1.0), \
+            f"heading={heading}: ileri hata {ang:.1f}° yönünde offset üretmeli"
+
+
 def _legacy_step(err_px: float, alt_m: float) -> float:
     """ESKİ (mod eşiği altı) hesap: sabit ALIGN_GAIN, adım sınırı yok."""
     return err_px * _mpp_x(alt_m) * ALIGN_GAIN

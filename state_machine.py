@@ -166,6 +166,12 @@ class MissionStateMachine:
         self._search_origin_lon: float | None = None
         # Tek geçiş (single_pass) yaw hedefi: kısa kenara dik (uzun eksen yönü).
         self._search_yaw_deg: float | None = None
+        # False-positive/timeout sonrası search line'ına dönüş noktası: İHA'nın
+        # search'ten ayrıldığı (hedef tespit ettiği) andaki konumu — arama
+        # çizgisi üzerindedir. Set edildiyse _advance_search önce bu noktaya
+        # uçar, sonra kaldığı waypoint'ten taramaya devam eder (ray kaymaz).
+        self._search_resume_lat: float | None = None
+        self._search_resume_lon: float | None = None
 
         # ---- Non-blocking irtifa bekleme ----
         self._alt_target: float | None = None
@@ -194,6 +200,14 @@ class MissionStateMachine:
         # ---- Tespit kayıp sayacı: kaç tick üst üste tespit yok ----
         self._no_detection_count: int = 0
         self._NO_DETECTION_LIMIT: int = 25  # ~0.5s @ 50Hz — komut işleme süresi için tolerans
+
+        # ---- False-positive recovery timeout ----
+        # Hedef son gerçekten görüldüğü andan bu kadar saniye geçtiyse (kaba
+        # GPS'e dönme döngüsü hiç sonuçlanmazsa) muhtemel false-positive kabul
+        # edilir; search pattern'ine (_search_idx/_search_points korunarak,
+        # baştan başlamadan) geri dönülür.
+        self._last_target_seen_t: float | None = None
+        self._TARGET_LOST_TIMEOUT_S: float = 10.0
 
         # ---- Hedef kilidi: ilk kararlı tespitte belirlenir ----
         # Görev boyunca aynı türe odaklanmak için kullanılır.
@@ -739,6 +753,9 @@ class MissionStateMachine:
         self._search_yaw_deg = field.search_direction_deg()
         self._search_field = field
         self._search_idx = 0
+        # Yeni tarama pattern'i: eski ayrılma noktası geçersiz
+        self._search_resume_lat = None
+        self._search_resume_lon = None
         # SEARCH_SPEED_MPS — yalnızca search rotasında geçerli (config'ten).
         self.nav.set_max_speed(SEARCH_SPEED_MPS, VERTICAL_SPEED_MPS)
         self.log.debug("Search planner: %s", planner.debug_summary())
@@ -758,6 +775,25 @@ class MissionStateMachine:
     def _advance_search(self) -> None:
         if not self._search_points or self._search_field is None:
             return
+
+        # False-positive/timeout sonrası: arama çizgisinden ayrılınmıştı —
+        # önce AYRILMA NOKTASINA (search line üzerinde) dön; oraya varınca
+        # kaldığı waypoint'ten taramaya devam et. Böylece çizgi/ray kaymaz,
+        # taranmamış bölüm atlanmaz ve baştan başlanmaz.
+        if self._search_resume_lat is not None and self._search_resume_lon is not None:
+            r_lat, r_lon = self._search_resume_lat, self._search_resume_lon
+            pos = self.nav.position()
+            if haversine_m(pos.latitude, pos.longitude, r_lat, r_lon) < 3.0:
+                self._search_resume_lat = None
+                self._search_resume_lon = None
+                self.log.info(
+                    "Search line'ına geri dönüldü — kaldığı yerden taramaya devam."
+                )
+            else:
+                self.nav.goto_global(r_lat, r_lon, TAKEOFF_ALTITUDE,
+                                     yaw_deg=self._search_yaw_deg)
+                return
+
         if self._search_idx >= len(self._search_points):
             self._search_idx = 0
             self.log.warning("Search rotası tamamlandı, başa dönüyor.")
@@ -948,6 +984,11 @@ class MissionStateMachine:
             rough = self.nav.position()
             self._target_rough_lat = rough.latitude
             self._target_rough_lon = rough.longitude
+            # Search'ten ayrılma noktası (İHA şu an arama çizgisi üzerinde):
+            # hedef false-positive çıkarsa 10s sonra bu noktaya dönülür.
+            self._search_resume_lat = rough.latitude
+            self._search_resume_lon = rough.longitude
+            self._last_target_seen_t = time.monotonic()
             self.data.pending_detection = stable
             self._goto(MissionState.TARGET_DETECTED)
             return
@@ -1300,6 +1341,7 @@ class MissionStateMachine:
             if tracked is not None:
                 self.data.pending_detection = tracked
                 self._no_detection_count = 0
+                self._last_target_seen_t = time.monotonic()
                 p = self.nav.position()
                 self._target_rough_lat = p.latitude
                 self._target_rough_lon = p.longitude
@@ -1314,6 +1356,7 @@ class MissionStateMachine:
                 if picked is not None:
                     self.data.pending_detection = picked
                     self._no_detection_count = 0
+                    self._last_target_seen_t = time.monotonic()
                     p = self.nav.position()
                     self._target_rough_lat = p.latitude
                     self._target_rough_lon = p.longitude
@@ -1344,6 +1387,29 @@ class MissionStateMachine:
         # arama pattern'i kaldığı yerden devam eder (search noktaları korunur).
         if self._no_detection_count > self._NO_DETECTION_LIMIT:
             if pos.relative_altitude >= TARGET_APPROACH_ALTITUDE:
+                # False-positive timeout: hedef TARGET_LOST_TIMEOUT_S (10s)
+                # boyunca gerçekten görülmediyse kaba GPS'e dönme döngüsü
+                # (aşağıdaki _recover_to_rough_position) hiç sonuçlanmaz —
+                # muhtemel false-positive kabul edilip search pattern'ine
+                # (_search_idx/_search_points korunarak) geri dönülür.
+                if (self._last_target_seen_t is not None
+                        and time.monotonic() - self._last_target_seen_t
+                            >= self._TARGET_LOST_TIMEOUT_S):
+                    self.log.warning(
+                        "ALIGN: hedef %.0fs boyunca tekrar görülemedi "
+                        "(muhtemel false-positive) — search pattern'ine "
+                        "kaldığı yerden dönülüyor.",
+                        self._TARGET_LOST_TIMEOUT_S,
+                    )
+                    self._no_detection_count = 0
+                    self._aligned_frame_count = 0
+                    self.data.pending_detection = None
+                    self._locked_color = None
+                    self._locked_shape = None
+                    self.target_detector.history.clear()
+                    self.target_detector.reset_time_lock()
+                    self._return_search()
+                    return
                 # Search/approach irtifasında (≥4m) hedef kayboldu → İRTİFA
                 # DÜŞÜRME. Kaydedilmiş kaba GPS'e MEVCUT irtifada dön (11.5m
                 # korunur); orada yeniden ara/merkezle. (Eski davranış hedef

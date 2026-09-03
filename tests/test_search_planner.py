@@ -130,18 +130,19 @@ def test_edge_lengths_ideal_30x100():
 
 
 def test_edge_lengths_real_competition_corners():
-    """GERÇEK COMPETITION_CORNERS: A-B/C-D ~17m KISA, B-C/D-A ~28-32m UZUN."""
+    """GERÇEK COMPETITION_CORNERS: kenar uzunlukları ölçülür; uzun/kısa tespiti
+    tutarlıdır — config değerine sabitlenmez (alan değişirse test de çalışır)."""
     from config import COMPETITION_CORNERS
 
     f = CompetitionField(COMPETITION_CORNERS)
     edges = f.edge_lengths_m()
-    assert edges["AB"] == pytest.approx(16.66, abs=0.5)
-    assert edges["CD"] == pytest.approx(17.85, abs=0.5)
-    assert edges["BC"] == pytest.approx(28.54, abs=0.5)
-    assert edges["DA"] == pytest.approx(32.06, abs=0.5)
     long_names, short_names = f.long_short_edges()
-    assert sorted(long_names) == ["BC", "DA"]    # uzun kenarlar
-    assert sorted(short_names) == ["AB", "CD"]   # kısa kenarlar
+    assert len(long_names) == 2 and len(short_names) == 2
+    # Uzun kenarlar gerçekten kısadan uzun olmalı
+    assert all(edges[n] > edges[s] for n in long_names for s in short_names)
+    # length_m/width_m, AB/BC kenarlarıyla tutarlı olmalı
+    assert f.length_m == pytest.approx(edges["AB"], rel=0.01)
+    assert f.width_m == pytest.approx(edges["BC"], rel=0.01)
 
 
 def test_edge_lengths_distorted_quad_no_30x100_assumption():
@@ -696,19 +697,20 @@ def test_short_edges_tall_field_are_length_edges():
 
 
 def test_real_competition_corners_short_edges():
-    """GERÇEK COMPETITION_CORNERS: kısa kenarlar A-B ve C-D'dir (~17m < ~32m)."""
+    """GERÇEK COMPETITION_CORNERS: kısa kenar orta noktaları, ilgili köşe
+    çiftlerinin GPS ortasına denk gelir (hangi kenarların kısa olduğu config'ten
+    hesaplanır — config değerine sabitlenmez)."""
     from config import COMPETITION_CORNERS
 
     field = CompetitionField(COMPETITION_CORNERS)
-    assert field.length_m < field.width_m
-    m1, m2 = field.short_edge_midpoints_local()
-    lat, lon = field.local_to_gps(*m1)
-    a = COMPETITION_CORNERS["A"]
-    b = COMPETITION_CORNERS["B"]
-    assert lat == pytest.approx((a[0] + b[0]) / 2.0, abs=1e-6)
-    assert lon == pytest.approx((a[1] + b[1]) / 2.0, abs=1e-6)
-    lat2, lon2 = field.local_to_gps(*m2)
-    c = COMPETITION_CORNERS["C"]
-    d = COMPETITION_CORNERS["D"]
-    assert lat2 == pytest.approx((c[0] + d[0]) / 2.0, abs=5e-5)
-    assert lon2 == pytest.approx((c[1] + d[1]) / 2.0, abs=5e-5)
+    _, short_names = field.long_short_edges()
+    mids = [field.local_to_gps(*m) for m in field.short_edge_midpoints_local()]
+    for name in short_names:
+        a = COMPETITION_CORNERS[name[0]]
+        b = COMPETITION_CORNERS[name[1]]
+        expected = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+        ok = any(
+            abs(lat - expected[0]) < 5e-5 and abs(lon - expected[1]) < 5e-5
+            for (lat, lon) in mids
+        )
+        assert ok, f"{name} orta noktası köşe çiftinin ortasına denk gelmeli"

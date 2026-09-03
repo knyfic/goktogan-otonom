@@ -170,7 +170,8 @@ FIELD_LENGTH = 100.0
 #   A = alt-sol, B = üst-sol, C = üst-sağ, D = alt-sağ
 # CompetitionField (search/coverage_planner.py) bu köşelerden SABİT local frame
 # kurar; İHA'nın launch konumu runtime GPS'ten alınır ve bu frame'e çevrilir.
-# İHA alan dışında kalkarsa search başlatılmaz (RTL + hata logu).
+# İHA alan DIŞINDA kalkarsa search yine kurulur — rota konumdan bağımsızdır;
+# İHA önce ilk search line'a uçar, sonra alanı tarar (abort yok).
 #
 # Değerler SITL home'una göre düzenlenmiştir: SITL --home 41.0082,28.9784
 # alanın tam MERKEZİNE (local 15, 50) denk gelir. Gerçek yarışma alanına
@@ -193,11 +194,17 @@ FIELD_LENGTH = 100.0
 #     "C": (37.9339702, 34.6178193),
 #     "D": (37.9337222, 34.6178743),
 # }
+# COMPETITION_CORNERS = {
+#     "A": (37.9334810, 34.6174975),
+#     "B": (37.9336281, 34.6174626),
+#     "C": (37.9337180, 34.6177670),
+#     "D": (37.9335699, 34.6178448),
+# }
 COMPETITION_CORNERS = {
-    "A": (37.9334810, 34.6174975),
-    "B": (37.9336281, 34.6174626),
-    "C": (37.9337180, 34.6177670),
-    "D": (37.9335699, 34.6178448),
+    "A": (41.0080210, 28.9782215),
+    "B": (41.0089200, 28.9782215),
+    "C": (41.0089200, 28.9785785),
+    "D": (41.0080210, 28.9785785),
 }
 
 HEXAGON_SIDE_LENGTH = 2.0
@@ -300,13 +307,13 @@ SEARCH_MARGIN = 2.0
 SEARCH_FOV_WIDTH_M = 12.980
 
 # Arama sırası yatay hız
-SEARCH_SPEED_MPS = 0.5
+SEARCH_SPEED_MPS = 1.5
 # Hedefe yaklaşma hızı (kaba)
-APPROACH_SPEED_MPS = 0.5
+APPROACH_SPEED_MPS = 1.5
 # Hizalama sırası yatay hız (ince)
-ALIGN_SPEED_MPS = 0.5
+ALIGN_SPEED_MPS = 1.5
 # İrtifa değişim hızı
-VERTICAL_SPEED_MPS = 0.5
+VERTICAL_SPEED_MPS = 1.5
 # Hedef kaba GPS'ine bu yarıçaptan UZAKTAYKEN APPROACH_SPEED_MPS kullanılır;
 # yarıçapa girince ALIGN_SPEED_MPS'ye düşülüp görüntü hizalaması başlar.
 # (Eski davranış: tüm hedef transit'i 0.8 m/s'de sürünüyordu — bu kapı

@@ -11,18 +11,21 @@ Davranış (hedef kaybında İRTİFA DÜŞÜRME YOK):
   - Tespit olmadan bırakma yapılmaz (kör bırakma YOK).
 """
 import logging
+import time
 from unittest.mock import MagicMock
 
 import numpy as np
 
 from config import (
     APPROACH_SPEED_MPS,
+    COMPETITION_CORNERS,
     SEARCH_SPEED_MPS,
     TAKEOFF_ALTITUDE,
     TARGET_APPROACH_ALTITUDE,
     VERTICAL_SPEED_MPS,
 )
 from models import MissionState, Target, TargetColor, TargetType
+from search.coverage_planner import CompetitionField, SearchPoint
 from state_machine import MissionStateMachine
 
 
@@ -91,6 +94,133 @@ def test_lost_target_second_search_keeps_altitude_returns_to_rough():
     args = nav.goto_global.call_args[0]
     assert args[0] == 3.0 and args[1] == 4.0, "kaydedilmiş hedef GPS kullanılmalı"
     assert args[2] == TAKEOFF_ALTITUDE, "recovery irtifası 11.5m olmalı"
+
+
+# ── False-positive 10s timeout: kaba GPS'e dönme döngüsü süresiz değildir ─── #
+def test_lost_target_before_10s_still_recovers_to_rough():
+    """Hedef son görüldüğünden 10s DOLMADIYSA mevcut davranış (kaba GPS'e
+    dönüş) değişmez."""
+    sm, nav = _make_sm(rough_lat=2.0, rough_lon=2.0, altitude=TAKEOFF_ALTITUDE)
+    sm._no_detection_count = sm._NO_DETECTION_LIMIT + 1
+    sm._last_target_seen_t = time.monotonic() - 5.0   # 5s önce görüldü (< 10s)
+
+    sm._do_align_target()
+
+    nav.goto_global.assert_called_once()   # kaba GPS'e dönüş devam ediyor
+    assert sm.data.state == MissionState.ALIGNING_TARGET
+    assert sm._locked_color == TargetColor.RED   # kilit henüz temizlenmedi
+
+
+def test_lost_target_after_10s_returns_to_search_preserving_progress():
+    """Hedef 10s+ boyunca tekrar görülmediyse (muhtemel false-positive):
+    kaba GPS'e dönme döngüsü BİRAKILIR, search state'ine (SEARCHING_FIRST_TARGET)
+    dönülür ve mevcut search_idx/search_points/search_field DEĞİŞMEZ (baştan
+    başlamaz, kaldığı yerden devam eder)."""
+    sm, nav = _make_sm(rough_lat=2.0, rough_lon=2.0, altitude=TAKEOFF_ALTITUDE)
+    sm._no_detection_count = sm._NO_DETECTION_LIMIT + 1
+    sm._last_target_seen_t = time.monotonic() - 11.0   # 11s önce (≥ 10s)
+
+    # Search ilerlemesi zaten var olsun — değişmemeli
+    sm._search_field = object()
+    sm._search_points = [SearchPoint(5.0, 5.0), SearchPoint(5.0, 95.0)]
+    sm._search_idx = 1
+
+    sm._do_align_target()
+
+    nav.goto_global.assert_not_called()   # kaba GPS'e dönme döngüsüne GİRİLMEDI
+    assert sm.data.state == MissionState.SEARCHING_FIRST_TARGET
+    assert sm._locked_color is None and sm._locked_shape is None
+    assert sm.data.pending_detection is None
+    # Search ilerlemesi korunmalı — baştan başlamadı, sıfırlanmadı
+    assert sm._search_idx == 1
+    assert sm._search_points == [SearchPoint(5.0, 5.0), SearchPoint(5.0, 95.0)]
+
+
+def test_false_positive_timeout_resumes_from_line_leave_point():
+    """Timeout sonrası arama çizgisine dönüş: drone önce AYRILMA NOKTASINA
+    (search line üzerindeki konuma) uçar — kaldığı waypoint'e değil."""
+    sm, nav = _make_sm(rough_lat=2.0, rough_lon=2.0, altitude=TAKEOFF_ALTITUDE)
+    sm._no_detection_count = sm._NO_DETECTION_LIMIT + 1
+    sm._last_target_seen_t = time.monotonic() - 11.0
+
+    # Gerçek alan + yarıda kesilmiş search rotası (index=1 → waypoint 2'ye gidiyordu)
+    field = CompetitionField(COMPETITION_CORNERS)
+    sm._search_field = field
+    sm._search_points = [
+        SearchPoint(5.0, 5.0), SearchPoint(5.0, 60.0),
+        SearchPoint(15.0, 60.0), SearchPoint(15.0, 5.0),
+    ]
+    sm._search_idx = 1
+    sm._search_yaw_deg = field.search_direction_deg()
+    # Ayrılma noktası: 1. ve 2. waypoint ARASINDA, çizgi üzerinde
+    resume_lat, resume_lon = field.local_to_gps(5.0, 30.0)
+    sm._search_resume_lat = resume_lat
+    sm._search_resume_lon = resume_lon
+
+    sm._do_align_target()   # 10s timeout → SEARCHING_FIRST_TARGET
+    assert sm.data.state == MissionState.SEARCHING_FIRST_TARGET
+
+    # Drone uzakta (1.0, 1.0) — ilk komut AYRILMA NOKTASINA gitmeli, waypoint'e değil
+    nav.goto_global.reset_mock()
+    sm._advance_search()
+    call = nav.goto_global.call_args[0]
+    assert call[0] == pytest.approx(resume_lat, abs=1e-6), "ayrılma noktasına dönülmeli"
+    assert call[1] == pytest.approx(resume_lon, abs=1e-6)
+    assert sm._search_idx == 1, "henüz waypoint ilerletilmemeli"
+
+    # Drone ayrılma noktasına varınca → kaldığı waypoint'ten devam
+    nav.position.return_value = MagicMock(
+        relative_altitude=TAKEOFF_ALTITUDE, latitude=resume_lat, longitude=resume_lon,
+        heading_deg=0.0,
+    )
+    nav.goto_global.reset_mock()
+    sm._advance_search()
+    assert sm._search_resume_lat is None and sm._search_resume_lon is None
+    wp = sm._search_points[sm._search_idx]
+    wp_lat, wp_lon = field.local_to_gps(wp.x_m, wp.y_m)
+    call = nav.goto_global.call_args[0]
+    assert call[0] == pytest.approx(wp_lat, abs=1e-6), "kaldığı waypoint'e devam"
+    assert call[1] == pytest.approx(wp_lon, abs=1e-6)
+
+
+def test_advance_search_returns_to_resume_point_even_without_timeout():
+    """Ayrılma noktası set edildiyse (_return_search ile her dönüşte) önce oraya
+    dönülür — bu yalnızca 10s timeout'a değil, tüm search dönüşlerine uygulanır
+    (hedef kaybı/REACQUIRE/classify sonrası da çizgi korunur)."""
+    sm, nav = _make_sm(altitude=TAKEOFF_ALTITUDE)
+    sm.data.state = MissionState.SEARCHING_FIRST_TARGET
+    field = CompetitionField(COMPETITION_CORNERS)
+    sm._search_field = field
+    sm._search_points = [SearchPoint(5.0, 5.0), SearchPoint(5.0, 60.0)]
+    sm._search_idx = 1
+    sm._search_yaw_deg = field.search_direction_deg()
+    resume_lat, resume_lon = field.local_to_gps(5.0, 30.0)
+    sm._search_resume_lat = resume_lat
+    sm._search_resume_lon = resume_lon
+
+    nav.position.return_value = MagicMock(
+        relative_altitude=TAKEOFF_ALTITUDE, latitude=1.0, longitude=1.0, heading_deg=0.0,
+    )
+    nav.goto_global.reset_mock()
+    sm._advance_search()
+
+    call = nav.goto_global.call_args[0]
+    assert call[0] == pytest.approx(resume_lat, abs=1e-6)
+    assert call[1] == pytest.approx(resume_lon, abs=1e-6)
+    assert sm._search_idx == 1
+
+
+def test_lost_target_no_timeout_set_recovers_normally():
+    """_last_target_seen_t hiç set edilmediyse (ör. eski/edge davranış) mevcut
+    kaba GPS'e dönüş davranışı bozulmaz."""
+    sm, nav = _make_sm(rough_lat=2.0, rough_lon=2.0, altitude=TAKEOFF_ALTITUDE)
+    sm._no_detection_count = sm._NO_DETECTION_LIMIT + 1
+    sm._last_target_seen_t = None
+
+    sm._do_align_target()
+
+    nav.goto_global.assert_called_once()
+    assert sm.data.state == MissionState.ALIGNING_TARGET
 
 
 def test_lost_target_no_detection_never_commands_4m():

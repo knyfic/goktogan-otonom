@@ -254,3 +254,57 @@ def test_purity_is_reported_in_detection():
     """Kabul edilen tespitlerde color_purity alanı doldurulmalı."""
     dets = TargetDetector().detect(_blue_hex_img())
     assert dets and dets[0].color_purity >= 0.5
+
+
+# ── 7b: Kırmızı üçgen kadraj-kenar (decoy) koruması ────────────────────────── #
+# Yarışma alanındaki KIRMIZI KARE decoy'u kadraja kısmen girdiğinde eksik
+# kontur/perspektif nedeniyle geçici "kırmızı üçgen" gibi görünebilir. Bu yüzden
+# RED TRIANGLE yalnızca TAMAMI kadraj içinde görünüyorsa kabul edilir.
+def _red_poly_img(poly):
+    img = np.zeros((H, W, 3), dtype=np.uint8)
+    cv2.fillPoly(img, [np.asarray(poly, dtype=np.int32)], (0, 0, 255))
+    return img
+
+
+def test_red_triangle_fully_inside_accepted():
+    """Test 1 — kadrajın tamamen İÇİNDE görünen kırmızı üçgen kabul edilir
+    (kenara yakın olsa bile — 5px içeride)."""
+    dets = TargetDetector().detect(_red_poly_img([[960, 345], [750, 705], [1170, 705]]))
+    assert any(d.color == TargetColor.RED and d.shape == "TRIANGLE" for d in dets)
+    # Kenara yakın ama DEĞMEYEN üçgen de kabul (margin aşırı agresif değil)
+    dets2 = TargetDetector().detect(_red_poly_img([[5, 400], [605, 400], [5, 845]]))
+    assert any(d.color == TargetColor.RED and d.shape == "TRIANGLE" for d in dets2)
+
+
+def test_red_triangle_touching_frame_edge_rejected():
+    """Test 2 — kenara DEĞEN/kısmen kadraj dışında kalan kırmızı üçgen
+    RED TRIANGLE olarak KABUL EDİLMEZ (decoy koruması)."""
+    for poly in (
+        [[0, 400], [600, 400], [0, 850]],        # sol kenara değiyor (bx=0)
+        [[400, 0], [800, 0], [600, 450]],        # üst kenara değiyor (by=0)
+        [[W, 400], [W - 600, 400], [W, 850]],    # sağ kenara değiyor
+        [[400, H], [800, H], [600, H - 450]],    # alt kenara değiyor
+    ):
+        dets = TargetDetector().detect(_red_poly_img(poly))
+        assert not any(d.color == TargetColor.RED and d.shape == "TRIANGLE"
+                       for d in dets), f"kenara değen üçgen reddedilmeli: {poly}"
+
+
+def test_red_triangle_partial_from_corner_rejected():
+    """Test 3 — köşeden kısmen giren kırmızı nesne (üçgen görünümlü)
+    RED TRIANGLE olarak KABUL EDİLMEZ."""
+    img = _red_poly_img([[0, 0], [500, 0], [0, 450]])   # sol-üst köşede, iki kenara değiyor
+    dets = TargetDetector().detect(img)
+    assert not any(d.color == TargetColor.RED and d.shape == "TRIANGLE" for d in dets)
+
+
+def test_blue_hexagon_at_frame_edge_unchanged():
+    """Test 4 — mavi altıgen kadraj kenarında olsa bile MEVCUT davranış korunur
+    (kenar kontrolü yalnızca RED+TRIANGLE içindir)."""
+    hex_at_edge = _HEX - np.array([720, 0])   # sol kenara değecek şekilde kaydır
+    img = np.zeros((H, W, 3), dtype=np.uint8)
+    cv2.fillPoly(img, [hex_at_edge], (255, 0, 0))
+    dets = TargetDetector().detect(img)
+    assert any(d.color == TargetColor.BLUE and d.shape == "HEXAGON" for d in dets), (
+        "mavi altıgen kenar kontrolünden ETKİLENMEMELİ"
+    )

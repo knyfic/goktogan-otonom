@@ -226,7 +226,7 @@ MAX_PICKUP_ATTEMPTS = 5
 #                                 (Örn. pickup denemesi başarısız olduysa kodu
 #                                 değiştirmeden pickup'sız tekrar yarışılabilir.)
 # Varsayılan True — mevcut (pickup'lu) davranışı korur.
-ENABLE_RETURN_PICKUP = False
+ENABLE_RETURN_PICKUP = True
 
 # Payload arama: beklenen boyutun bu katını aşan tespitler payload değil hedeftir.
 # Payload 10cm kare, hedefler metre ölçeğinde olduğundan 3x lineer tolerans güvenlidir.

@@ -88,6 +88,13 @@ _VALID_TARGET_COMBINATIONS = (
     (TargetColor.RED, "TRIANGLE"),
 )
 
+# Kırmızı üçgen KADRAJ KENARI toleransı (px). Yarışma alanındaki KIRMIZI KARE
+# decoy'u kadraja kenardan/köşeden kısmen girdiğinde eksik kontur/perspektif
+# nedeniyle geçici olarak "kırmızı üçgen" gibi görünebilir; bu yüzden kırmızı
+# üçgen yalnızca TAMAMI kadraj içinde görünüyorsa kabul edilir. Yalnızca
+# RED+TRIANGLE için geçerlidir — mavi altıgen ETKİLENMEZ.
+_EDGE_CLIP_MARGIN_PX = 2
+
 
 class TargetDetector:
     """Mavi altıgen + kırmızı üçgen detector.
@@ -387,7 +394,7 @@ class TargetDetector:
     # ──────────────────────────────────────────────────────────────
 
     def _detections_from_contours(self, contours, frame_hsv, purity_min=_MIN_COLOR_PURITY,
-                                  mask_color=None):
+                                  mask_color=None, frame_shape=None):
         """Kontur listesinden güvenilir tespitler üretir.
 
         Renk, konturun İÇİNDEKİ gerçek HSV piksel dağılımından (color purity)
@@ -396,6 +403,10 @@ class TargetDetector:
 
         mask_color: bu konturların hangi renk maskesinden geldiği (teşhis için;
         None = gri fallback). Yalnızca loga yazılır, filtre mantığını etkilemez.
+
+        frame_shape: (H, W) — verilirse KIRMIZI ÜÇGEN'in bbox'ı kadraj kenarına
+        değiyor/taşıyorsa reddedilir (decoy kırmızı kare koruması). Mavi altıgen
+        ve diğer şekiller bu kontrolden ETKİLENMEZ. None = kontrol kapalı.
 
         TEŞHİS: her kontur için tek satır [CANDIDATE] ölçüm logu ve her REJECT
         noktasında neden + gerçek değer + eşik DEBUG seviyesinde yazılır.
@@ -498,6 +509,24 @@ class TargetDetector:
                     ", ".join(f"{c.value}+{s}" for c, s in _VALID_TARGET_COMBINATIONS),
                 )
                 continue
+
+            # KIRMIZI ÜÇGEN decoy koruması: bbox kadraj kenarına değiyor/taşıyorsa
+            # nesnenin tamamı görünmüyor demektir (kısmen giren kırmızı kare eksik
+            # kontur/perspektifle üçgen gibi görünebilir) → RED TRIANGLE KABUL
+            # EDİLMEZ. Mavi altıgen bu kontrolden ETKİLENMEZ.
+            if (color == TargetColor.RED and shape == "TRIANGLE"
+                    and frame_shape is not None):
+                fh, fw = frame_shape[:2]
+                if (bx <= _EDGE_CLIP_MARGIN_PX
+                        or by <= _EDGE_CLIP_MARGIN_PX
+                        or bx + bw >= fw - _EDGE_CLIP_MARGIN_PX
+                        or by + bh >= fh - _EDGE_CLIP_MARGIN_PX):
+                    self._log.debug(
+                        "REJECT kırmızı üçgen kadraj kenarında: bbox=(%d,%d %dx%d) "
+                        "frame=%dx%d — nesnenin tamamı görünmüyor (decoy koruması)",
+                        bx, by, bw, bh, fw, fh,
+                    )
+                    continue
 
             vertex_score = 1.0 - min(1.0, abs(count - expected_vertices) / 2.0)
             extent_score = 1.0 - min(1.0, abs(extent - expected_extent) / 0.25)
@@ -639,7 +668,9 @@ class TargetDetector:
             )
 
             all_detections.extend(
-                self._detections_from_contours(contours, hsv, mask_color=color)
+                self._detections_from_contours(
+                    contours, hsv, mask_color=color, frame_shape=frame_bgr.shape,
+                )
             )
 
         if all_detections:
@@ -647,7 +678,8 @@ class TargetDetector:
 
         fallback_contours = self._fallback_contours(frame_bgr)
         fallback_dets = self._detections_from_contours(
-            fallback_contours, hsv, purity_min=_FALLBACK_MIN_COLOR_PURITY
+            fallback_contours, hsv, purity_min=_FALLBACK_MIN_COLOR_PURITY,
+            frame_shape=frame_bgr.shape,
         )
         return sorted(fallback_dets, key=lambda d: d.confidence, reverse=True)
 

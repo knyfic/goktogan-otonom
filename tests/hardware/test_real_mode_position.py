@@ -185,15 +185,23 @@ def _dispatch(msg, state: dict) -> None:
         state["sys_t"] = time.monotonic()
 
 
-def _gps_ok(state: dict) -> tuple[bool, str]:
-    """GPS fix yeterli mi? (GPS_RAW_INT fix_type veya SYS_STATUS GPS biti)."""
-    if state.get("fix_type") is not None and state["fix_type"] >= _MIN_GOOD_FIX:
-        return True, _FIX_NAMES.get(state["fix_type"], f"FIX {state['fix_type']}")
-    if state.get("sys_t"):
-        if state["sys_health"] & _SYS_GPS:
-            return True, "3D FIX (SYS_STATUS)"
-        return False, "GPS sağlıksız (SYS_STATUS GPS biti yok)"
-    return False, "GPS fix doğrulanamıyor (GPS_RAW_INT + SYS_STATUS yok)"
+def _gps_label(state: dict) -> str:
+    """GPS fix etiketi — YALNIZCA bilgi, bloklamaz.
+
+    Konum geçerliliği GLOBAL_POSITION_INT (EKF) ile sağlanır; GPS_RAW_INT /
+    SYS_STATUS mesajları ArduPilot'ta SR2_RAW_SENSORS / SR2_EXTRA3 akışları
+    açık değilse HİÇ gelmez. O yüzden bu kaynaklar yalnızca ekranda gösterilir,
+    yoksa 'n/a' yazılır — asla FAIL sebebi değildir.
+    """
+    fix = state.get("fix_type")
+    if fix is not None:
+        name = _FIX_NAMES.get(fix, f"FIX {fix}")
+        if fix >= _MIN_GOOD_FIX:
+            return name
+        return f"{name} (zayıf fix)"
+    if state.get("sys_t") and state["sys_health"] & _SYS_GPS:
+        return "3D FIX (SYS_STATUS)"
+    return "n/a (GPS_RAW_INT/SYS_STATUS akışı yok — SR2_RAW_SENSORS/SR2_EXTRA3)"
 
 
 def run_position_test(
@@ -248,10 +256,7 @@ def run_position_test(
             print("[FAIL] No valid EKF position received (GLOBAL_POSITION_INT).")
             return False
 
-        ok_gps, gps_txt = _gps_ok(state)
-        if not ok_gps:
-            print(f"[FAIL] GPS fix is not valid.  ({gps_txt})")
-            return False
+        gps_txt = _gps_label(state)   # bilgi amaçlı — bloklamaz
 
         print(f"EKF POSITION         : VALID  (GLOBAL_POSITION_INT)")
         print(f"GPS FIX              : {gps_txt}")
@@ -427,19 +432,17 @@ def test_estimate_single_sample():
     assert est["spread_m"] == 0.0
 
 
-def test_gps_ok_helpers():
-    """GPS_RAW_INT fix_type + SYS_STATUS GPS biti mantığı."""
-    state_fix = {"fix_type": 3, "sys_health": 0, "sys_t": 0.0}
-    ok, txt = _gps_ok(state_fix)
-    assert ok and "3D" in txt
-
-    state_sys = {"fix_type": None, "sys_health": _SYS_GPS, "sys_t": 1.0}
-    ok, txt = _gps_ok(state_sys)
-    assert ok and "SYS_STATUS" in txt
-
-    state_bad = {"fix_type": 1, "sys_health": 0, "sys_t": 0.0}
-    ok, _ = _gps_ok(state_bad)
-    assert not ok
+def test_gps_label_helpers():
+    """GPS fix etiketi yalnızca BİLGİDİR — bloklamaz; akış yoksa n/a gösterir."""
+    # GPS_RAW_INT fix_type >= 3 → 3D etiketi
+    label = _gps_label({"fix_type": 3, "sys_health": 0, "sys_t": 0.0})
+    assert "3D" in label
+    # GPS_RAW_INT yok ama SYS_STATUS GPS biti var
+    label = _gps_label({"fix_type": None, "sys_health": _SYS_GPS, "sys_t": 1.0})
+    assert "SYS_STATUS" in label
+    # İkisi de akışta yok → n/a (BLOKLAMAZ)
+    label = _gps_label({"fix_type": None, "sys_health": 0, "sys_t": 0.0})
+    assert "n/a" in label
 
 
 def test_real_mode_position_reads_ekf_position():

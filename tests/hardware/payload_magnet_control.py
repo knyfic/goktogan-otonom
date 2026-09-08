@@ -18,15 +18,27 @@ argümanlarıyla mıknatısları açıp kapatmak (teknik kontrol/jüri gösterim
   --off          → Seçilen mıknatıs(lar)ı DEAKTİF et (bırakma)
 
   --on / --off verilmezse seçilen mıknatıs AKTİF edilir (--on varsayılan).
-  Yalnızca --red veya --blue (durum bayrağı olmadan) → AKTİF et.
+  --hold-s S → OFF durumda S saniye bekleyip kendiliğinden çıkar
+               (0 = Ctrl+C'ye kadar sonsuz; varsayılan 0).
 
-KALICILIK (ÖNEMLİ):
-  Script mıknatısı istediğiniz durumda BIRAKIR — sonunda zorla ON'a ÇEKMEZ.
-    • --off verdiyseniz mıknatıs OFF kalır, üzerindeki yük düşer.
-    • --on verdiyseniz mıknatıs ON kalır, yük tutulur.
-  Durum, bir sonraki komut / script / Pi yeniden başlatılana kadar korunur.
-  (Not: Görev yazılımı (LocalRPiBackend.initialize) başlarken mıknatısları
-  kendi güvenli HOLD durumuna alır.)
+ÖNEMLİ — DONANIM GERÇEĞİ (neden --off "kalıcı" görünmüyor):
+  Mıknatıs sürücü kartı failsafe çalışır: GPIO hattı BOŞTA bırakıldığında
+  (process çıkınca gpiochip kapanır) mıknatıs varsayılan olarak ON'a döner.
+  Bu yüzden "komutu çalıştır, script bitsin, OFF kalsın" DAVRANIŞI bu kartta
+  fiziksel olarak mümkün DEĞİLDİR — OFF'u korumak için GPIO hattının AÇIK ve
+  sürekli LOW sürülüyor olması gerekir.
+
+  Bu script bu yüzden şöyle çalışır:
+    • --on verildi → mıknatıs ON, script hemen biter (zaten ON kalır).
+    • --off verildi → mıknatıs OFF sürülür ve script ÇIKMAZ; GPIO'yu açık
+      tutarak OFF durumunu KORUR (yük düşer ve düşmüş kalır). Çıkmak için
+      Ctrl+C. Çıkışta mıknatıslar güvenli ON'a alınır (kart failsafe'iyle
+      aynı davranış — yük zaten düşmüştür, tekrar tutmaz).
+
+  İpucu: OFF bekletirken başka bir iş yapmanız gerekiyorsa bu komutu ayrı bir
+  terminalde çalıştırın veya arka plana alın. GPIO hattı başka bir süreç
+  tarafından tutulduğu için ikinci bir örnek "GPIO meşgul" der — bu normaldir;
+  önce aktif örneği Ctrl+C ile kapatın.
 
 GÜVENLİK:
   • Step motor import edilmez / kurulmaz / sürülmez (yalnızca MagnetController).
@@ -69,11 +81,17 @@ def _resolve_magnet_id(color: str, color_map: dict) -> str:
     return magnet.upper()
 
 
-def run_magnet_control(red: bool, blue: bool, off: bool) -> tuple[bool, str]:
-    """Mıknatısları istenen duruma getirir ve O DURUMDA bırakır.
+def _any_off(magnets) -> bool:
+    return not (magnets.state_1 and magnets.state_2)
 
-    Stepper'a DOKUNULMAZ. Script sonunda mıknatıs durumu zorla değiştirilmez —
-    --off verildiyse OFF kalır (yük düşer), --on verildiyse ON kalır.
+
+def run_magnet_control(red: bool, blue: bool, off: bool,
+                        hold_s: float = 0.0) -> tuple[bool, str]:
+    """Mıknatısları istenen duruma getirir.
+
+    Stepper'a DOKUNULMAZ. --off verildiğinde script çıkmaz; OFF durumunu
+    korumak için GPIO'yu açık tutar (--hold-s süresi veya Ctrl+C). --on
+    verildiğinde mıknatıs ON'dur ve script hemen biter.
     """
     if not hw.lgpio_available():
         return False, "lgpio yok — gerçek GPIO sürülemez (sudo apt install python3-lgpio)"
@@ -92,8 +110,6 @@ def run_magnet_control(red: bool, blue: bool, off: bool) -> tuple[bool, str]:
     magnets = MagnetController(pin_1=pin_1, pin_2=pin_2,
                                hold_high=hold_high, chip=chip, logger=_log)
     try:
-        # Pinleri kur (her iki mıknatıs ON başlar — güvenli varsayılan).
-        # Ardından istenen komut uygulanır.
         magnets.setup(initial_on=True)
 
         target = not off   # --off yoksa → AKTİF (--on varsayılan)
@@ -108,25 +124,44 @@ def run_magnet_control(red: bool, blue: bool, off: bool) -> tuple[bool, str]:
             {"Magnet 1": (magnets.state_1, pin_1), "Magnet 2": (magnets.state_2, pin_2)},
         )
 
-        if off:
-            # Yükün fiziksel olarak bırakılması için kısa süre tanı
-            print(f"\n  --off uygulandı; yükün düşmesi için {_OFF_SETTLE_S:.0f}s "
-                  "bekleniyor...")
-            time.sleep(_OFF_SETTLE_S)
-
         if not (red or blue):
             print("\nMıknatıs seçilmedi (--red/--blue) — yalnızca durum gösterildi, "
                   "değişiklik yapılmadı.")
 
         detail = f"M1={'ON' if magnets.state_1 else 'OFF'} " \
                  f"M2={'ON' if magnets.state_2 else 'OFF'}"
+
+        if off and _any_off(magnets):
+            # OFF kalıcılığı GPIO hattı açıkken mümkün → bekle (Ctrl+C ile çık)
+            print(f"\n  --off uygulandı; yükün düşmesi için {_OFF_SETTLE_S:.0f}s "
+                  "bekleniyor...")
+            time.sleep(_OFF_SETTLE_S)
+            print("\n  OFF durumu KORUNUYOR — GPIO açık tutuluyor (mıknatıs OFF).")
+            if hold_s and hold_s > 0:
+                print(f"  {hold_s:.0f}s sonra otomatik çıkılacak...")
+                try:
+                    time.sleep(hold_s)
+                except KeyboardInterrupt:
+                    pass
+                print("  Süre doldu — çıkılıyor.")
+            else:
+                print("  Çıkmak için Ctrl+C. (Çıkışta mıknatıslar güvenli ON'a alınır;")
+                print("  yük zaten düşmüş olduğu için tekrar tutulmaz.)")
+                try:
+                    while True:
+                        time.sleep(0.5)
+                except KeyboardInterrupt:
+                    print("\n  Ctrl+C — çıkılıyor.")
+            # Güvenli kapanış (kart failsafe'iyle aynı: ON)
+            magnets.safe_hold()
+            print("  Kapanış: mıknatıslar güvenli HOLD (M1=ON M2=ON).")
+        else:
+            # ON durumu kart failsafe'iyle zaten korunur → hemen kapat
+            print("\n  Mıknatıslar ON — script bitiyor (durum korunur).")
+
         return True, detail
     finally:
-        # ÖNEMLİ: Durum zorla ON'a çekilmez. Mıknatıslar komutun bıraktığı
-        # durumda kalır. Yalnızca GPIO handle kapatılır.
         magnets.close()
-        print("\n  cleanup: GPIO kapatıldı — mıknatıs durumu KORUNDU "
-              "(isteğe bağlı ON/OFF), stepper hiç kullanılmadı")
 
 
 def main() -> int:
@@ -137,8 +172,11 @@ def main() -> int:
     grp.add_argument("--on", dest="on", action="store_true",
                      help="Seçilen mıknatısları AKTİF et (tutma)")
     grp.add_argument("--off", dest="on", action="store_false",
-                     help="Seçilen mıknatısları DEAKTİF et (bırakma)")
+                     help="Seçilen mıknatısları DEAKTİF et (bırakma) — OFF'u korumak "
+                          "için script açık kalır (--hold-s veya Ctrl+C ile çıkılır)")
     ap.set_defaults(on=True)   # --on / --off verilmezse → AKTİF et
+    ap.add_argument("--hold-s", type=float, default=0.0,
+                    help="OFF durumda bekleme süresi, sn (0 = Ctrl+C'ye kadar)")
     args = ap.parse_args()
 
     if not hw.is_raspberry_pi():
@@ -147,13 +185,13 @@ def main() -> int:
 
     if not (args.red or args.blue):
         print("Hata: en az bir mıknatıs seçmelisiniz (--red ve/veya --blue).")
-        print("Durum görüntülemek için bile mıknatıs seçin; örn: --red --on")
         return 2
 
     print(f"Payload mıknatıs kontrolü: red={args.red} blue={args.blue} "
           f"durum={'OFF (bırak)' if not args.on else 'ON (tut)'} "
           f"(stepper KULLANILMAZ, uçuş komutu YOK)")
-    ok, msg = run_magnet_control(red=args.red, blue=args.blue, off=not args.on)
+    ok, msg = run_magnet_control(red=args.red, blue=args.blue, off=not args.on,
+                                 hold_s=args.hold_s)
     print()
     print("[PASS]" if ok else "[FAIL]", msg)
     return 0 if ok else 1

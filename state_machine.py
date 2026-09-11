@@ -1012,12 +1012,48 @@ class MissionStateMachine:
         else:
             near, far = (lat2, lon2), (lat1, lon1)
 
-        # SAFE_POINT = uzak direk + POLE_CLEARANCE_M × hat doğrultusu (yatay, GPS).
-        safe_lat, safe_lon = local_to_gps(
-            far[0], far[1], POLE_CLEARANCE_M * u_n, POLE_CLEARANCE_M * u_e
+        # Doğrultu YAKIN→UZAK yönünde (sıralamadan bağımsız tekrar hesapla).
+        nn, ne = _north_east_m(near[0], near[1], far[0], far[1])
+        u_n, u_e = nn / line_len, ne / line_len
+
+        # "Arka" taraf = alanın OLMADIĞI taraf. Yanal offset bu tarafa uygulanır
+        # ki İHA direk ÇUBUKLARININ ÜZERİNDEN değil YANINDAN geçsin (çarpışma yok).
+        if not COMPETITION_CORNERS:
+            self.log.error(
+                "POLE PASSAGE: COMPETITION_CORNERS yok — arka taraf belirsiz. RTL."
+            )
+            self.data.mission_failed = True
+            self._goto(MissionState.TASK_2_FAILED)
+            return False
+        c_lat = sum(float(c[0]) for c in COMPETITION_CORNERS.values()) / len(COMPETITION_CORNERS)
+        c_lon = sum(float(c[1]) for c in COMPETITION_CORNERS.values()) / len(COMPETITION_CORNERS)
+        v_n, v_e = -u_e, u_n                    # hatta dik birim (sol normal)
+        cn, ce = _north_east_m(near[0], near[1], c_lat, c_lon)
+        s_c = cn * v_n + ce * v_e
+        if abs(s_c) < 1.0:
+            self.log.error(
+                "POLE PASSAGE: alan merkezi direk hattı üzerinde (%.2f m) — "
+                "arka taraf belirsiz. RTL.", s_c,
+            )
+            self.data.mission_failed = True
+            self._goto(MissionState.TASK_2_FAILED)
+            return False
+        # Alan +v tarafındaysa arka = -v; değilse +v.
+        w_n, w_e = (-v_n, -v_e) if s_c > 0 else (v_n, v_e)
+
+        off = POLE_CLEARANCE_M
+        # SAFE_POINT = uzak direk + off × hat doğrultusu (hat ÜZERİNDE kalır).
+        safe = local_to_gps(far[0], far[1], off * u_n, off * u_e)
+        # Arka şerit: yakın direğin arkası → uzak direğin off ötesi + arka → SAFE.
+        # Şerit hattan off kadar yanda olduğundan her iki direk de en az off
+        # (8 m) uzaklıkta geçilir; son bacak SAFE'ye hatta DİK iner.
+        near_w = local_to_gps(near[0], near[1], off * w_n, off * w_e)
+        beyond = local_to_gps(
+            far[0], far[1], off * u_n + off * w_n, off * u_e + off * w_e
         )
-        self._pole_safe_point = (safe_lat, safe_lon)
-        self._pole_waypoints = [near, far, (safe_lat, safe_lon)]
+
+        self._pole_safe_point = safe
+        self._pole_waypoints = [near_w, beyond, safe]
         self._pole_idx = 0
 
         # Vision gate: bu fazda biriken hedef geçmişi/kilit yok sayılır —
@@ -1027,9 +1063,10 @@ class MissionStateMachine:
 
         self.log.info(
             "POLE PASSAGE başlatıldı: yakın=(%.7f, %.7f) uzak=(%.7f, %.7f) | "
-            "hat=%.2f m | SAFE_POINT=(%.7f, %.7f) | +%.1f m",
-            near[0], near[1], far[0], far[1], line_len,
-            safe_lat, safe_lon, POLE_CLEARANCE_M,
+            "hat=%.2f m | arka-offset=%.1f m | arka-yakın=(%.7f, %.7f) | "
+            "SAFE_POINT=(%.7f, %.7f)",
+            near[0], near[1], far[0], far[1], line_len, off,
+            near_w[0], near_w[1], safe[0], safe[1],
         )
         return True
 

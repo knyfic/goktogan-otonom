@@ -17,6 +17,7 @@ Tasarım kuralları:
 """
 
 import logging
+import math
 import statistics
 import time
 
@@ -35,6 +36,10 @@ from config import (
     VISION_WIDTH_PX,
     VISION_VERTICAL_FOV_DEG,
     COMPETITION_CORNERS,
+    ENABLE_POLE_PASSAGE,
+    POLE_1,
+    POLE_2,
+    POLE_CLEARANCE_M,
     ENABLE_RETURN_PICKUP,
     ALIGNMENT_DESCENT_STEP_M,
     ALIGNED_FRAMES_REQUIRED,
@@ -102,7 +107,12 @@ from models import (
     TargetType,
 )
 from payload.payload_controller import PayloadController
-from search.coverage_planner import CompetitionField, LawnmowerPlanner
+from search.coverage_planner import (
+    CompetitionField,
+    LawnmowerPlanner,
+    _north_east_m,
+    local_to_gps,
+)
 from vision.camera import CameraLike
 from vision.geometry import CameraModel, expected_payload_pixels
 from vision.payload_detector import PayloadDetector
@@ -114,6 +124,20 @@ _REF_SAMPLE_COUNT = 5
 
 # Verification'da oy çokluğu için kaç frame toplanacağı
 _VERIFY_VOTE_COUNT = 6
+
+
+def _point_segment_dist(px, py, x1, y1, x2, y2) -> float:
+    """(px, py) noktasının (x1, y1)-(x2, y2) doğru PARÇASINA dik uzaklığı.
+
+    Yalnızca 'en yakın search line'ı seçmek için kullanılır — coverage planner
+    geometrisini değiştirmez."""
+    dx, dy = x2 - x1, y2 - y1
+    seg2 = dx * dx + dy * dy
+    if seg2 <= 1e-9:
+        return math.hypot(px - x1, py - y1)
+    t = ((px - x1) * dx + (py - y1) * dy) / seg2
+    t = max(0.0, min(1.0, t))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
 
 
 class MissionStateMachine:
@@ -175,6 +199,14 @@ class MissionStateMachine:
         # uçar, sonra kaldığı waypoint'ten taramaya devam eder (ray kaymaz).
         self._search_resume_lat: float | None = None
         self._search_resume_lon: float | None = None
+
+        # ---- Direk geçişi (POLE_PASSAGE) ----
+        # Görev alanına girmeden önce iki direğin arkasından geçilir; ancak
+        # SAFE_POINT'e varınca SEARCH başlar. Waypoint sırası başlangıca göre
+        # otomatik: yakın direk → uzak direk → SAFE_POINT.
+        self._pole_waypoints: list[tuple[float, float]] | None = None
+        self._pole_idx: int = 0
+        self._pole_safe_point: tuple[float, float] | None = None
 
         # ---- Non-blocking irtifa bekleme ----
         self._alt_target: float | None = None
@@ -379,6 +411,8 @@ class MissionStateMachine:
             self._do_init()
         elif s == MissionState.TAKEOFF:
             self._do_takeoff()
+        elif s == MissionState.POLE_PASSAGE:
+            self._do_pole_passage()
         elif s in (MissionState.SEARCHING_FIRST_TARGET,
                    MissionState.SEARCHING_SECOND_TARGET):
             self._do_search_target()
@@ -899,8 +933,153 @@ class MissionStateMachine:
             self._mission_start_t = time.monotonic()
             self.log.info("Görev zamanlayıcısı başlatıldı. Süre sınırı: %d:%02d",
                           MISSION_TIMEOUT_S // 60, MISSION_TIMEOUT_S % 60)
-        self._init_search()
+        if ENABLE_POLE_PASSAGE:
+            # Görev alanına girmeden önce iki direğin arkasından geçip
+            # SAFE_POINT'e ulaşmak ZORUNLU. Vision bu fazda kapalıdır (gate).
+            self._goto(MissionState.POLE_PASSAGE)
+        else:
+            # Pole fazı yapılandırma ile kapatıldı (SITL/simülasyon): mevcut akış.
+            self._init_search()
+            self._goto(MissionState.SEARCHING_FIRST_TARGET)
+
+    # ------------------------------------------------------------------ #
+    def _do_pole_passage(self) -> None:
+        """Görev alanına girmeden önce iki direğin arkasından güvenli geçiş.
+
+        NON-BLOCKING: her tick'te sıradaki waypoint'e goto gönderilir; heartbeat
+        watchdog ve pilot takeover kontrolleri araya girebilir. Sıra başlangıç
+        konumuna göre OTOMATİKtir (config sırasına güvenilmez):
+        yakın direk → uzak direk → SAFE_POINT (uzak direğin +POLE_CLEARANCE_M'i).
+
+        Bu fazda hedef tespiti ÇALIŞMAZ (target_detector.detect çağrılmaz).
+        """
+        if self._pole_waypoints is None:
+            if not self._init_pole_passage():
+                return
+
+        if self._pole_idx >= len(self._pole_waypoints):
+            self._finish_pole_passage()
+            return
+
+        lat, lon = self._pole_waypoints[self._pole_idx]
+        pos = self.nav.position()
+        # Mevcut ulaşma toleransı konvansiyonu (3.0 m) — yeni değer uydurulmaz.
+        if haversine_m(pos.latitude, pos.longitude, lat, lon) < 3.0:
+            self._pole_idx += 1
+            self.log.info(
+                "POLE PASSAGE: waypoint %d/%d geçildi.",
+                self._pole_idx, len(self._pole_waypoints),
+            )
+            return
+        self.nav.goto_global(lat, lon, TAKEOFF_ALTITUDE)
+
+    def _init_pole_passage(self) -> bool:
+        """Pole geçişi waypoint'lerini kurar. Geçersiz config'te görevi RTL'e alır.
+
+        Dönen: True → devam; False → görev abort/RTL'e alındı.
+        """
+        if POLE_1 is None or POLE_2 is None:
+            self.log.error(
+                "POLE PASSAGE: direk koordinatları eksik (POLE_1/POLE_2=None). "
+                "Güvenli taraf: SEARCH başlatılmaz, RTL."
+            )
+            self.data.mission_failed = True
+            self._goto(MissionState.TASK_2_FAILED)
+            return False
+
+        lat1, lon1 = float(POLE_1[0]), float(POLE_1[1])
+        lat2, lon2 = float(POLE_2[0]), float(POLE_2[1])
+
+        # Doğrultu: iki direk aynı noktadaysa hat tanımsızdır.
+        n, e = _north_east_m(lat1, lon1, lat2, lon2)
+        line_len = math.hypot(n, e)
+        if line_len < 1.0:
+            self.log.error(
+                "POLE PASSAGE: iki direk aynı noktada (%.2f m) — doğrultu yok. "
+                "SEARCH başlatılmaz, RTL.", line_len,
+            )
+            self.data.mission_failed = True
+            self._goto(MissionState.TASK_2_FAILED)
+            return False
+        u_n, u_e = n / line_len, e / line_len
+
+        # Başlangıç konumuna GÖRE sıralama: yakın direk önce, uzak direk sonra.
+        pos = self.nav.position()
+        d1 = haversine_m(pos.latitude, pos.longitude, lat1, lon1)
+        d2 = haversine_m(pos.latitude, pos.longitude, lat2, lon2)
+        if d1 <= d2:
+            near, far = (lat1, lon1), (lat2, lon2)
+        else:
+            near, far = (lat2, lon2), (lat1, lon1)
+
+        # SAFE_POINT = uzak direk + POLE_CLEARANCE_M × hat doğrultusu (yatay, GPS).
+        safe_lat, safe_lon = local_to_gps(
+            far[0], far[1], POLE_CLEARANCE_M * u_n, POLE_CLEARANCE_M * u_e
+        )
+        self._pole_safe_point = (safe_lat, safe_lon)
+        self._pole_waypoints = [near, far, (safe_lat, safe_lon)]
+        self._pole_idx = 0
+
+        # Vision gate: bu fazda biriken hedef geçmişi/kilit yok sayılır —
+        # search yalnızca SAFE_POINT'te açılır.
+        self.target_detector.history.clear()
+        self.data.pending_detection = None
+
+        self.log.info(
+            "POLE PASSAGE başlatıldı: yakın=(%.7f, %.7f) uzak=(%.7f, %.7f) | "
+            "hat=%.2f m | SAFE_POINT=(%.7f, %.7f) | +%.1f m",
+            near[0], near[1], far[0], far[1], line_len,
+            safe_lat, safe_lon, POLE_CLEARANCE_M,
+        )
+        return True
+
+    def _finish_pole_passage(self) -> None:
+        """SAFE_POINT'e ulaşıldı — mevcut search akışını başlat.
+
+        coverage planner DEĞİŞMEZ: mevcut 3-line geometrisi ve sırası korunur;
+        yalnızca üretilmiş line'lar arasından SAFE_POINT'e en yakın olanı
+        başlangıç seçilir.
+        """
+        safe = self._pole_safe_point
+        if safe is None:
+            self.log.error("POLE PASSAGE: SAFE_POINT hesaplanamadı — SEARCH yok, RTL.")
+            self.data.mission_failed = True
+            self._goto(MissionState.TASK_2_FAILED)
+            return
+
+        pos = self.nav.position()
+        self.log.info(
+            "POLE PASSAGE tamamlandı — SAFE_POINT=(%.7f, %.7f). SEARCH açılıyor.",
+            pos.latitude, pos.longitude,
+        )
+        self._init_search(reference_lat=safe[0], reference_lon=safe[1])
+        idx = self._nearest_search_line_index(safe[0], safe[1])
+        if idx is not None:
+            self._search_idx = idx
+            self.log.info(
+                "SEARCH başlangıç line'ı: %d/%d (SAFE_POINT'e en yakın).",
+                idx // 2 + 1, max(1, len(self._search_points) // 2),
+            )
         self._goto(MissionState.SEARCHING_FIRST_TARGET)
+
+    def _nearest_search_line_index(self, lat: float, lon: float) -> int | None:
+        """SAFE_POINT'e en yakın mevcut search line'ının ilk waypoint indeksi.
+
+        Yeni planner YOK — yalnızca _init_search'te üretilen line'lar arasından
+        seçim yapılır. Her line 2 waypoint'tir (start, end).
+        """
+        if not self._search_points or self._search_field is None:
+            return None
+        px, py = self._search_field.gps_to_local(lat, lon)
+        pts = self._search_points
+        best_idx, best_d = None, float("inf")
+        for i in range(0, len(pts) - 1, 2):
+            d = _point_segment_dist(
+                px, py, pts[i].x_m, pts[i].y_m, pts[i + 1].x_m, pts[i + 1].y_m
+            )
+            if d < best_d:
+                best_d, best_idx = d, i
+        return best_idx
 
     # ------------------------------------------------------------------ #
     def _do_search_target(self) -> None:

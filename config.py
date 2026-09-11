@@ -200,12 +200,36 @@ FIELD_LENGTH = 100.0
 #     "C": (37.9337180, 34.6177670),
 #     "D": (37.9335699, 34.6178448),
 # }
+# COMPETITION_CORNERS = {
+#     "A": (41.0080210, 28.9782215),
+#     "B": (41.0089200, 28.9782215),
+#     "C": (41.0089200, 28.9785785),
+#     "D": (41.0080210, 28.9785785),
+# }
 COMPETITION_CORNERS = {
-    "A": (41.0080210, 28.9782215),
-    "B": (41.0089200, 28.9782215),
-    "C": (41.0089200, 28.9785785),
-    "D": (41.0080210, 28.9785785),
+    "A": (38.3596726, 38.2619506),
+    "B": (38.3598624, 38.2617056),
+    "C": (38.3604735, 38.2625486),
+    "D": (38.3602844, 38.2627934),
 }
+
+# ── Görev başlangıcı: iki direk arkasından geçiş (POLE PASSAGE) ───────────────
+# Görev alanına girmeden ÖNCE İHA, GPS'i bilinen iki direğin oluşturduğu hattın
+# arkasından geçip son direğin POLE_CLEARANCE_M kadar ötesine (SAFE_POINT) gider;
+# ancak oradan arama başlar. Bu fazda vision/hedef tespiti ÇALIŞMAZ (state gate).
+#
+#   ENABLE_POLE_PASSAGE=True  + geçerli POLE_1/POLE_2 → pole geçişi yapılır.
+#   ENABLE_POLE_PASSAGE=True  + eksik/geçersiz direk    → görev güvenli şekilde
+#                                                          RTL'e alınır (pole
+#                                                          fazı ASLA atlanmaz).
+#   ENABLE_POLE_PASSAGE=False → faz atlanır (SITL/simülasyon) — mevcut davranış.
+#
+# POLE_1/POLE_2 sırası ÖNEMSİZdir: yakın/uzak direk, başlangıç konumuna göre
+# otomatik belirlenir. POLE_CLEARANCE_M yatay (GPS) mesafedir — irtifa DEĞİL.
+ENABLE_POLE_PASSAGE = True
+POLE_1 = (38.3598341, 38.2613354)
+POLE_2 = (38.3607812, 38.2626078)
+POLE_CLEARANCE_M = 8.0
 
 HEXAGON_SIDE_LENGTH = 2.0
 TRIANGLE_SIDE_LENGTH = 1.0

@@ -198,8 +198,10 @@ def test_prearm_good_starts_existing_mission_flow():
     sm._do_init()                       # wait_for_position → TAKEOFF
     assert sm.data.state == MissionState.TAKEOFF
 
-    sm._do_takeoff()                    # takeoff + irtifa → SEARCHING_FIRST_TARGET
-    assert sm.data.state == MissionState.SEARCHING_FIRST_TARGET
+    sm._do_takeoff()                    # takeoff + irtifa → POLE_PASSAGE (pole fazı açık)
+    # Pole geçişi aktifken (config): kalkış sonrası önce güvenli direk geçişi,
+    # SEARCH ancak SAFE_POINT'e varınca başlar.
+    assert sm.data.state == MissionState.POLE_PASSAGE
     nav.takeoff.assert_called_once()
     # Takeoff hedefi 11.5m (TAKEOFF_ALTITUDE)
     assert nav.takeoff.call_args[0][0] == TAKEOFF_ALTITUDE

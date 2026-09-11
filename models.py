@@ -10,6 +10,9 @@ class MissionState(str, Enum):
     WAITING_FOR_PREARM = "WAITING_FOR_PREARM"
     INIT = "INIT"
     TAKEOFF = "TAKEOFF"
+    # Görev alanına girmeden önce iki direğin arkasından güvenli geçiş fazı.
+    # Bu state'te hedef tespiti/vision KAPALI; SAFE_POINT'e varınca SEARCH açılır.
+    POLE_PASSAGE = "POLE_PASSAGE"
     SEARCHING_FIRST_TARGET = "SEARCHING_FIRST_TARGET"
     TARGET_DETECTED = "TARGET_DETECTED"
     TARGET_CLASSIFIED = "TARGET_CLASSIFIED"

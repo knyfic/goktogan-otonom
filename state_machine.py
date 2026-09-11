@@ -910,16 +910,16 @@ class MissionStateMachine:
         detections = self.target_detector.detect(frame)
 
         # Hedef tipi filtresi — hangi aramada hangi tür kabul edilir:
-        #   SEARCHING_FIRST_TARGET  → YALNIZCA KIRMIZI ÜÇGEN (görev planı).
-        #   SEARCHING_SECOND_TARGET → birinci hedefin TERSİ (MAVİ ALTIGEN).
+        #   SEARCHING_FIRST_TARGET  → YALNIZCA MAVİ ALTIGEN (görev planı).
+        #   SEARCHING_SECOND_TARGET → birinci hedefin TERSİ (KIRMIZI ÜÇGEN).
         # Filtre dışı türler zaman kilidini/görevi tetikleyemez (gürültü kirletemez).
         if self.data.state == MissionState.SEARCHING_FIRST_TARGET:
-            expected_color, expected_shape = TargetColor.RED, "TRIANGLE"
+            expected_color, expected_shape = TargetColor.BLUE, "HEXAGON"
             detections = [
                 d for d in detections
                 if d.color == expected_color and d.shape == expected_shape
             ]
-            # Mavi altıgen ilk aramada hedef DEĞİLDİR — varsa kilit kalıntısını temizle.
+            # Kırmızı üçgen ilk aramada hedef DEĞİLDİR — varsa kilit kalıntısını temizle.
             if (self._locked_color is not None
                     and (self._locked_color, self._locked_shape)
                         != (expected_color, expected_shape)):
@@ -1220,8 +1220,8 @@ class MissionStateMachine:
         kaybolmaz). 3m'de offset doğrulaması başlar (kırmızı ile aynı altyapı).
         """
         # Hedefe özel bırakma konfigürasyonu: hizalanan hedefin tipi
-        # pending_detection veya kilitten belirlenir (ilk hedef = kırmızı üçgen,
-        # ikinci hedef = mavi altıgen).
+        # pending_detection veya kilitten belirlenir (ilk hedef = mavi altıgen,
+        # ikinci hedef = kırmızı üçgen).
         det = self.data.pending_detection
         if det is not None and getattr(det, "color", None) is not None:
             _color, _shape = det.color, getattr(det, "shape", None)

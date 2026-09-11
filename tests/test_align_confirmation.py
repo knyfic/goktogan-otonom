@@ -330,7 +330,7 @@ def test_align_payload_no_detection_returns_after_min_vision_time():
     sm.payload_tracker.update.return_value = None
     # Faz zaten PAYLOAD_PICKUP_VISION_MIN_S kadar sürdü ve eşik aşıldı
     sm._align_phase_start_t = time.monotonic() - PAYLOAD_PICKUP_VISION_MIN_S - 1.0
-    sm._no_detection_count = 26   # > _NO_DETECTION_LIMIT (25)
+    sm._no_detection_count = sm._NO_DETECTION_LIMIT + 1   # > eşik (config'ten)
 
     sm._last_align_cmd_t = 0.0
     sm._do_align_payload()

@@ -3,7 +3,7 @@ Hedef kilit mekanizması testleri.
 
 Kullanıcı gereksinimleri:
   1. İlk hedef: sağlıklı görülen İLK tür kilitlenir, ona yönelinir; diğer tür
-     (örn. mavi altıgen) umurunda olmaz — taramayı da engellemez.
+     (örn. kırmızı üçgen) umurunda olmaz — taramayı da engellemez.
   2. İkinci hedef: birinci hedefin TERSİ olan tür aranır; başka tür kabul edilmez.
   3. İki tür aynı anda görülürse EN SAĞLIKLI (en yüksek güven) olan birinci
      hedef olur; diğeri ikinci hedef kalır.
@@ -111,13 +111,13 @@ def _search_sm(state, first_target, detections, locked=None, stable=None):
 
 
 def test_second_search_accepts_only_expected_target_type():
-    """SEARCH #2: birinci (RED üçgen) + geçersiz (BLUE üçgen) elenir;
-    yalnızca beklenen (BLUE altıgen) stable_detection'a gider."""
-    first = Target(target_id=1, shape=TargetType.TRIANGLE, color=TargetColor.RED,
+    """SEARCH #2: birinci (BLUE altıgen) + geçersiz (RED altıgen) elenir;
+    yalnızca beklenen (RED üçgen) stable_detection'a gider."""
+    first = Target(target_id=1, shape=TargetType.HEXAGON, color=TargetColor.BLUE,
                    latitude=1.0, longitude=1.0, confidence=0.9)
-    d_first = _D(TargetColor.RED, "TRIANGLE", 0.9)
-    d_bad = _D(TargetColor.BLUE, "TRIANGLE", 0.8)      # geçersiz kombinasyon
-    d_expected = _D(TargetColor.BLUE, "HEXAGON", 0.85)
+    d_first = _D(TargetColor.BLUE, "HEXAGON", 0.9)
+    d_bad = _D(TargetColor.RED, "HEXAGON", 0.8)      # geçersiz kombinasyon
+    d_expected = _D(TargetColor.RED, "TRIANGLE", 0.85)
 
     sm, _nav = _search_sm(MissionState.SEARCHING_SECOND_TARGET, first,
                           [d_first, d_bad, d_expected], stable=d_expected)
@@ -126,15 +126,15 @@ def test_second_search_accepts_only_expected_target_type():
 
     args = sm.target_detector.stable_detection.call_args[0]
     assert len(args[0]) == 1 and args[0][0] is d_expected, \
-        "yalnızca beklenen tür (BLUE altıgen) aday olmalı"
+        "yalnızca beklenen tür (RED üçgen) aday olmalı"
     assert sm.data.state == MissionState.TARGET_DETECTED
 
 
 def test_second_search_first_target_alone_does_not_trigger():
     """SEARCH #2: yalnızca birinci hedef görülüyorsa tespit YOK — tarama devam."""
-    first = Target(target_id=1, shape=TargetType.TRIANGLE, color=TargetColor.RED,
+    first = Target(target_id=1, shape=TargetType.HEXAGON, color=TargetColor.BLUE,
                    latitude=1.0, longitude=1.0, confidence=0.9)
-    d_first = _D(TargetColor.RED, "TRIANGLE", 0.9)
+    d_first = _D(TargetColor.BLUE, "HEXAGON", 0.9)
 
     sm, _nav = _search_sm(MissionState.SEARCHING_SECOND_TARGET, first,
                           [d_first], stable=None)
@@ -148,66 +148,66 @@ def test_second_search_first_target_alone_does_not_trigger():
     assert call_args[0][0] == [] and call_args[1].get("search_mode") is True
 
 
-# ── 2b) İLK arama YALNIZCA KIRMIZI ÜÇGEN arar (görev planı) ──────────────── #
-def test_first_search_accepts_only_red_triangle():
-    """SEARCH #1 (kırmızı üçgen araması): mavi altıgen elenir; yalnızca
-    kırmızı üçgen stable_detection'a gider ve görevi tetikler."""
+# ── 2b) İLK arama YALNIZCA MAVİ ALTIGEN arar (görev planı) ──────────────── #
+def test_first_search_accepts_only_blue_hexagon():
+    """SEARCH #1 (mavi altıgen araması): kırmızı üçgen elenir; yalnızca
+    mavi altıgen stable_detection'a gider ve görevi tetikler."""
     d_blue = _D(TargetColor.BLUE, "HEXAGON", 0.9)
     d_red = _D(TargetColor.RED, "TRIANGLE", 0.85)
 
     sm, _nav = _search_sm(MissionState.SEARCHING_FIRST_TARGET, None,
-                          [d_blue, d_red], stable=d_red)
+                          [d_blue, d_red], stable=d_blue)
 
     sm._do_search_target()
 
     args = sm.target_detector.stable_detection.call_args[0]
-    assert len(args[0]) == 1 and args[0][0] is d_red, \
-        "yalnızca kırmızı üçgen (RED TRIANGLE) aday olmalı — mavi altıgen elenir"
+    assert len(args[0]) == 1 and args[0][0] is d_blue, \
+        "yalnızca mavi altıgen (BLUE HEXAGON) aday olmalı — kırmızı üçgen elenir"
     assert sm.data.state == MissionState.TARGET_DETECTED
 
 
-def test_first_search_blue_hexagon_alone_does_not_trigger():
-    """SEARCH #1: yalnızca mavi altıgen görülürse tespit YOK — tarama devam.
-    Mavi altıgen ilk hedef değildir; görevi TETİKLEMEZ."""
-    d_blue = _D(TargetColor.BLUE, "HEXAGON", 0.9)
+def test_first_search_red_triangle_alone_does_not_trigger():
+    """SEARCH #1: yalnızca kırmızı üçgen görülürse tespit YOK — tarama devam.
+    Kırmızı üçgen ilk hedef değildir; görevi TETİKLEMEZ."""
+    d_red = _D(TargetColor.RED, "TRIANGLE", 0.9)
 
     sm, _nav = _search_sm(MissionState.SEARCHING_FIRST_TARGET, None,
-                          [d_blue], stable=None)
+                          [d_red], stable=None)
     sm._advance_search = MagicMock()
 
     sm._do_search_target()
 
     assert sm.data.state != MissionState.TARGET_DETECTED, \
-        "mavi altıgen ilk aramada görevi tetiklememeli"
+        "kırmızı üçgen ilk aramada görevi tetiklememeli"
     sm._advance_search.assert_called()
     call_args = sm.target_detector.stable_detection.call_args
     assert call_args[0][0] == [] and call_args[1].get("search_mode") is True
 
 
-def test_first_search_blue_hexagon_does_not_pollute_time_lock():
-    """SEARCH #1: mavi altıgen görüntüde sürekli olsa bile zaman kilidini
-    kirletemez — update_time_lock filtrelenmiş (kırmızı üçgen) listeyi alır."""
-    d_blue = _D(TargetColor.BLUE, "HEXAGON", 0.9)
+def test_first_search_red_triangle_does_not_pollute_time_lock():
+    """SEARCH #1: kırmızı üçgen görüntüde sürekli olsa bile zaman kilidini
+    kirletemez — update_time_lock filtrelenmiş (mavi altıgen) listeyi alır."""
+    d_red = _D(TargetColor.RED, "TRIANGLE", 0.9)
 
     sm, _nav = _search_sm(MissionState.SEARCHING_FIRST_TARGET, None,
-                          [d_blue], stable=None)
+                          [d_red], stable=None)
     sm._advance_search = MagicMock()
 
     sm._do_search_target()
 
-    # Mavi altıgen zaman kilidi listesine GİRMEMİŞ olmalı
+    # Kırmızı üçgen zaman kilidi listesine GİRMEMİŞ olmalı
     lock_call = sm.target_detector.update_time_lock.call_args
     assert lock_call is not None
     assert lock_call[0][0] == [], \
-        "mavi altıgen ilk aramada zaman kilidini kirletmemeli"
+        "kırmızı üçgen ilk aramada zaman kilidini kirletmemeli"
 
 
 # ── 3) Kilitliyken diğer tür taramayı durdurmaz ────────────────────────────── #
 def test_locked_search_ignores_other_target_type():
-    """Kilit RED üçgende: yalnızca BLUE altıgen görülürse tarama DEVAM eder."""
+    """Kilit BLUE altıgende: yalnızca RED üçgen görülürse tarama DEVAM eder."""
     sm, _nav = _search_sm(MissionState.SEARCHING_FIRST_TARGET, None,
-                          [_D(TargetColor.BLUE, "HEXAGON", 0.9)],
-                          locked=(TargetColor.RED, "TRIANGLE"), stable=None)
+                          [_D(TargetColor.RED, "TRIANGLE", 0.9)],
+                          locked=(TargetColor.BLUE, "HEXAGON"), stable=None)
     sm._advance_search = MagicMock()
 
     sm._do_search_target()
@@ -216,10 +216,10 @@ def test_locked_search_ignores_other_target_type():
 
 
 def test_locked_search_waits_for_locked_type():
-    """Kilit RED üçgende: RED tespiti kararlı olmadan önce tarama DURUR (stabilize)."""
+    """Kilit BLUE altıgende: BLUE tespiti kararlı olmadan önce tarama DURUR (stabilize)."""
     sm, _nav = _search_sm(MissionState.SEARCHING_FIRST_TARGET, None,
-                          [_D(TargetColor.RED, "TRIANGLE", 0.7)],
-                          locked=(TargetColor.RED, "TRIANGLE"), stable=None)
+                          [_D(TargetColor.BLUE, "HEXAGON", 0.7)],
+                          locked=(TargetColor.BLUE, "HEXAGON"), stable=None)
     sm._advance_search = MagicMock()
 
     sm._do_search_target()
@@ -228,10 +228,10 @@ def test_locked_search_waits_for_locked_type():
 
 
 def test_unlocked_search_waits_for_stabilization():
-    """Kilit yokken geçerli tür (kırmızı üçgen) tespit edildiyse tarama durur
+    """Kilit yokken geçerli tür (mavi altıgen) tespit edildiyse tarama durur
     (stabilize için)."""
     sm, _nav = _search_sm(MissionState.SEARCHING_FIRST_TARGET, None,
-                          [_D(TargetColor.RED, "TRIANGLE", 0.9)],
+                          [_D(TargetColor.BLUE, "HEXAGON", 0.9)],
                           locked=(None, None), stable=None)
     sm._advance_search = MagicMock()
 

@@ -1,23 +1,24 @@
 """
-RED/BLUE hedef ayrımı regression testleri.
+BLUE/RED hedef ayrımı regression testleri.
 
-Görev kuralı (KESİN):
-  1. Önce RED TRIANGLE aranır ve RED akışı TAMAMLANIR.
-  2. Ancak bundan sonra BLUE HEXAGON aranabilir.
+Görev kuralı (KESİN — yeni sıra):
+  1. Önce BLUE HEXAGON aranır ve BLUE akışı TAMAMLANIR.
+  2. Ancak bundan sonra RED TRIANGLE aranabilir.
 
-Bug: RED detection flicker yaptığında (detected → not detected → detected)
-ALIGN fazında BLUE HEXAGON yanlışlıkla AKTİF hedef oluyordu (drone BLUE'ya
-yöneliyor, hatta BLUE'yu first_target olarak kaydedebiliyordu).
+Bug: ilk hedef (BLUE) detection'ı flicker yaptığında (detected → not detected →
+detected) ALIGN fazında diğer tür (RED TRIANGLE) yanlışlıkla AKTİF hedef
+olabiliyordu (drone RED'e yöneliyor, hatta RED'i first_target olarak
+kaydedebiliyordu).
 
 Kök neden (state_machine.py):
-  - _filter_active_detections: kilitli tür (RED) yokken 'locked' listesi boş
-    olunca diğer türleri (BLUE dahil) döndürüyordu.
+  - _filter_active_detections: kilitli tür (BLUE) yokken 'locked' listesi boş
+    olunca diğer türleri (RED dahil) döndürüyordu.
   - _pick_locked_detection: kilitli tür listede yoksa detections[0]'ı
-    (BLUE olabilir) döndürüyordu.
+    (RED olabilir) döndürüyordu.
 
-Kural: BLUE'ya geçiş YALNIZCA RED mission completion flag'i gerçekleşince
-(first_target=RED + payload_released) mümkündür. "RED detected == False" tek
-başına RED'in tamamlandığı anlamına gelmez — flicker ile aynı şeydir.
+Kural: RED'e geçiş YALNIZCA BLUE mission completion flag'i gerçekleşince
+(first_target=BLUE + payload_released) mümkündür. "BLUE detected == False" tek
+başına BLUE'un tamamlandığı anlamına gelmez — flicker ile aynı şeydir.
 """
 import logging
 import time
@@ -69,13 +70,17 @@ def _search_sm(state, first_target, detections, locked=None, stable=None):
     return sm, nav
 
 
-def _align_sm():
-    """ALIGNING_TARGET (kilit RED üçgen) için gerçek SM; detektör mock'lu."""
+def _align_sm(color=TargetColor.BLUE, shape="HEXAGON"):
+    """ALIGNING_TARGET (kilit = ilk hedef türü) için gerçek SM; detektör mock'lu.
+
+    İrtifa 10m: BLUE için şekil-kilit irtifası 8m olduğundan tracking_mode
+    kapalı kalır → gerçek detection/filtre yolu test edilir.
+    """
     from state_machine import MissionStateMachine
 
     nav = MagicMock()
     nav.position.return_value = MagicMock(
-        relative_altitude=5.0, latitude=1.0, longitude=1.0, heading_deg=0.0,
+        relative_altitude=10.0, latitude=1.0, longitude=1.0, heading_deg=0.0,
         battery_voltage_v=24.8, battery_percent=85,
     )
     camera = MagicMock()
@@ -87,8 +92,8 @@ def _align_sm():
     )
     sm.data.state = MissionState.ALIGNING_TARGET
     sm._align_phase = "HORIZONTAL"
-    sm._locked_color, sm._locked_shape = TargetColor.RED, "TRIANGLE"
-    sm.data.pending_detection = _D(TargetColor.RED, "TRIANGLE", 0.85)
+    sm._locked_color, sm._locked_shape = color, shape
+    sm.data.pending_detection = _D(color, shape, 0.85)
     sm._last_align_cmd_t = 0.0
     sm._last_align_status_log_t = time.monotonic()
     sm._no_detection_count = 0
@@ -99,7 +104,7 @@ def _align_sm():
     return sm, nav
 
 
-# ── 1) SEARCH_RED: flicker sırasında BLUE asla aktif hedef olamaz ──────────── #
+# ── 1) SEARCH_BLUE: flicker sırasında RED asla aktif hedef olamaz ──────────── #
 def _fake_stable_detection(n_required: int = 3):
     """Gerçek stable_detection mantığını taklit eder (state_machine'i değil,
     vision/target_detector.py): aynı tipte N ARDIŞIK frame gerekir; farklı tip
@@ -121,14 +126,14 @@ def _fake_stable_detection(n_required: int = 3):
     return fake_stable
 
 
-def test_red_detection_flicker_does_not_activate_blue():
-    """SEARCH_RED: RED detection sequence True,True,False,True,False,False,
+def test_blue_detection_flicker_does_not_activate_red():
+    """SEARCH_BLUE: BLUE detection sequence True,True,False,True,False,False,
     True,True,False,True boyunca (hiçbir zaman 3 ardışık yok → stabilize olamaz):
-      • mission_state SEARCHING_FIRST_TARGET olarak kalır (SEARCH_BLUE'ya geçmez)
-      • aktif hedef (pending/lock) ASLA BLUE olmaz
-    RED yokken görünen BLUE altıgen yalnızca YOKSAYILIR."""
-    d_red = _D(TargetColor.RED, "TRIANGLE", 0.8)
-    d_blue = _D(TargetColor.BLUE, "HEXAGON", 0.9)
+      • mission_state SEARCHING_FIRST_TARGET olarak kalır (SEARCH_RED'e geçmez)
+      • aktif hedef (pending/lock) ASLA RED olmaz
+    BLUE yokken görünen RED üçgen yalnızca YOKSAYILIR."""
+    d_blue = _D(TargetColor.BLUE, "HEXAGON", 0.8)
+    d_red = _D(TargetColor.RED, "TRIANGLE", 0.9)
     sequence = [True, True, False, True, False, False, True, True, False, True]
 
     sm, _nav = _search_sm(MissionState.SEARCHING_FIRST_TARGET, None, [], stable=None)
@@ -137,107 +142,107 @@ def test_red_detection_flicker_does_not_activate_blue():
 
     for present in sequence:
         sm.target_detector.detect.return_value = (
-            [d_red] if present else [d_blue]   # RED yokken mavi görünüyor
+            [d_blue] if present else [d_red]   # BLUE yokken kırmızı görünüyor
         )
         sm._do_search_target()
 
         assert sm.data.state == MissionState.SEARCHING_FIRST_TARGET, \
-            "RED flicker sırasında state SEARCH_RED'de kalmalı (SEARCH_BLUE'ya geçiş yok)"
+            "BLUE flicker sırasında state SEARCH_BLUE'da kalmalı (SEARCH_RED'e geçiş yok)"
         pd = sm.data.pending_detection
         if pd is not None:
-            assert pd.color == TargetColor.RED and pd.shape == "TRIANGLE", \
-                "aktif hedef yalnızca RED TRIANGLE olabilir"
-        assert sm._locked_color in (None, TargetColor.RED), \
-            "kilit asla BLUE olamaz"
+            assert pd.color == TargetColor.BLUE and pd.shape == "HEXAGON", \
+                "aktif hedef yalnızca BLUE HEXAGON olabilir"
+        assert sm._locked_color in (None, TargetColor.BLUE), \
+            "kilit asla RED olamaz"
 
 
-def test_red_stable_detection_still_triggers_mission():
-    """Kontrol: RED gerçekten 3 ardışık frame kararlı görülürse mission NORMAL
-    şekilde TARGET_DETECTED'e geçer (flicker düzeltmesi RED aramasını bozmaz)."""
-    d_red = _D(TargetColor.RED, "TRIANGLE", 0.8)
+def test_blue_stable_detection_still_triggers_mission():
+    """Kontrol: BLUE gerçekten 3 ardışık frame kararlı görülürse mission NORMAL
+    şekilde TARGET_DETECTED'e geçer (flicker düzeltmesi BLUE aramasını bozmaz)."""
+    d_blue = _D(TargetColor.BLUE, "HEXAGON", 0.8)
 
     sm, _nav = _search_sm(MissionState.SEARCHING_FIRST_TARGET, None, [], stable=None)
     sm._advance_search = MagicMock()
     sm.target_detector.stable_detection.side_effect = _fake_stable_detection(3)
-    sm.target_detector.detect.return_value = [d_red]
+    sm.target_detector.detect.return_value = [d_blue]
 
-    for _ in range(3):   # 3 ardışık RED frame
+    for _ in range(3):   # 3 ardışık BLUE frame
         sm._do_search_target()
 
     assert sm.data.state == MissionState.TARGET_DETECTED, \
-        "kararlı RED detection görevi tetiklemeli (mevcut davranış korunur)"
-    assert sm.data.pending_detection.color == TargetColor.RED
+        "kararlı BLUE detection görevi tetiklemeli (mevcut davranış korunur)"
+    assert sm.data.pending_detection.color == TargetColor.BLUE
 
 
-# ── 2) ALIGN (RED): flicker'da BLUE'ya yönelme YOK — gerçek bug ────────────── #
-def test_red_align_flicker_does_not_switch_active_target_to_blue():
-    """ALIGN (RED kilitli): RED flicker yapıp görüntüde yalnızca BLUE varsa:
-      • pending_detection ASLA BLUE olmaz (RED olarak kalır)
+# ── 2) ALIGN (BLUE): flicker'da RED'e yönelme YOK — gerçek bug ─────────────── #
+def test_blue_align_flicker_does_not_switch_active_target_to_red():
+    """ALIGN (BLUE kilitli): BLUE flicker yapıp görüntüde yalnızca RED varsa:
+      • pending_detection ASLA RED olmaz (BLUE olarak kalır)
       • yabancı türe yönelim komutu gönderilmez (_no_detection_count artar)
-    (Bu, _filter_active_detections + _pick_locked_detection'ın BLUE'yu
+    (Bu, _filter_active_detections + _pick_locked_detection'ın RED'i
     sızdırdığı gerçek bug senaryosudur.)"""
-    d_blue = _D(TargetColor.BLUE, "HEXAGON", 0.9, cx=800.0, cy=300.0)
+    d_red = _D(TargetColor.RED, "TRIANGLE", 0.9, cx=800.0, cy=300.0)
 
     sm, _nav = _align_sm()
-    sm.target_detector.detect.return_value = [d_blue]   # RED flicker — yalnızca mavi
+    sm.target_detector.detect.return_value = [d_red]   # BLUE flicker — yalnızca kırmızı
 
     sm._do_align_target()
 
     pd = sm.data.pending_detection
-    assert pd is not None and pd.color == TargetColor.RED and pd.shape == "TRIANGLE", \
-        "pending_detection RED'de kalmalı — BLUE'ya değişmemeli"
+    assert pd is not None and pd.color == TargetColor.BLUE and pd.shape == "HEXAGON", \
+        "pending_detection BLUE'da kalmalı — RED'e değişmemeli"
     assert sm._no_detection_count == 1, \
-        "kilitli tür yoksa 'tespit yok' sayacı artmalı (BLUE'ya yönelim yok)"
+        "kilitli tür yoksa 'tespit yok' sayacı artmalı (RED'e yönelim yok)"
 
 
-def test_red_align_ignores_blue_even_in_mixed_frame():
-    """ALIGN (RED kilitli): RED + BLUE AYNI karedeyken bile aktif hedef RED'dir."""
-    d_red = _D(TargetColor.RED, "TRIANGLE", 0.8, cx=900.0, cy=340.0)
-    d_blue = _D(TargetColor.BLUE, "HEXAGON", 0.95, cx=700.0, cy=280.0)
+def test_blue_align_ignores_red_even_in_mixed_frame():
+    """ALIGN (BLUE kilitli): BLUE + RED AYNI karedeyken bile aktif hedef BLUE'dur."""
+    d_blue = _D(TargetColor.BLUE, "HEXAGON", 0.8, cx=900.0, cy=340.0)
+    d_red = _D(TargetColor.RED, "TRIANGLE", 0.95, cx=700.0, cy=280.0)
 
     sm, _nav = _align_sm()
-    sm.target_detector.detect.return_value = [d_blue, d_red]   # ikisi de görünüyor
+    sm.target_detector.detect.return_value = [d_red, d_blue]   # ikisi de görünüyor
 
     sm._do_align_target()
 
     pd = sm.data.pending_detection
-    assert pd is not None and pd.color == TargetColor.RED, \
-        "karışık karede aktif hedef RED olmalı — BLUE'ya atlanamaz"
+    assert pd is not None and pd.color == TargetColor.BLUE, \
+        "karışık karede aktif hedef BLUE olmalı — RED'e atlanamaz"
     assert sm._no_detection_count == 0
 
 
-# ── 3) BLUE yalnızca RED tamamlandıktan SONRA aktifleşebilir ───────────────── #
-def test_blue_activates_only_after_red_completion():
-    """RED gerçekten tamamlandıktan (first_target=RED TRIANGLE +
-    payload_released) sonra SEARCHING_SECOND_TARGET'te BLUE HEXAGON normal
-    şekilde aday olur ve görevi tetikler (RED→BLUE geçişi korunur)."""
-    first = Target(target_id=1, shape=TargetType.TRIANGLE, color=TargetColor.RED,
+# ── 3) RED yalnızca BLUE tamamlandıktan SONRA aktifleşebilir ───────────────── #
+def test_red_activates_only_after_blue_completion():
+    """BLUE gerçekten tamamlandıktan (first_target=BLUE HEXAGON +
+    payload_released) sonra SEARCHING_SECOND_TARGET'te RED TRIANGLE normal
+    şekilde aday olur ve görevi tetikler (BLUE→RED geçişi korunur)."""
+    first = Target(target_id=1, shape=TargetType.HEXAGON, color=TargetColor.BLUE,
                    latitude=1.0, longitude=1.0, confidence=0.9, payload_released=True)
-    d_blue = _D(TargetColor.BLUE, "HEXAGON", 0.9)
+    d_red = _D(TargetColor.RED, "TRIANGLE", 0.9)
 
     sm, _nav = _search_sm(MissionState.SEARCHING_SECOND_TARGET, first,
-                          [d_blue], stable=d_blue)
+                          [d_red], stable=d_red)
 
     sm._do_search_target()
 
     args = sm.target_detector.stable_detection.call_args[0]
-    assert len(args[0]) == 1 and args[0][0] is d_blue, \
-        "RED tamamlandıktan sonra BLUE hexagon aday olabilmeli"
+    assert len(args[0]) == 1 and args[0][0] is d_red, \
+        "BLUE tamamlandıktan sonra RED üçgen aday olabilmeli"
     assert sm.data.state == MissionState.TARGET_DETECTED
 
 
-def test_red_not_detected_alone_never_means_completion():
-    """'RED detected == False' RED'in TAMAMLANDIĞI anlamına gelmez: RED henüz
-    bulunamamışken BLUE görünse bile state SEARCH_RED'de kalır, TARGET_DETECTED'e
-    geçilmez (yalnızca kararlı RED tespiti görevi tetikler)."""
-    d_blue = _D(TargetColor.BLUE, "HEXAGON", 0.9)
+def test_blue_not_detected_alone_never_means_completion():
+    """'BLUE detected == False' BLUE'un TAMAMLANDIĞI anlamına gelmez: BLUE henüz
+    bulunamamışken RED görünse bile state SEARCH_BLUE'da kalır, TARGET_DETECTED'e
+    geçilmez (yalnızca kararlı BLUE tespiti görevi tetikler)."""
+    d_red = _D(TargetColor.RED, "TRIANGLE", 0.9)
 
     sm, _nav = _search_sm(MissionState.SEARCHING_FIRST_TARGET, None,
-                          [d_blue], stable=None)
+                          [d_red], stable=None)
     sm._advance_search = MagicMock()
 
-    for _ in range(5):   # BLUE sürekli görünüyor, RED hiç yok
+    for _ in range(5):   # RED sürekli görünüyor, BLUE hiç yok
         sm._do_search_target()
 
     assert sm.data.state == MissionState.SEARCHING_FIRST_TARGET, \
-        "RED yokluğu RED tamamlanması değildir — BLUE görevi tetikleyemez"
+        "BLUE yokluğu BLUE tamamlanması değildir — RED görevi tetikleyemez"

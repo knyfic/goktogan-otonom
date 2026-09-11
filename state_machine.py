@@ -41,6 +41,8 @@ from config import (
     ALIGN_TOL_EXIT_FACTOR,
     ALIGN_TOL_HI_PX,
     TARGET_ALIGNED_FRAMES_REQUIRED,
+    TARGET_NO_DETECTION_LIMIT,
+    TARGET_LOST_TIMEOUT_S,
     CAMERA_TO_MECHANISM_OFFSET_M,
     BLUE_PAYLOAD_OFFSET_M,
     RED_PAYLOAD_OFFSET_M,
@@ -199,7 +201,9 @@ class MissionStateMachine:
 
         # ---- Tespit kayıp sayacı: kaç tick üst üste tespit yok ----
         self._no_detection_count: int = 0
-        self._NO_DETECTION_LIMIT: int = 25  # ~0.5s @ 50Hz — komut işleme süresi için tolerans
+        # Eşik config'ten (config.py → TARGET_NO_DETECTION_LIMIT). ~26 Hz →
+        # varsayılan 25 tick ≈ 1.0s. Artırmak için config.py'yi değiştir.
+        self._NO_DETECTION_LIMIT: int = TARGET_NO_DETECTION_LIMIT
 
         # ---- False-positive recovery timeout ----
         # Hedef son gerçekten görüldüğü andan bu kadar saniye geçtiyse (kaba
@@ -207,7 +211,8 @@ class MissionStateMachine:
         # edilir; search pattern'ine (_search_idx/_search_points korunarak,
         # baştan başlamadan) geri dönülür.
         self._last_target_seen_t: float | None = None
-        self._TARGET_LOST_TIMEOUT_S: float = 10.0
+        # Saniye cinsinden eşik config'ten (config.py → TARGET_LOST_TIMEOUT_S).
+        self._TARGET_LOST_TIMEOUT_S: float = TARGET_LOST_TIMEOUT_S
 
         # ---- Hedef kilidi: ilk kararlı tespitte belirlenir ----
         # Görev boyunca aynı türe odaklanmak için kullanılır.

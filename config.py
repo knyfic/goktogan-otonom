@@ -236,6 +236,19 @@ SEARCH_TIMEOUT = 12.0
 TARGET_LOST_TIMEOUT = 2.0
 PAYLOAD_SEARCH_TIMEOUT = 5.0
 
+# ── Hedef kaybı ("kadrajdan çıktı") ayarları ─────────────────────────────
+# Ana döngü ~26 Hz (run(): time.sleep(0.02) + tick maliyeti) → 1 tick ≈ 38 ms.
+#   TARGET_NO_DETECTION_LIMIT: kaç ARDIŞIK tick tespit olmazsa hedef "kayıp"
+#     sayılıp recovery/arama davranışı başlar. 25 tick ≈ 1.0s (mevcut davranış).
+#     Artırmak → hedefin tekrar yakalanması için daha çok süre tanır.
+#   TARGET_LOST_TIMEOUT_S: hedef son gerçekten görülmesinden bu kadar saniye
+#     geçerse "muhtemel false-positive" kabul edilir ve search pattern'ine
+#     (kaldığı yerden) dönülür. 10.0s = mevcut davranış.
+# Varsayılanlar mevcut hard-coded değerlerle AYNIDIR; değiştirmek davranışı
+# değiştirir. state_machine._do_align_target / _do_align_payload kullanır.
+TARGET_NO_DETECTION_LIMIT = 75
+TARGET_LOST_TIMEOUT_S = 10.0
+
 CAMERA_WIDTH_PX = 1920
 CAMERA_HEIGHT_PX = 1080
 CAMERA_HORIZONTAL_FOV_DEG = 66.0

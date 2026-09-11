@@ -49,6 +49,7 @@ from config import (
     MISSION_TIMEOUT_S,
     MAX_PICKUP_ATTEMPTS,
     MAX_PAYLOAD_SIZE_FACTOR,
+    MAX_PAYLOAD_SEARCH_ATTEMPTS,
     MIN_TARGET_AREA_PX,
     OFFSET_CORRECTION_WAIT_S,
     PAYLOAD_ALIGN_TIMEOUT_S,
@@ -245,6 +246,9 @@ class MissionStateMachine:
         # Payload bulunamazsa bu süre sonunda yukarı çıkıp yeniden merkezle.
         # Geçici frame kayıplarında (1-2 tick) tetiklenmez; sadece timeout dolunca.
         self._payload_search_start: float | None = None
+        # Arama döngüsü deneme sayacı (ortala→yüksel→ara): MAX_PAYLOAD_SEARCH_ATTEMPTS
+        # aşılırsa görev başarısız → RTL. Payload bulununca / yeni pickup denemesinde sıfırlanır.
+        self._payload_search_attempts: int = 0
         self._offset_correction_start: float | None = None
         self._offset_phase: str | None = None
         # Offset sonrası dikey aşağı HIZ komutu inişi (LiDAR hatası törpüleme):
@@ -1741,6 +1745,7 @@ class MissionStateMachine:
             return
 
         self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
+        self._payload_search_attempts = 0   # pickup görevi başlangıcı: arama deneme sayacı temiz
         pos_now = self.nav.position()
         self.log.info(
             "Görev 2: İlk hedefe gitme planı: önce irtifa kontrol, sonra GPS->lat=%.7f lon=%.7f",
@@ -1943,10 +1948,22 @@ class MissionStateMachine:
 
         # ── Timeout: PAYLOAD_SEARCH_TIMEOUT kadar bulunamadıysa recovery ─
         if elapsed >= PAYLOAD_SEARCH_TIMEOUT:
+            self._payload_search_attempts += 1
+            if self._payload_search_attempts >= MAX_PAYLOAD_SEARCH_ATTEMPTS:
+                self.log.error(
+                    "Payload arama denemesi aşıldı (%d/%d, %s) — Görev 2 "
+                    "başarısız → RTL.",
+                    self._payload_search_attempts, MAX_PAYLOAD_SEARCH_ATTEMPTS,
+                    self.payload_for_target(target).value,
+                )
+                self.data.mission_failed = True
+                self._goto(MissionState.TASK_2_FAILED)
+                return
             self.log.warning(
-                "Payload %.0fs içinde bulunamadı. "
+                "Payload %.0fs içinde bulunamadı (deneme %d/%d). "
                 "%.1fm'ye çıkılıp hedef yeniden ortalanacak.",
                 PAYLOAD_SEARCH_TIMEOUT,
+                self._payload_search_attempts, MAX_PAYLOAD_SEARCH_ATTEMPTS,
                 PAYLOAD_SEARCH_ALTITUDE,
             )
             self._payload_search_start = None   # sayacı sıfırla
@@ -2005,6 +2022,7 @@ class MissionStateMachine:
         )
         # Başarılı tespit — sayacı sıfırla (bir sonraki arama için temiz başla)
         self._payload_search_start = None
+        self._payload_search_attempts = 0
         self.data.pending_detection = Detection(
             color=best.color, shape="PAYLOAD",
             center_x=best.center_x, center_y=best.center_y,
@@ -3118,6 +3136,7 @@ class MissionStateMachine:
     def _retry_or_fail(self) -> None:
         self._pickup_servo_start = None    # servo bekleme sayacını sıfırla
         self._payload_search_start = None  # payload arama sayacını sıfırla
+        self._payload_search_attempts = 0  # her yeni pickup denemesi: temiz arama bütçesi
         self.payload_tracker.reset()       # tracking geçmişini temizle
         self._reset_ref()                  # referans area temizle
         self._verify_stabilize_start = None

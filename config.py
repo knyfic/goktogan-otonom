@@ -216,6 +216,13 @@ PAYLOAD_HEIGHT = 0.10
 
 MAX_PICKUP_ATTEMPTS = 5
 
+# Payload ARAMA döngüsü (ortala → yüksel → yeniden ara) için deneme hakkı.
+# SEARCHING_PAYLOAD, PAYLOAD_SEARCH_TIMEOUT içinde payload bulamazsa yükselip
+# hedefi yeniden ortalar ve tekrar arar. Bu döngü sonsuza gitmesin diye sayılır;
+# MAX_PAYLOAD_SEARCH_ATTEMPTS'e ulaşınca görev başarısız sayılır (TASK_2_FAILED
+# → RTL). Her döngü ≈ PAYLOAD_SEARCH_TIMEOUT + yükselme + ALIGN_ON_TARGET_TIMEOUT_S.
+MAX_PAYLOAD_SEARCH_ATTEMPTS = 10
+
 # ── Görev modu seçimi ────────────────────────────────────────────────────────
 # ENABLE_RETURN_PICKUP = True  → TAM görev: yükler hedeflere bırakıldıktan sonra
 #                                 ilk hedefteki yükü tekrar alıp ikinci hedefe

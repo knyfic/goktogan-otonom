@@ -48,6 +48,7 @@ from config import (
     TARGET_ALIGNED_FRAMES_REQUIRED,
     TARGET_NO_DETECTION_LIMIT,
     TARGET_LOST_TIMEOUT_S,
+    SECOND_TARGET_PREFETCH_FRAMES,
     CAMERA_TO_MECHANISM_OFFSET_M,
     BLUE_PAYLOAD_OFFSET_M,
     RED_PAYLOAD_OFFSET_M,
@@ -207,6 +208,13 @@ class MissionStateMachine:
         self._pole_waypoints: list[tuple[float, float]] | None = None
         self._pole_idx: int = 0
         self._pole_safe_point: tuple[float, float] | None = None
+
+        # ---- 2. hedef (KIRMIZI ÜÇGEN) ön kayıt ----
+        # İlk arama sırasında kırmızı üçgen PASİF izlenir; yalnızca konumu
+        # saklanır (drop tetiklenmez). İlk hedef tamamlanınca bu konuma
+        # DOĞRUDAN gidilir — 2. hedef için arama yapılmaz.
+        self._prefetched_second_target: Target | None = None
+        self._passive_red_frames: int = 0
 
         # ---- Non-blocking irtifa bekleme ----
         self._alt_target: float | None = None
@@ -1127,7 +1135,14 @@ class MissionStateMachine:
 
         # Frame, kamera katmanından BGR olarak gelir. Detector içinde B↔R takası
         # yapmayız; Gazebo dahil tüm kaynaklarda renk sınıflandırması stabil kalır.
-        detections = self.target_detector.detect(frame)
+        raw_detections = self.target_detector.detect(frame)
+        detections = raw_detections
+
+        # İlk aramada KIRMIZI ÜÇGEN de PASİF izlenir: drop TETİKLENMEDEN yalnızca
+        # konumu önceden kaydedilir (ilk hedef sonrası 2. hedefe arama YAPILMADAN
+        # gidilebilsin). Aktif hedef/akış (MAVİ) DEĞİŞMEZ.
+        if self.data.state == MissionState.SEARCHING_FIRST_TARGET:
+            self._maybe_record_second_target(raw_detections, frame)
 
         # Hedef tipi filtresi — hangi aramada hangi tür kabul edilir:
         #   SEARCHING_FIRST_TARGET  → YALNIZCA MAVİ ALTIGEN (görev planı).
@@ -1236,6 +1251,100 @@ class MissionStateMachine:
             return
 
         self._advance_search()
+
+    # ------------------------------------------------------------------ #
+    def _maybe_record_second_target(self, detections, frame) -> None:
+        """İlk arama sırasında KIRMIZI ÜÇGEN'i PASİF izle — yalnızca konum kaydet.
+
+        Amaç: 2. hedef (kırmızı üçgen) konumu ilk aramada öğrenilsin; ilk hedef
+        (mavi altıgen) tamamlandıktan sonra 2. hedef için ARAMA yapılmasın.
+        Drop/alignment TETİKLENMEZ (state/lock/pending değişmez); ardışık
+        SECOND_TARGET_PREFETCH_FRAMES frame görülünce zemin GPS'i kaydedilir.
+        """
+        if self._prefetched_second_target is not None:
+            return
+        reds = [
+            d for d in detections
+            if d.color == TargetColor.RED and d.shape == "TRIANGLE"
+        ]
+        if not reds:
+            self._passive_red_frames = 0
+            return
+        self._passive_red_frames += 1
+        if self._passive_red_frames < SECOND_TARGET_PREFETCH_FRAMES:
+            return
+
+        best = max(reds, key=lambda d: d.confidence)
+        pos = self.nav.position()
+        ground = self.position_controller.detection_ground_gps(
+            best.center_x, best.center_y,
+            frame.shape[1], frame.shape[0], pos.relative_altitude,
+        )
+        if ground is None:
+            return
+        self._prefetched_second_target = Target(
+            target_id=2, shape=TargetType.TRIANGLE, color=TargetColor.RED,
+            latitude=ground[0], longitude=ground[1], confidence=best.confidence,
+        )
+        self.log.info(
+            "2. HEDEF ÖN KAYIT (KIRMIZI ÜÇGEN): lat=%.7f lon=%.7f güven=%.2f — "
+            "drop tetiklenmedi, yalnızca konum saklandı.",
+            ground[0], ground[1], best.confidence,
+        )
+
+    def _go_to_prefetched_second_target(self) -> None:
+        """İlk arama sırasında ön kaydedilen 2. hedefe DOĞRUDAN git (arama YOK).
+
+        Kilit (renk/şekil) ön kayıtlı 2. hedeftir; mevcut APPROACH/ALIGN akışı
+        canlı kırmızı üçgen tespitini görünce normal bırakma akışını yürütür.
+        """
+        t = self._prefetched_second_target
+        self._locked_color = t.color
+        self._locked_shape = t.shape.value
+        self.target_detector.history.clear()
+        self.target_detector.reset_time_lock()
+        self.data.pending_detection = None
+        self._target_rough_lat = t.latitude
+        self._target_rough_lon = t.longitude
+        self._no_detection_count = 0
+        self._aligned_frame_count = 0
+        self._last_align_cmd_t = 0.0
+        self._align_phase = "HORIZONTAL"
+        # 10s false-positive fallback'ı çalışsın diye "son görülme" sayacını başlat:
+        # ön kayıtlı konumda hedef görülmezse normal 2. aramaya düşülür.
+        self._last_target_seen_t = time.monotonic()
+        self.nav.set_max_speed(APPROACH_SPEED_MPS, VERTICAL_SPEED_MPS)
+        self.log.info(
+            "2. HEDEF ÖN KAYITLI konuma gidiliyor (arama YAPILMADAN): "
+            "lat=%.7f lon=%.7f",
+            t.latitude, t.longitude,
+        )
+        self._goto(MissionState.APPROACHING_TARGET)
+
+    def _start_second_search_resumed(self) -> None:
+        """2. aramayı KALDIĞI YERDEN başlat (baştan başlama YOK).
+
+        İlk search'te bir hedef tespiti (drop) nedeniyle ayrılınan line/waypoint
+        ve ayrılma noktası korunur; İHA oraya dönüp aynı line'dan devam eder —
+        geçilmiş line'lar (ör. line 1) tekrar taranmaz.
+        """
+        saved_idx = self._search_idx
+        saved_resume = (self._search_resume_lat, self._search_resume_lon)
+        # İkinci search, launch konumu yerine İLK PAYLOAD BIRAKMA konumundan başlar.
+        self._init_search(
+            self.data.first_target.latitude,
+            self.data.first_target.longitude,
+        )
+        # İlerleme ve ayrılma noktası KORUNUR (baştan başlanmaz).
+        self._search_idx = saved_idx
+        self._search_resume_lat, self._search_resume_lon = saved_resume
+        if saved_idx or saved_resume[0] is not None:
+            self.log.info(
+                "İkinci arama KALDIĞI YERDEN devam ediyor: line %d/%d "
+                "(baştan başlanmıyor).",
+                saved_idx // 2 + 1, max(1, len(self._search_points) // 2),
+            )
+        self._goto(MissionState.SEARCHING_SECOND_TARGET)
 
     # ------------------------------------------------------------------ #
     def _do_classify(self) -> None:
@@ -1935,12 +2044,13 @@ class MissionStateMachine:
             self.data.mission_failed = True
             self._goto(MissionState.RTL)
             return
-        # İkinci search, launch konumu yerine İLK PAYLOAD BIRAKMA konumundan başlar.
-        self._init_search(
-            self.data.first_target.latitude,
-            self.data.first_target.longitude,
-        )
-        self._goto(MissionState.SEARCHING_SECOND_TARGET)
+        if self._prefetched_second_target is not None:
+            # İlk aramada KIRMIZI ÜÇGEN konumu önceden kaydedildi → 2. hedefe
+            # ARAMA YAPILMADAN doğrudan gidilir.
+            self._go_to_prefetched_second_target()
+            return
+        # Ön kayıt yoksa: mevcut search'te KALDIĞI YERDEN devam (baştan başlama YOK).
+        self._start_second_search_resumed()
 
     # ------------------------------------------------------------------ #
     def _do_navigate_to_first(self) -> None:

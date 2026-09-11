@@ -334,6 +334,13 @@ DETECTION_HISTORY_SIZE = 5
 MIN_STABLE_DETECTIONS = 3
 MIN_DETECTION_CONFIDENCE = 0.60
 
+# ── 2. hedef (KIRMIZI ÜÇGEN) ÖN KAYIT ────────────────────────────────────────
+# İlk arama (MAVİ ALTIGEN) sırasında KIRMIZI ÜÇGEN de PASİF olarak izlenir;
+# yalnızca KONUMU önceden kaydedilir (drop/alignment TETİKLENMEZ). Böylece ilk
+# hedef tamamlandıktan sonra 2. hedef için ARAMA yapılmaz — doğrudan ön kayıtlı
+# konuma gidilir. Kaç ARDIŞIK frame görülünce kaydedileceği:
+SECOND_TARGET_PREFETCH_FRAMES = 3
+
 # Detektör seviyesinde B↔R kanal takası (yalnızca acil durum ağı).
 # Varsayılan KAPALI: kanal takasının sahibi kamera katmanıdır
 # (RPiCam3 — IMX708 için sabit B↔R takası).

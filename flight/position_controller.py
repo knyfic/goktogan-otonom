@@ -60,6 +60,33 @@ class PositionController:
         w = (altitude_m - ALIGN_TOL_ALT_LO_M) / (ALIGN_TOL_ALT_HI_M - ALIGN_TOL_ALT_LO_M)
         return ALIGN_TOL_LO_PX + (ALIGN_TOL_HI_PX - ALIGN_TOL_LO_PX) * w
 
+    def detection_ground_gps(
+        self,
+        center_x: float,
+        center_y: float,
+        image_width: int,
+        image_height: int,
+        altitude_m: float,
+    ) -> tuple[float, float] | None:
+        """Tespitin ZEMİN GPS koordinatı (komut GÖNDERMEZ).
+
+        align_detection ile AYNI piksel→gövde→NED zincirini kullanır; ancak
+        kazanç/adım sınırı UYGULANMAZ (tam offset) — hedefin gerçek zemin
+        konumunu verir. GPS hazır değilse None.
+        """
+        pos = self.navigation.position()
+        if pos.latitude == 0.0 and pos.longitude == 0.0:
+            return None
+        dx = center_x - image_width / 2.0
+        dy = center_y - image_height / 2.0
+        mpp_x, mpp_y = self.camera.meters_per_pixel(altitude_m)
+        forward_m = -dy * mpp_y
+        right_m = dx * mpp_x
+        yaw_rad = math.radians(pos.heading_deg)
+        north_m = forward_m * math.cos(yaw_rad) - right_m * math.sin(yaw_rad)
+        east_m = forward_m * math.sin(yaw_rad) + right_m * math.cos(yaw_rad)
+        return _offset_gps(pos.latitude, pos.longitude, north_m, east_m)
+
     def align_detection(
         self,
         center_x: float,

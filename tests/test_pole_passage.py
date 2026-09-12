@@ -187,8 +187,8 @@ def test_search_not_started_before_safe_point():
     assert sm._search_points == []          # planner hiç kurulmadı
 
 
-# ── 8) SAFE_POINT'e varışta en yakın search line seçilir ──────────────────── #
-def test_finish_selects_nearest_search_line():
+# ── 8) SAFE_POINT'e varışta ORTA line'dan başlanır ──────────────────────────
+def test_finish_starts_from_middle_line():
     sm, nav = _make_sm(*START_SW)
     sm._init_pole_passage()
     safe = sm._pole_safe_point
@@ -204,14 +204,18 @@ def test_finish_selects_nearest_search_line():
     assert sm.data.state == MissionState.SEARCHING_FIRST_TARGET
     # Mevcut 3-line geometrisi korunur → 6 waypoint.
     assert len(sm._search_points) == 6
-    assert sm._search_idx % 2 == 0
+    assert sm._search_idx == 0
 
-    # Seçilen line, SAFE_POINT'e gerçekten en yakın olan mı?
-    px, py = sm._search_field.gps_to_local(*safe)
-    pts = sm._search_points
-    dists = [
-        _point_segment_dist(px, py, pts[i].x_m, pts[i].y_m,
-                            pts[i + 1].x_m, pts[i + 1].y_m)
-        for i in range(0, len(pts) - 1, 2)
-    ]
-    assert sm._search_idx == 2 * dists.index(min(dists))
+    # İlk line ORTA line olmalı (3 line'ın ortancası) — home'dan bağımsız.
+    from config import SEARCH_FOV_WIDTH_M
+    lines = sm._search_field.search_lines_local(SEARCH_FOV_WIDTH_M, 3)
+    mid = lines[1]
+
+    def _is_endpoint(p, seg):
+        return (
+            (abs(p.x_m - seg[0][0]) < 0.5 and abs(p.y_m - seg[0][1]) < 0.5)
+            or (abs(p.x_m - seg[1][0]) < 0.5 and abs(p.y_m - seg[1][1]) < 0.5)
+        )
+
+    p0, p1 = sm._search_points[0], sm._search_points[1]
+    assert _is_endpoint(p0, mid) and _is_endpoint(p1, mid)

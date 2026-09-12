@@ -111,6 +111,7 @@ from payload.payload_controller import PayloadController
 from search.coverage_planner import (
     CompetitionField,
     LawnmowerPlanner,
+    SearchPoint,
     _north_east_m,
     local_to_gps,
 )
@@ -799,8 +800,10 @@ class MissionStateMachine:
             )
 
         # ── 3 uzun search line (FOV tabanlı lawnmower) ──────────────────────
+        # Sıra: ÖNCE ORTA line → home'a UZAK kenar line → home'a YAKIN kenar line
+        # (hedefler genelde alan ortasında; ortadan başlamak daha verimli).
         planner = LawnmowerPlanner(field, SEARCH_FOV_WIDTH_M)
-        self._search_points = planner.generate()
+        self._search_points = self._ordered_search_points(field, ref_lat, ref_lon)
         self._search_yaw_deg = field.search_direction_deg()
         self._search_field = field
         self._search_idx = 0
@@ -822,6 +825,47 @@ class MissionStateMachine:
             start.x_m if start else 0.0, start.y_m if start else 0.0,
             SEARCH_SPEED_MPS, self._search_yaw_deg,
         )
+
+    def _ordered_search_points(self, field, ref_lat, ref_lon) -> list:
+        """3 search line'ı istenen SIRADA waypoint'lere çevirir.
+
+        Sıra: ÖNCE ORTA line → home'a UZAK kenar line → home'a YAKIN kenar line.
+        (Kenar line'ların home'a uzaklığı, line segmentine dik uzaklıkla ölçülür.)
+        Yönler yeni SIRAYA göre ZİG-ZAG (↔) verilir — İHA yaw yapmadan ileri/geri
+        hareket eder. coverage planner geometrisi DEĞİŞMEZ; yalnızca sıra.
+        """
+        lines = field.search_lines_local(SEARCH_FOV_WIDTH_M, 3)
+        if len(lines) != 3:
+            # Beklenmeyen geometri → mevcut (orijinal) sıraya düş.
+            return LawnmowerPlanner(field, SEARCH_FOV_WIDTH_M).generate()
+
+        h_lat, h_lon = self._home_or_reference(ref_lat, ref_lon)
+        hx, hy = field.gps_to_local(h_lat, h_lon)
+
+        def _edge_dist(i: int) -> float:
+            (s, e) = lines[i]
+            return _point_segment_dist(hx, hy, s[0], s[1], e[0], e[1])
+
+        d0, d2 = _edge_dist(0), _edge_dist(2)
+        far, near = (2, 0) if d2 >= d0 else (0, 2)
+        order = [1, far, near]               # orta → uzak → yakın
+
+        pts: list[SearchPoint] = []
+        for pos_i, li in enumerate(order):
+            s, e = lines[li]
+            if pos_i % 2 == 0:
+                pts.extend([SearchPoint(*s), SearchPoint(*e)])
+            else:
+                pts.extend([SearchPoint(*e), SearchPoint(*s)])
+        return pts
+
+    def _home_or_reference(self, ref_lat, ref_lon) -> tuple[float, float]:
+        """Sıralama referansı: home (kalkış) GPS'i varsa O, yoksa verilen ref."""
+        h_lat = getattr(self.nav, "home_lat", None)
+        h_lon = getattr(self.nav, "home_lon", None)
+        if isinstance(h_lat, (int, float)) and isinstance(h_lon, (int, float)):
+            return float(h_lat), float(h_lon)
+        return ref_lat, ref_lon
 
     def _advance_search(self) -> None:
         if not self._search_points or self._search_field is None:
@@ -1098,33 +1142,8 @@ class MissionStateMachine:
             pos.latitude, pos.longitude,
         )
         self._init_search(reference_lat=safe[0], reference_lon=safe[1])
-        idx = self._nearest_search_line_index(safe[0], safe[1])
-        if idx is not None:
-            self._search_idx = idx
-            self.log.info(
-                "SEARCH başlangıç line'ı: %d/%d (SAFE_POINT'e en yakın).",
-                idx // 2 + 1, max(1, len(self._search_points) // 2),
-            )
+        # Sıra _init_search'te kurulur: orta → home'a uzak → home'a yakın.
         self._goto(MissionState.SEARCHING_FIRST_TARGET)
-
-    def _nearest_search_line_index(self, lat: float, lon: float) -> int | None:
-        """SAFE_POINT'e en yakın mevcut search line'ının ilk waypoint indeksi.
-
-        Yeni planner YOK — yalnızca _init_search'te üretilen line'lar arasından
-        seçim yapılır. Her line 2 waypoint'tir (start, end).
-        """
-        if not self._search_points or self._search_field is None:
-            return None
-        px, py = self._search_field.gps_to_local(lat, lon)
-        pts = self._search_points
-        best_idx, best_d = None, float("inf")
-        for i in range(0, len(pts) - 1, 2):
-            d = _point_segment_dist(
-                px, py, pts[i].x_m, pts[i].y_m, pts[i + 1].x_m, pts[i + 1].y_m
-            )
-            if d < best_d:
-                best_d, best_idx = d, i
-        return best_idx
 
     # ------------------------------------------------------------------ #
     def _do_search_target(self) -> None:

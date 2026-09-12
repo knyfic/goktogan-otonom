@@ -229,7 +229,7 @@ COMPETITION_CORNERS = {
 ENABLE_POLE_PASSAGE = True
 POLE_1 = (38.3598341, 38.2613354)
 POLE_2 = (38.3607812, 38.2626078)
-POLE_CLEARANCE_M = 8.0
+POLE_CLEARANCE_M = 16.0
 
 HEXAGON_SIDE_LENGTH = 2.0
 TRIANGLE_SIDE_LENGTH = 1.0
@@ -358,13 +358,13 @@ SEARCH_MARGIN = 2.0
 SEARCH_FOV_WIDTH_M = 12.980
 
 # Arama sırası yatay hız
-SEARCH_SPEED_MPS = 1.5
+SEARCH_SPEED_MPS = 2
 # Hedefe yaklaşma hızı (kaba)
-APPROACH_SPEED_MPS = 1.5
+APPROACH_SPEED_MPS = 1
 # Hizalama sırası yatay hız (ince)
-ALIGN_SPEED_MPS = 1.5
+ALIGN_SPEED_MPS = 0.5
 # İrtifa değişim hızı
-VERTICAL_SPEED_MPS = 1.5
+VERTICAL_SPEED_MPS = 1.0
 # Hedef kaba GPS'ine bu yarıçaptan UZAKTAYKEN APPROACH_SPEED_MPS kullanılır;
 # yarıçapa girince ALIGN_SPEED_MPS'ye düşülüp görüntü hizalaması başlar.
 # (Eski davranış: tüm hedef transit'i 0.8 m/s'de sürünüyordu — bu kapı
@@ -505,7 +505,7 @@ RTL_DISARM_TIMEOUT_S  = 300.0   # disarm bekleme (ek 5 dk)
 # Yarışma görevi maksimum süresi (saniye).
 # Kalkış tamamlandığı anda sayaç başlar.
 # Bu süre dolunca sistem hangi state'te olursa olsun RTL'ye geçer.
-MISSION_TIMEOUT_S = 11 * 60  # 660 saniye
+MISSION_TIMEOUT_S = 7 * 60  # 660 saniye
 
 # ── Pilot takeover (RC flight mode değişikliği) — GÜVENLİK ───────────────────
 # Mission yalnızca GUIDED modda uçar. Pilot RC'den başka bir mod seçerse

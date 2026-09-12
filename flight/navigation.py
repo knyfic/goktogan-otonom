@@ -424,22 +424,31 @@ class Navigation:
             altitude_m,
         )
 
-    def set_max_speed(self, horizontal_mps: float, vertical_mps: float | None = None) -> None:
+    def set_max_speed(
+        self,
+        horizontal_mps: float | None,
+        vertical_mps: float | None = None,
+    ) -> None:
         """
         ArduPilot GUIDED mod hız parametrelerini günder.
         MAV_CMD_DO_CHANGE_SPEED ile yatay hız sınırı belirlenir.
         speed_type=1 = ground speed.
+
+        horizontal_mps=None → yatay hız DEĞİŞTİRİLMEZ (FC'nin mevcut
+        WPNAV_SPEED'i korunur); yalnızca vertical_mps verildiyse dikey limit
+        uygulanır (WPNAV_SPEED_UP/DN).
         """
-        self.master.mav.command_long_send(
-            self.system_id,
-            self.component_id,
-            mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
-            0,
-            1,               # speed_type: 1=ground speed
-            horizontal_mps,  # hedef hız
-            -1,              # throttle: -1=değiştirme
-            0, 0, 0, 0,
-        )
+        if horizontal_mps is not None:
+            self.master.mav.command_long_send(
+                self.system_id,
+                self.component_id,
+                mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+                0,
+                1,               # speed_type: 1=ground speed
+                horizontal_mps,  # hedef hız
+                -1,              # throttle: -1=değiştirme
+                0, 0, 0, 0,
+            )
         if vertical_mps is not None:
             # WPNAV_SPEED_UP / DOWN parametreleri üzerinden ayarlamak için
             # param set kullanırız

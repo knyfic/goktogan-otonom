@@ -207,9 +207,43 @@ def test_prearm_good_starts_existing_mission_flow():
     assert nav.takeoff.call_args[0][0] == TAKEOFF_ALTITUDE
 
 
-def test_takeoff_applies_search_speed_before_takeoff():
-    """Takeoff FC varsayılan hızıyla değil, SEARCH_SPEED_MPS limitiyle başlar —
-    ilk arama takeoff sonrası yüksek hız ataletiyle başlamasın."""
+def test_takeoff_keeps_fc_wpnav_speed_for_pole_passage():
+    """POLE_PASSAGE açıkken kalkış + direk geçişi FC'nin MEVCUT WPNAV_SPEED'i ile
+    yapılır: takeoff'tan ÖNCE yalnızca DİKEY limit uygulanır; SEARCH_SPEED_MPS
+    yatay olarak UYGULANMAZ (arama başlarken _init_search uygular)."""
+    from config import (
+        COMPETITION_CORNERS,
+        TAKEOFF_ALTITUDE,
+        VERTICAL_SPEED_MPS,
+    )
+
+    a = COMPETITION_CORNERS["A"]
+    nav = MagicMock()
+    nav.position.return_value = MagicMock(
+        relative_altitude=TAKEOFF_ALTITUDE, latitude=float(a[0]), longitude=float(a[1]),
+        heading_deg=0.0,
+    )
+    nav.fresh_position.return_value = MagicMock(
+        latitude=float(a[0]), longitude=float(a[1]),
+    )
+    sm = _make_sm(nav)
+    sm._do_takeoff()
+
+    calls = nav.method_calls
+    speed_idx = next(i for i, c in enumerate(calls) if c[0] == "set_max_speed")
+    takeoff_idx = next(i for i, c in enumerate(calls) if c[0] == "takeoff")
+    assert speed_idx < takeoff_idx, "hız limiti takeoff'tan önce uygulanmalı"
+    args = calls[speed_idx][1]
+    assert args[0] is None, "pole geçişinde yatay hız değiştirilmemeli (FC WPNAV_SPEED)"
+    assert args[1] == VERTICAL_SPEED_MPS
+
+
+def test_takeoff_applies_search_speed_when_pole_passage_disabled(monkeypatch):
+    """POLE_PASSAGE kapalıyken eski davranış: SEARCH_SPEED_MPS takeoff'tan ÖNCE."""
+    import state_machine as sm_mod
+
+    monkeypatch.setattr(sm_mod, "ENABLE_POLE_PASSAGE", False)
+
     from config import (
         COMPETITION_CORNERS,
         SEARCH_SPEED_MPS,
@@ -229,11 +263,8 @@ def test_takeoff_applies_search_speed_before_takeoff():
     sm = _make_sm(nav)
     sm._do_takeoff()
 
-    # set_max_speed(SEARCH_SPEED_MPS, VERTICAL_SPEED_MPS) takeoff komutundan ÖNCE
     calls = nav.method_calls
     speed_idx = next(i for i, c in enumerate(calls) if c[0] == "set_max_speed")
-    takeoff_idx = next(i for i, c in enumerate(calls) if c[0] == "takeoff")
-    assert speed_idx < takeoff_idx, "hız limiti takeoff'tan önce uygulanmalı"
     args = calls[speed_idx][1]
     assert args[0] == SEARCH_SPEED_MPS
     assert args[1] == VERTICAL_SPEED_MPS

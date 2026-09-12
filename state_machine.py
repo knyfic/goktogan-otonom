@@ -949,11 +949,16 @@ class MissionStateMachine:
 
     # ------------------------------------------------------------------ #
     def _do_takeoff(self) -> None:
-        # Takeoff FC'nin kendi WPNAV_SPEED varsayılanıyla (≈10 m/s) yapılırsa
-        # ilk arama takeoff sonrası YÜKSEK HIZ ATALETİYLE başlar (fren mesafesi
-        # büyür, dönüşlerde overshoot). Arama hız limitini takeoff'tan ÖNCE
-        # uygula — hem yatay (SEARCH_SPEED_MPS) hem dikey (VERTICAL_SPEED_MPS).
-        self.nav.set_max_speed(SEARCH_SPEED_MPS, VERTICAL_SPEED_MPS)
+        # POLE_PASSAGE açıkken kalkış + direk geçişi FC'nin MEVCUT WPNAV_SPEED'i
+        # ile yapılır: bu fazda yatay hız DEĞİŞTİRİLMEZ (yalnızca dikey limit
+        # uygulanır). SEARCH_SPEED_MPS yalnızca gerçek arama başlarken uygulanır
+        # (_init_search / _return_search).
+        # Pole passage KAPALIYSA eski davranış korunur: arama hız limiti (yatay +
+        # dikey) takeoff'tan ÖNCE uygulanır (yüksek hız ataleti önlenir).
+        if ENABLE_POLE_PASSAGE:
+            self.nav.set_max_speed(None, VERTICAL_SPEED_MPS)
+        else:
+            self.nav.set_max_speed(SEARCH_SPEED_MPS, VERTICAL_SPEED_MPS)
         self.nav.takeoff(TAKEOFF_ALTITUDE)
         deadline = time.monotonic() + TAKEOFF_TIMEOUT
         while time.monotonic() < deadline:

@@ -111,3 +111,38 @@ def test_heartbeat_ok_does_not_consume_messages():
     nav = _make_nav_with_age(age_s=0.1)
     nav.heartbeat_ok(10.0)
     nav.master.recv_match.assert_not_called()
+
+
+# ── 3) set_max_speed: None yatay → WPNAV_SPEED korunur ─────────────────────── #
+def _bare_nav() -> Navigation:
+    nav = object.__new__(Navigation)
+    nav.system_id = 1
+    nav.component_id = 1
+    nav.master = MagicMock()
+    return nav
+
+
+def test_set_max_speed_none_horizontal_skips_do_change_speed():
+    """horizontal_mps=None → DO_CHANGE_SPEED GÖNDERİLMEZ (FC WPNAV_SPEED
+    korunur); yalnızca dikey WPNAV_SPEED_UP/DN set edilir."""
+    nav = _bare_nav()
+
+    nav.set_max_speed(None, 1.0)
+
+    nav.master.mav.command_long_send.assert_not_called()
+    params = {
+        c.args[2]: c.args[3]
+        for c in nav.master.mav.param_set_send.call_args_list
+    }
+    assert params[b"WPNAV_SPEED_UP"] == 100
+    assert params[b"WPNAV_SPEED_DN"] == 100
+
+
+def test_set_max_speed_horizontal_sends_do_change_speed():
+    """horizontal verilirse DO_CHANGE_SPEED gönderilir (mevcut davranış)."""
+    nav = _bare_nav()
+
+    nav.set_max_speed(2.0)          # yalnızca yatay
+
+    assert nav.master.mav.command_long_send.call_count == 1
+    nav.master.mav.param_set_send.assert_not_called()
